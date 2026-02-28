@@ -104,8 +104,6 @@ class ServingPipeline:
         mcp_client=None,
         archetype_classifier: ArchetypeClassifier | None = None,
     ):
-<<<<<<< HEAD
-=======
         """
         Args:
             recipes: dict mapping recipe_name → {ingredients: {name: qty}, prestige, prep_time, ...}
@@ -114,7 +112,6 @@ class ServingPipeline:
             mcp_client: datapizza MCPClient for MCP calls
             archetype_classifier: LLM-based archetype classifier (Regolo gpt-oss-120b)
         """
->>>>>>> 8393507 (added the archetipe classificator)
         self.recipes = recipes
         self.intolerance_detector = intolerance_detector
         self.client_library = client_library
