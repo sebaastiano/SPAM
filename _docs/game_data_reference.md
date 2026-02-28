@@ -2,8 +2,7 @@
 
 **Team:** SPAM!  
 **Team ID:** 17  
-**API Key:** `dTpZhKpZ02-4ac2be8821b52df78bf06070`  
-**Server:** `https://hackapizza.datapizza.tech`
+
 
 ---
 
