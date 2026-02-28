@@ -50,6 +50,7 @@ from src.memory.client_profile import (
 
 # Serving
 from src.serving.pipeline import ServingPipeline
+from src.serving.archetype_classifier import ArchetypeClassifier
 
 # Intelligence
 from src.intelligence.tracker_bridge import TrackerBridge
@@ -145,11 +146,13 @@ class GameOrchestrator:
         )
 
         # ── Serving ──
+        self.archetype_classifier = ArchetypeClassifier(client=self.primary_client)
         self.serving = ServingPipeline(
             recipes={},  # set after recipes loaded
             intolerance_detector=self.intolerance_detector,
             client_library=self.client_library,
             mcp_client=self.mcp_client,
+            archetype_classifier=self.archetype_classifier,
         )
 
         # ── Decision ──
@@ -599,7 +602,7 @@ class GameOrchestrator:
         self.serving.set_menu([])
         await self.phase_router.handle_game_reset(data)
         self.skill_orchestrator.new_turn()
-        # archetype_classifier removed (poll-driven v2)
+        self.archetype_classifier.clear_cache()
         self.phase_router.current_phase = None
         self.phase_router.current_turn = 0
         # Keep: competitor_memory, client_library, event_log, message_log
@@ -617,7 +620,7 @@ class GameOrchestrator:
         if self.phase_router.current_phase != "serving":
             logger.warning("client_spawned outside serving phase — ignoring")
             return
-        await self.serving.handle_client_spawned(data)
+        await self.serving.handle_client(data)
 
     async def _handle_preparation_complete(self, data: dict):
         """Handle preparation_complete SSE event."""
