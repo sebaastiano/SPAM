@@ -9,7 +9,7 @@
 curl -s -H "x-api-key: dTpZhKpZ02-4ac2be8821b52df78bf06070" \
   "https://hackapizza.datapizza.tech/restaurants" | python3 -m json.tool
 ```
-Returns: `id`, `name`, `balance`, `inventory`, `reputation`, `isOpen`, `kitchen`, `menu`, `receivedMessages` for every team.
+Returns: `id`, `name`, `balance`, `inventory`, `reputation`, `isOpen`, `kitchen`, `menu` for every team.
 
 ---
 
@@ -156,7 +156,6 @@ curl -s -X POST \
   }' \
   "https://hackapizza.datapizza.tech/mcp" | python3 -m json.tool
 ```
-`client_id` comes from the `client_spawned` SSE event.
 
 ---
 
@@ -264,9 +263,9 @@ curl -N -H "x-api-key: dTpZhKpZ02-4ac2be8821b52df78bf06070" \
 
 | Event | Recipient | Key fields |
 |---|---|---|
-| `game_started` | broadcast | `turn_id` |
+| `game_started` | broadcast | `{}` |
 | `game_phase_changed` | broadcast | `phase`: speaking → closed_bid → waiting → serving → stopped |
-| `client_spawned` | your team only | `clientName`, `orderText`, `client_id` |
+| `client_spawned` | your team only | `clientName`, `orderText` |
 | `preparation_complete` | your team only | `dish` |
 | `message` | broadcast | `sender`, `payload` |
 | `new_message` | your team only | `messageId`, `senderId`, `senderName`, `text`, `datetime` |
