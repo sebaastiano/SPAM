@@ -313,9 +313,25 @@ The `client_spawned` SSE event gives us only two fields (confirmed by INSTR, API
 
 **Critical:** `client_id` (required by `serve_dish`) is **NOT** included in `client_spawned`. It must be retrieved via `GET /meals?turn_id=<id>&restaurant_id=17`, which returns client requests with their respective IDs plus an `executed` boolean. This means we must poll `/meals` during the serving phase to obtain `client_id` before we can call `serve_dish`.
 
-> **Source discrepancy:** The API reference labels `client_id` as `"CLIENT_ID_FROM_SSE"` in its `serve_dish` example, but the official SSE event table lists only `clientName` and `orderText` under `client_spawned`. Where exactly `client_id` appears at runtime is not confirmed — `/meals` is the only documented source.
+> **✅ CONFIRMED (28 Feb 2026):** `client_id` is definitively sourced from `GET /meals`. The `client_spawned` SSE event contains only `clientName` and `orderText` — no `client_id`. The API reference note labelling it `"CLIENT_ID_FROM_SSE"` is misleading; the endpoint `/meals` is the one and only source at runtime.
 
 Additionally, no source confirms that `clientName` values map directly to the 4 archetype names (Esploratore Galattico, Astrobarone, Saggi del Cosmo, Famiglie Orbitali). We must handle unknown/unexpected `clientName` values gracefully.
+
+> **✅ CONFIRMED (28 Feb 2026) — Missing `new_message` handler in `client_template.py`:** The base `EVENT_HANDLERS` dict in `client_template.py` is missing the `"new_message"` entry. Inter-team messages arrive as a `new_message` SSE event, **not** as `"message"`. Without this handler, all incoming diplomatic messages from other teams are silently dropped. The fix is:
+>
+> ```python
+> EVENT_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {
+>     "game_started": game_started,
+>     "game_phase_changed": game_phase_changed,
+>     "game_reset": game_reset,
+>     "client_spawned": client_spawned,
+>     "preparation_complete": preparation_complete,
+>     "message": message,
+>     "new_message": new_message,   # ← REQUIRED — handles inter-team messages
+> }
+> ```
+>
+> A corresponding `async def new_message(data: dict[str, Any]) -> None:` handler must also be implemented to process the payload.
 
 Across turns we can **observe patterns** and build profiles:
 

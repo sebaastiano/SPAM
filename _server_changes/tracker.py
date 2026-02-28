@@ -306,31 +306,36 @@ def _poll_market():
 def _poll_meals():
     with state_lock:
         turn_id = state.get("turn_id")
-    if not turn_id:
+        restaurant_ids = list(state["restaurants"].keys())
+    if not turn_id or not restaurant_ids:
         return
-    data = api_get("/meals", params={"turn_id": turn_id, "restaurant_id": TEAM_ID})
-    if not data:
-        return
-    meals = data if isinstance(data, list) else data.get("meals", [])
-    with state_lock:
-        for m in meals:
-            mid = m.get("id") or m.get("client_id")
-            key = (turn_id, mid)
-            flat_new = {
-                "client_id": m.get("client_id"),
-                "order": m.get("orderText") or m.get("order"),
-                "executed": m.get("executed"),
-                "dish": m.get("dish_name") or m.get("dish"),
-            }
-            flat_old = state["meals"].get(key)
-            if flat_old is None:
-                state["meals"][key] = flat_new
-                push_event("meal_new", {"turn": turn_id, "meal": flat_new})
-            else:
-                changes = diff_dict(flat_old, flat_new, f"meal#{mid}")
-                if changes:
+    for rid in restaurant_ids:
+        data = api_get("/meals", params={"turn_id": turn_id, "restaurant_id": rid})
+        if not data:
+            continue
+        meals = data if isinstance(data, list) else data.get("meals", [])
+        with state_lock:
+            rname = state["restaurants_names"].get(rid, f"team {rid}")
+            for m in meals:
+                mid = m.get("id") or m.get("client_id")
+                key = (turn_id, rid, mid)
+                flat_new = {
+                    "restaurant_id": rid,
+                    "restaurant_name": rname,
+                    "client_id": m.get("client_id"),
+                    "order": m.get("orderText") or m.get("order"),
+                    "executed": m.get("executed"),
+                    "dish": m.get("dish_name") or m.get("dish"),
+                }
+                flat_old = state["meals"].get(key)
+                if flat_old is None:
                     state["meals"][key] = flat_new
-                    push_event("meal_changed", {"turn": turn_id, "changes": changes, "meal": flat_new})
+                    push_event("meal_new", {"turn": turn_id, "restaurant_id": rid, "restaurant_name": rname, "meal": flat_new})
+                else:
+                    changes = diff_dict(flat_old, flat_new, f"meal#{mid}")
+                    if changes:
+                        state["meals"][key] = flat_new
+                        push_event("meal_changed", {"turn": turn_id, "restaurant_id": rid, "restaurant_name": rname, "changes": changes, "meal": flat_new})
 
 
 def _poll_bid_history():
@@ -529,11 +534,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <!-- Meals table -->
     <div class="panel">
-      <div class="panel-header">🍽️ OUR MEALS (this turn) <span class="badge" id="meal-count">0</span></div>
+      <div class="panel-header">🍽️ ALL TEAMS' MEALS (this turn) <span class="badge" id="meal-count">0</span></div>
       <div class="table-scroll">
         <table id="meal-table">
           <thead>
-            <tr><th>CLIENT</th><th>ORDER</th><th>DISH</th><th>SERVED</th></tr>
+            <tr><th>TEAM</th><th>CLIENT</th><th>ORDER</th><th>DISH</th><th>SERVED</th></tr>
           </thead>
           <tbody id="meal-tbody"></tbody>
         </table>
@@ -609,7 +614,7 @@ function handleEvent(evt) {
   else if (type === 'market_new_entry') updateMarket(data.id, data.entry, false);
   else if (type === 'market_changed') updateMarket(data.id, data.entry, true);
   else if (type === 'market_removed') removeMarket(data.id);
-  else if (type === 'meal_new' || type === 'meal_changed') updateMeal(data.meal);
+  else if (type === 'meal_new' || type === 'meal_changed') updateMeal(data);
   else if (type === 'sse_event') {
     if (data.event === 'game_phase_changed') {
       setPhase(data.payload.phase);
@@ -658,9 +663,9 @@ function formatEvent(type, data) {
     case 'market_removed':
       return `Market #${data.id} removed (${data.entry.ingredient_name})`;
     case 'meal_new':
-      return `New client — ${data.meal.order||'?'} (id:${data.meal.client_id})`;
+      return `[${data.restaurant_name||'team '+data.restaurant_id}] New client — ${data.meal.order||'?'} (id:${data.meal.client_id})`;
     case 'meal_changed':
-      return `Meal updated: ${data.changes.map(c=>`${c.field}: ${c.old}→${c.new}`).join(', ')}`;
+      return `[${data.restaurant_name||'team '+data.restaurant_id}] Meal updated: ${data.changes.map(c=>`${c.field}: ${c.old}→${c.new}`).join(', ')}`;
     case 'bid_history':
       return `Bid: ${JSON.stringify(data.bid)}`;
     case 'system':
@@ -974,21 +979,30 @@ function removeMarket(id) {
 }
 
 // ── Meals table ────────────────────────────────
-function updateMeal(meal) {
-  meals[meal.client_id] = meal;
+function updateMeal(data) {
+  const meal = data.meal || data;
+  const rid = data.restaurant_id || meal.restaurant_id || '?';
+  const rname = data.restaurant_name || meal.restaurant_name || `team ${rid}`;
+  const rowKey = `meal-${rid}-${meal.client_id}`;
+  meals[rowKey] = meal;
   const tbody = document.getElementById('meal-tbody');
-  let row = document.getElementById(`meal-${meal.client_id}`);
+  let row = document.getElementById(rowKey);
   const srvCls = meal.executed ? 'up' : 'muted';
   const srvTxt = meal.executed ? '✅ YES' : '⏳ NO';
+  const isUs = String(rid) === '17';
+  const teamCell = isUs
+    ? `<td style="color:var(--accent);font-weight:bold;white-space:nowrap">★ ${escHtml(rname)}</td>`
+    : `<td style="color:var(--blue);white-space:nowrap">${escHtml(rname)}</td>`;
   const inner = `
-    <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis">${escHtml(String(meal.client_id||''))}</td>
-    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:normal">${escHtml(meal.order||'')}</td>
+    ${teamCell}
+    <td style="max-width:90px;overflow:hidden;text-overflow:ellipsis">${escHtml(String(meal.client_id||''))}</td>
+    <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:normal">${escHtml(meal.order||'')}</td>
     <td>${escHtml(meal.dish||'—')}</td>
     <td class="${srvCls}">${srvTxt}</td>
   `;
   if (!row) {
     row = document.createElement('tr');
-    row.id = `meal-${meal.client_id}`;
+    row.id = rowKey;
     tbody.insertBefore(row, tbody.firstChild);
   }
   row.innerHTML = inner;
@@ -1016,21 +1030,28 @@ from flask import jsonify, request as flask_request
 @app.route("/api/restaurant/<rid>")
 def api_restaurant_detail(rid):
     """Return full live detail for a restaurant (raw + change log + meals)."""
-    # Fetch fresh data directly from the game server
-    raw = api_get(f"/restaurant/{rid}")
+    rid_int = int(rid)
+    # Only our own team returns data from /restaurant/{id} — others give 403
+    raw = api_get(f"/restaurant/{rid}") if rid_int == TEAM_ID else None
     menu_data = api_get(f"/restaurant/{rid}/menu")
     with state_lock:
         change_log = list(state["restaurants_changes"].get(rid, []))
         turn_id = state.get("turn_id")
-
-    # Meals for this restaurant this turn (only works for our own team or public endpoint)
-    meals = []
-    if turn_id:
-        meal_data = api_get("/meals", params={"turn_id": turn_id, "restaurant_id": int(rid)})
-        if isinstance(meal_data, list):
-            meals = meal_data
-        elif isinstance(meal_data, dict):
-            meals = meal_data.get("meals", [])
+        # Serve meals from the in-memory cache (already polled for all teams)
+        meals = [
+            v for (t, r, _), v in state["meals"].items()
+            if r == rid_int and t == turn_id
+        ]
+        # If not yet in cache (e.g. poller hasn't run), fall back to live fetch
+        if not meals and turn_id:
+            raw_meals = api_get("/meals", params={"turn_id": turn_id, "restaurant_id": rid_int})
+            if isinstance(raw_meals, list):
+                meals = raw_meals
+            elif isinstance(raw_meals, dict):
+                meals = raw_meals.get("meals", [])
+        # Supplement with the cached raw restaurant data if we don't have /restaurant/{rid}
+        if raw is None:
+            raw = state["restaurants_raw"].get(rid_int) or state["restaurants_raw"].get(rid)
 
     return jsonify({
         "raw": raw,
