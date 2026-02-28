@@ -1,60 +1,106 @@
 """
-SubagentRouter — dispatches game operations to the active zone's
-subagent (or direct ILP-driven logic).
+SPAM! — Subagent Router
+=========================
+Routes strategy execution to zone-specific datapizza Agents.
+Each zone has its own Agent with tailored system prompt.
 """
 
-from __future__ import annotations
-
 import logging
-from typing import Any
 
-from src.config import DEFAULT_ZONE, ZONES
-from src.decision.ilp_solver import solve_zone_ilp
+from datapizza.agents import Agent
+from datapizza.clients.openai_like import OpenAILikeClient
+from datapizza.tools.mcp_client import MCPClient
+
+from src.config import (
+    REGOLO_API_KEY,
+    REGOLO_BASE_URL,
+    PRIMARY_MODEL,
+    MCP_URL,
+    HEADERS,
+    ZONES,
+    ZONE_SYSTEM_PROMPTS,
+)
 from src.decision.zone_selector import select_zone
-from src.models import GameState, Recipe, ZoneDecision
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger("spam.decision.subagent_router")
 
 
 class SubagentRouter:
-    """Routes each turn's strategic decisions through the ILP-driven
-    zone selector, then executes the zone-specific plan."""
+    """
+    Routes strategy execution to zone-specific datapizza Agents.
 
-    def __init__(self) -> None:
-        self.active_zone: str = DEFAULT_ZONE
-        self._last_decision: ZoneDecision | None = None
+    Each zone maps to a datapizza-ai Agent with zone-specific:
+    - System prompt (target archetypes, pricing, risk tolerance)
+    - MCP tools (same for all, but prompt constrains usage)
+    """
 
-    def select(
+    def __init__(self, mcp_tools: list = None, extra_tools: list = None):
+        self.zones: dict[str, Agent] = {}
+        self.active_zone: str = "SPEED_CONTENDER"
+        self._mcp_tools = mcp_tools or []
+        self._extra_tools = extra_tools or []
+        self._initialized = False
+
+    def initialize(self, mcp_tools: list = None):
+        """Create agents for all zones."""
+        if self._initialized:
+            return
+
+        if mcp_tools is not None:
+            self._mcp_tools = mcp_tools
+
+        all_tools = self._mcp_tools + self._extra_tools
+
+        for zone in ZONES:
+            prompt = ZONE_SYSTEM_PROMPTS.get(zone, "")
+            client = OpenAILikeClient(
+                api_key=REGOLO_API_KEY,
+                model=PRIMARY_MODEL,
+                base_url=REGOLO_BASE_URL,
+                system_prompt=prompt,
+            )
+            agent = Agent(
+                name=zone.lower(),
+                client=client,
+                tools=all_tools,
+                max_steps=5,
+                terminate_on_text=True,
+                planning_interval=0,
+            )
+            self.zones[zone] = agent
+
+        self._initialized = True
+        logger.info(f"Initialized {len(self.zones)} zone agents")
+
+    def route(
         self,
-        game_state: GameState,
-        clusters: dict[int, str],
-        briefings: dict[int, dict],
+        balance: float,
+        inventory: dict,
+        reputation: float,
+        recipes: list[dict],
+        competitor_clusters: dict,
+        competitor_briefings: dict,
     ) -> str:
-        """Pick the best zone for this turn and return its name."""
+        """
+        Select the active zone for this turn using ILP zone classification.
+
+        Returns the zone name.
+        """
         self.active_zone = select_zone(
-            game_state, clusters, briefings
+            balance=balance,
+            inventory=inventory,
+            reputation=reputation,
+            recipes=recipes,
+            competitor_clusters=competitor_clusters,
+            competitor_briefings=competitor_briefings,
         )
-        log.info("Zone selected: %s", self.active_zone)
+        logger.info(f"Active zone: {self.active_zone}")
         return self.active_zone
 
-    def plan(
-        self,
-        game_state: GameState,
-        recipes: dict[str, Recipe],
-        demand_forecast: dict[str, float] | None = None,
-        briefings: dict[int, dict] | None = None,
-    ) -> ZoneDecision:
-        """Generate the ILP-driven plan for the active zone."""
-        decision = solve_zone_ilp(
-            zone=self.active_zone,
-            game_state=game_state,
-            recipes=recipes,
-            demand_forecast=demand_forecast,
-            briefings=briefings,
-        )
-        self._last_decision = decision
-        return decision
+    def get_active_agent(self) -> Agent | None:
+        """Get the active zone's agent."""
+        return self.zones.get(self.active_zone)
 
-    @property
-    def last_decision(self) -> ZoneDecision | None:
-        return self._last_decision
+    def get_agent(self, zone: str) -> Agent | None:
+        """Get a specific zone's agent."""
+        return self.zones.get(zone)

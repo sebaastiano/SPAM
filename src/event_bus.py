@@ -1,9 +1,9 @@
 """
-ReactiveEventBus — typed event dispatch with priority routing and
-middleware support.
+SPAM! — Reactive Event Bus
+===========================
+Event-driven agent activation layer connecting SSE streams to handlers.
+Typed routing with priority and middleware support.
 """
-
-from __future__ import annotations
 
 import asyncio
 import json
@@ -12,137 +12,160 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
-log = logging.getLogger(__name__)
+from src.config import SSE_URL, HEADERS, API_KEY, TEAM_ID, BASE_URL
 
-Handler = Callable[[dict[str, Any]], Awaitable[None]]
-Middleware = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
+logger = logging.getLogger("spam.event_bus")
+
+Middleware = Callable[[str, dict], Awaitable[dict | None]]
 
 
-class _HandlerEntry:
-    __slots__ = ("handler", "priority", "filter_fn")
+class EventHandler:
+    """Typed event handler with priority and filtering."""
 
     def __init__(
         self,
-        handler: Handler,
+        event_type: str,
+        handler: Callable[[dict], Awaitable[None]],
         priority: int = 0,
         filter_fn: Callable[[dict], bool] | None = None,
-    ) -> None:
+    ):
+        self.event_type = event_type
         self.handler = handler
         self.priority = priority
         self.filter_fn = filter_fn
 
 
 class ReactiveEventBus:
-    """Push-based event bus that bridges SSE events to async handlers.
+    """
+    Event-driven agent activation layer.
 
-    Usage::
+    Extends the framework pattern to support push-based SSE architectures.
+    Dispatches events through middleware chain then to prioritised handlers.
 
+    Usage:
         bus = ReactiveEventBus()
-        bus.on("client_spawned", my_handler, priority=0)
-        bus.use(logging_middleware)
-        await bus.connect_sse(url, headers)
+        bus.on("client_spawned", handle_client, priority=0)
+        bus.on("new_message", handle_message, priority=1)
+        bus.on("game_phase_changed", phase_router, priority=0)
+
+        # Connect to SSE stream
+        await bus.connect_sse()
     """
 
-    def __init__(self) -> None:
-        self._handlers: dict[str, list[_HandlerEntry]] = {}
-        self._middleware: list[Middleware] = []
-
-    # ── Registration ──────────────────────────────────────────────
+    def __init__(self):
+        self.handlers: dict[str, list[EventHandler]] = {}
+        self.middleware: list[Middleware] = []
+        self._connected = False
 
     def on(
         self,
         event_type: str,
-        handler: Handler,
+        handler: Callable[[dict], Awaitable[None]],
         priority: int = 0,
         filter_fn: Callable[[dict], bool] | None = None,
-    ) -> None:
-        entry = _HandlerEntry(handler, priority, filter_fn)
-        self._handlers.setdefault(event_type, []).append(entry)
-        self._handlers[event_type].sort(key=lambda e: e.priority)
+    ):
+        """Register a handler for an event type."""
+        if event_type not in self.handlers:
+            self.handlers[event_type] = []
+        self.handlers[event_type].append(
+            EventHandler(event_type, handler, priority, filter_fn)
+        )
+        # Sort by priority (lower = higher priority)
+        self.handlers[event_type].sort(key=lambda h: h.priority)
 
-    def use(self, middleware: Middleware) -> None:
-        self._middleware.append(middleware)
+    def use(self, middleware: Middleware):
+        """Add middleware (e.g., GroundTruthFirewall, EventLog)."""
+        self.middleware.append(middleware)
 
-    # ── Dispatch ──────────────────────────────────────────────────
-
-    async def emit(self, event_type: str, data: dict[str, Any]) -> None:
-        """Run middleware chain, then dispatch to registered handlers."""
-        for mw in self._middleware:
+    async def emit(self, event_type: str, data: dict):
+        """Dispatch an event through middleware then to handlers."""
+        # Run through middleware chain
+        for mw in self.middleware:
             result = await mw(event_type, data)
             if result is None:
-                return  # middleware blocked
+                return  # middleware blocked the event
             data = result
 
-        for entry in self._handlers.get(event_type, []):
-            if entry.filter_fn and not entry.filter_fn(data):
+        # Dispatch to registered handlers
+        for handler in self.handlers.get(event_type, []):
+            if handler.filter_fn and not handler.filter_fn(data):
                 continue
             try:
-                await entry.handler(data)
-            except Exception as exc:
-                log.error("Handler error for %s: %s", event_type, exc, exc_info=True)
+                await handler.handler(data)
+            except Exception as e:
+                logger.error(f"Handler error for {event_type}: {e}", exc_info=True)
 
-    # ── SSE Connection ────────────────────────────────────────────
-
-    async def connect_sse(
-        self,
-        url: str,
-        headers: dict[str, str],
-        retry_delay: float = 2.0,
-    ) -> None:
-        """Connect to SSE stream and dispatch events.
+    async def connect_sse(self, retry_delay: float = 2.0):
+        """
+        Connect to the game's SSE stream and dispatch events.
 
         Handles:
-          409 → wait and retry (only one SSE connection per restaurant)
-          401/403/404 → fatal
-          Network errors → reconnect with backoff
+          409 — connection already active (wait and retry)
+          401/403/404 — fatal errors
+          Network errors — reconnect with backoff
         """
-        timeout = aiohttp.ClientTimeout(
-            total=None, sock_connect=15, sock_read=None
-        )
+        url = f"{BASE_URL}/events/{TEAM_ID}"
+        headers = {
+            "Accept": "text/event-stream",
+            "x-api-key": API_KEY,
+        }
 
         while True:
             try:
+                timeout = aiohttp.ClientTimeout(
+                    total=None, sock_connect=15, sock_read=None
+                )
                 async with aiohttp.ClientSession(timeout=timeout) as session:
+                    logger.info(f"Connecting to SSE at {url}")
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 409:
-                            log.warning("SSE 409: another connection active, retrying in %.0fs", retry_delay)
+                            logger.warning("SSE 409 — another connection active, retrying...")
                             await asyncio.sleep(retry_delay)
                             continue
                         if resp.status in (401, 403, 404):
+                            logger.error(f"SSE fatal error: HTTP {resp.status}")
                             resp.raise_for_status()
 
-                        log.info("SSE connected to %s", url)
-                        async for raw_line in resp.content:
-                            await self._handle_line(raw_line)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                log.warning("SSE connection lost (%s), reconnecting…", exc)
+                        logger.info("SSE connection established")
+                        self._connected = True
+
+                        async for line in resp.content:
+                            await self._handle_line(line)
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(f"SSE disconnected: {e} — reconnecting in {retry_delay}s")
+                self._connected = False
                 await asyncio.sleep(retry_delay)
                 continue
-            except Exception as exc:
-                log.error("SSE fatal error: %s", exc, exc_info=True)
-                raise
+            except Exception as e:
+                logger.error(f"SSE unexpected error: {e}", exc_info=True)
+                self._connected = False
+                await asyncio.sleep(retry_delay)
+                continue
+
             break  # clean exit
 
-    # ── Line parsing (from template DANGER ZONE) ──────────────────
-
-    async def _handle_line(self, raw_line: bytes) -> None:
+    async def _handle_line(self, raw_line: bytes):
+        """Parse a single SSE line and dispatch."""
         if not raw_line:
             return
+
         line = raw_line.decode("utf-8", errors="ignore").strip()
         if not line:
             return
 
+        # Standard SSE data format: data: ...
         if line.startswith("data:"):
             payload = line[5:].strip()
             if payload == "connected":
-                log.info("SSE handshake: connected")
+                logger.info("SSE connected acknowledgement")
                 return
             line = payload
 
         try:
             event_json = json.loads(line)
         except json.JSONDecodeError:
-            log.debug("SSE raw: %s", line[:120])
+            logger.debug(f"SSE raw: {line}")
             return
 
         event_type = event_json.get("type", "unknown")
@@ -151,3 +174,7 @@ class ReactiveEventBus:
             event_data = {"value": event_data}
 
         await self.emit(event_type, event_data)
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected

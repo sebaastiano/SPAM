@@ -1,6 +1,8 @@
 """
-Intolerance module — re-exports ``IntoleranceDetector`` from memory
-for convenience (serving pipeline imports from here).
+SPAM! — Intolerance Detector
+==============================
+Re-export from client_profile for backward compatibility.
+The IntoleranceDetector is defined in memory/client_profile.py.
 """
 
 from src.memory.client_profile import IntoleranceDetector

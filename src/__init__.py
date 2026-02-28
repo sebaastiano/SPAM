@@ -1,2 +1,1 @@
-# SPAM! — Zone-Based Subagent System
-# Team 17 — Hackapizza 2.0
+# SPAM! — Hackapizza 2.0 Agent

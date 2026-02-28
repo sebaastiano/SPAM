@@ -1,122 +1,189 @@
 """
-Diplomacy agent — orchestrates message sending using the
-DeceptionBandit, PseudoGAN, and GroundTruthFirewall.
+SPAM! — Diplomacy Agent
+=========================
+Orchestrates DeceptionBandit + PseudoGAN + GroundTruthFirewall.
+Manages all outbound/inbound diplomatic communications.
 """
 
-from __future__ import annotations
-
-import json
 import logging
-from typing import Any
 
-import aiohttp
+from datapizza.tools.mcp_client import MCPClient
 
-from src.config import BASE_URL, HEADERS
+from src.config import MCP_URL, HEADERS, TEAM_ID
 from src.diplomacy.deception_bandit import DeceptionBandit
-from src.diplomacy.firewall import GroundTruthFirewall
 from src.diplomacy.pseudo_gan import PseudoGAN
-from src.memory.message_log import MessageMemory
-from src.models import DeceptionAction
+from src.diplomacy.firewall import GroundTruthFirewall
+from src.memory.message_log import MessageLog
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger("spam.diplomacy.agent")
 
 
 class DiplomacyAgent:
-    """Sends diplomatic messages during speaking / waiting phases.
-
-    Uses:
-      - ``DeceptionBandit`` to choose which competitors to target and
-        which deception arm to deploy.
-      - ``PseudoGAN`` to craft convincing messages.
-      - ``GroundTruthFirewall`` to process *incoming* messages safely.
+    """
+    Orchestrates all diplomatic communications:
+    - Offense: DeceptionBandit selects arm → PseudoGAN crafts message
+    - Defense: GroundTruthFirewall processes incoming messages
+    - Tracking: MessageLog records all sent/received messages
     """
 
     def __init__(
         self,
-        bandit: DeceptionBandit,
-        pseudo_gan: PseudoGAN | None,
-        firewall: GroundTruthFirewall,
-        message_memory: MessageMemory,
-    ) -> None:
-        self.bandit = bandit
-        self.pseudo_gan = pseudo_gan
-        self.firewall = firewall
-        self.memory = message_memory
-        self._mcp_url = f"{BASE_URL}/mcp"
+        mcp_client: MCPClient | None = None,
+        message_log: MessageLog | None = None,
+    ):
+        self.mcp_client = mcp_client
+        self.message_log = message_log or MessageLog()
+        self.firewall = GroundTruthFirewall(self.message_log)
+        self.bandit = DeceptionBandit()
+        self.pseudo_gan = PseudoGAN()
 
-    async def run_speaking_phase(
+        # Track pending deceptions for reward measurement
+        self._pending_deceptions: list[dict] = []
+
+    async def run_diplomacy_turn(
         self,
-        briefings: dict[int, dict],
-        session: aiohttp.ClientSession,
+        competitor_briefings: dict[int, dict],
+        competitor_states: dict = None,
         turn_id: int = 0,
-    ) -> None:
-        """Execute diplomacy during speaking or waiting phase."""
-        actions = self.bandit.select_targets(briefings)
+    ) -> list[dict]:
+        """
+        Execute a full diplomacy turn:
+        1. Select targets and strategies (bandit)
+        2. Craft messages (PseudoGAN)
+        3. Send messages via MCP
+        4. Record for reward tracking
+
+        Returns list of sent message records.
+        """
+        # 1. Select targets and strategies
+        actions = self.bandit.select_target_and_strategy(competitor_briefings)
+        if not actions:
+            logger.info("No diplomacy actions this turn")
+            return []
+
+        sent = []
         for action in actions:
-            message = await self._craft(action, briefings)
-            if message:
-                await self._send(action.target_rid, message, session)
-                self.memory.record_sent(
-                    recipient_id=action.target_rid,
-                    text=message,
-                    arm=action.arm,
-                    turn_id=turn_id,
-                )
+            rid = action["target_rid"]
+            briefing = competitor_briefings.get(rid, {})
 
-    async def handle_incoming(self, data: dict[str, Any]) -> None:
-        """Process an incoming ``new_message`` SSE event."""
-        tagged = self.firewall.process_incoming_message(data)
-        self.memory.record_received(tagged)
-        log.info(
-            "Incoming message from %s (cred=%.2f): %s",
-            tagged["sender_name"],
-            tagged["sender_credibility"],
-            tagged["text"][:80],
-        )
-
-    # ── internals ────────────────────────────────────────────────
-
-    async def _craft(
-        self, action: DeceptionAction, briefings: dict[int, dict]
-    ) -> str | None:
-        brief = briefings.get(action.target_rid)
-        if not brief:
-            return None
-
-        if self.pseudo_gan:
+            # 2. Craft message
             try:
-                return await self.pseudo_gan.craft_message(
-                    deception_action={
-                        "target_name": action.target_name,
-                        "arm": action.arm,
-                        "desired_effect": action.desired_effect,
-                        "message_hint": action.message_hint,
-                    },
-                    competitor_briefing=brief,
+                message_text = await self.pseudo_gan.craft_message(
+                    deception_action=action,
+                    competitor_briefing=briefing,
+                    max_iterations=2,
                 )
-            except Exception as exc:
-                log.warning("PseudoGAN failed, using hint: %s", exc)
+            except Exception as e:
+                logger.warning(f"PseudoGAN failed for {rid}: {e}")
+                continue
 
-        # Fallback: raw hint
-        return action.message_hint or None
+            # 3. Send via MCP
+            success = await self._send_message(rid, message_text)
+            if success:
+                record = {
+                    "turn": turn_id,
+                    "target_rid": rid,
+                    "arm": action["arm"],
+                    "desired_effect": action.get("desired_effect", ""),
+                    "message": message_text,
+                    "target_name": action.get("target_name", ""),
+                }
+                sent.append(record)
 
-    async def _send(
-        self, recipient_id: int, text: str, session: aiohttp.ClientSession
-    ) -> None:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "send_message",
-                "arguments": {"recipient_id": recipient_id, "text": text},
-            },
-        }
+                # Track for reward measurement
+                self._pending_deceptions.append({
+                    **record,
+                    "pre_state": competitor_states.get(rid) if competitor_states else None,
+                })
+
+                # Record in message log
+                self.message_log.record_sent(
+                    target_id=rid,
+                    text=message_text,
+                    turn=turn_id,
+                )
+
+                logger.info(
+                    f"Sent [{action['arm']}] to {action.get('target_name', rid)}: "
+                    f"'{message_text[:50]}...'"
+                )
+
+        return sent
+
+    async def measure_deception_rewards(
+        self,
+        competitor_states: dict,
+    ):
+        """
+        After a turn, measure the effect of our deceptions
+        by comparing pre/post competitor states via tracker.
+        """
+        for deception in self._pending_deceptions:
+            rid = deception["target_rid"]
+            arm = deception["arm"]
+            desired_effect = deception.get("desired_effect", "")
+            pre_state = deception.get("pre_state")
+            post_state = competitor_states.get(rid)
+
+            if pre_state is None or post_state is None:
+                continue
+
+            reward = self.bandit.measure_deception_reward(
+                rid=rid,
+                arm=arm,
+                pre_state=pre_state,
+                post_state=post_state,
+                desired_effect=desired_effect,
+            )
+
+            self.bandit.update(rid, arm, reward)
+
+            logger.info(
+                f"Deception reward for {deception.get('target_name', rid)} "
+                f"[{arm}]: {reward:.1f}"
+            )
+
+        self._pending_deceptions.clear()
+
+    def process_incoming_message(
+        self, message: dict, competitor_state=None
+    ) -> dict:
+        """
+        Process an incoming message through the firewall.
+        Returns processed message with trust level and credibility.
+        """
+        processed = self.firewall.process_incoming_message(message)
+
+        # If we have competitor state, verify claims
+        if competitor_state is not None:
+            sender_id = message.get("senderId")
+            claim_text = message.get("text", "")
+            adjustment = self.firewall.verify_claim_against_tracker(
+                sender_id, claim_text, competitor_state
+            )
+            if adjustment != 0:
+                self.firewall.update_credibility(sender_id, adjustment)
+                processed["verified"] = adjustment > 0
+                processed["credibility_adjustment"] = adjustment
+
+        return processed
+
+    async def _send_message(self, target_rid: int, text: str) -> bool:
+        """Send a message via MCP."""
+        if self.mcp_client is None:
+            logger.warning("No MCP client configured for diplomacy")
+            return False
+
         try:
-            async with session.post(
-                self._mcp_url, json=payload, headers=HEADERS
-            ) as resp:
-                result = await resp.json()
-                log.info("send_message(%d): %s", recipient_id, result)
-        except Exception as exc:
-            log.error("send_message failed: %s", exc)
+            result = await self.mcp_client.call_tool(
+                "send_message",
+                {
+                    "restaurantId": target_rid,
+                    "message": text,
+                },
+            )
+            logger.debug(f"Message sent to {target_rid}: {result}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to send message to {target_rid}: {e}")
+            return False

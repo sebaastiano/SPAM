@@ -1,179 +1,151 @@
 """
-PhaseRouter — state machine that enforces phase-specific operation
-restrictions and routes phase transitions to the appropriate handlers.
+SPAM! — Phase Router
+=====================
+Phase state machine routing SSE game_phase_changed events
+to phase-specific handlers.
 
-Phases (in order):
-    game_started → speaking → closed_bid → waiting → serving → stopped → (next turn)
+Phase lifecycle:
+  game_started → speaking → closed_bid → waiting → serving → stopped → (next turn)
 
-The router stores the current phase and exposes guards so other modules
-can check ``can_bid()``, ``can_serve()`` etc. before making MCP calls.
+Phase restrictions (CRITICAL):
+  - speaking: intelligence pipeline, diplomacy, menu setting
+  - closed_bid: bid submission ONLY here; save_menu still allowed
+  - waiting: fetch post-bid inventory, finalize menu, open restaurant
+  - serving: prepare_dish + serve_dish ONLY; save_menu FORBIDDEN; cannot reopen
+  - stopped: ALL MCP tools forbidden; GET only; inventory expires
 """
 
-from __future__ import annotations
-
 import logging
-from enum import Enum
-from typing import Any, Awaitable, Callable
+from typing import Callable, Awaitable
 
-log = logging.getLogger(__name__)
-
-PhaseHandler = Callable[[dict[str, Any]], Awaitable[None]]
-
-
-class Phase(str, Enum):
-    GAME_STARTED = "game_started"
-    SPEAKING = "speaking"
-    CLOSED_BID = "closed_bid"
-    WAITING = "waiting"
-    SERVING = "serving"
-    STOPPED = "stopped"
-    UNKNOWN = "unknown"
-
-
-# ── Allowed operations per phase ────────────────────────────────
-# True = allowed, False = blocked, "close_only" = special case
-
-_ALLOWED: dict[Phase, dict[str, bool | str]] = {
-    Phase.SPEAKING: {
-        "save_menu": True,
-        "closed_bid": False,
-        "prepare_dish": False,
-        "serve_dish": False,
-        "create_market_entry": True,
-        "execute_transaction": True,
-        "delete_market_entry": True,
-        "send_message": True,
-        "update_restaurant_is_open": True,
-    },
-    Phase.CLOSED_BID: {
-        "save_menu": True,
-        "closed_bid": True,
-        "prepare_dish": False,
-        "serve_dish": False,
-        "create_market_entry": True,
-        "execute_transaction": True,
-        "delete_market_entry": True,
-        "send_message": True,
-        "update_restaurant_is_open": True,
-    },
-    Phase.WAITING: {
-        "save_menu": True,
-        "closed_bid": False,
-        "prepare_dish": False,
-        "serve_dish": False,
-        "create_market_entry": True,
-        "execute_transaction": True,
-        "delete_market_entry": True,
-        "send_message": True,
-        "update_restaurant_is_open": True,
-    },
-    Phase.SERVING: {
-        "save_menu": False,
-        "closed_bid": False,
-        "prepare_dish": True,
-        "serve_dish": True,
-        "create_market_entry": True,
-        "execute_transaction": True,
-        "delete_market_entry": True,
-        "send_message": True,
-        "update_restaurant_is_open": "close_only",
-    },
-    Phase.STOPPED: {
-        "save_menu": False,
-        "closed_bid": False,
-        "prepare_dish": False,
-        "serve_dish": False,
-        "create_market_entry": False,
-        "execute_transaction": False,
-        "delete_market_entry": False,
-        "send_message": False,
-        "update_restaurant_is_open": False,
-    },
-}
+logger = logging.getLogger("spam.phase_router")
 
 
 class PhaseRouter:
-    """Tracks current phase and dispatches handlers on transitions.
+    """
+    Phase state machine.
 
-    Usage::
-
-        router = PhaseRouter()
-        router.register("speaking", on_speaking)
-        router.register("serving", on_serving)
-        await router.handle_phase_change({"phase": "speaking"})
+    Routes game_phase_changed SSE events to the correct phase handler.
+    Enforces phase restrictions and tracks the current game phase.
     """
 
-    def __init__(self) -> None:
-        self._phase: Phase = Phase.UNKNOWN
-        self._handlers: dict[Phase, PhaseHandler] = {}
+    VALID_PHASES = {"speaking", "closed_bid", "waiting", "serving", "stopped"}
+    VALID_TRANSITIONS = {
+        None: {"speaking"},
+        "speaking": {"closed_bid"},
+        "closed_bid": {"waiting"},
+        "waiting": {"serving"},
+        "serving": {"stopped"},
+        "stopped": {"speaking"},  # next turn
+    }
 
-    # ── Registration ──────────────────────────────────────────────
+    def __init__(self):
+        self.current_phase: str | None = None
+        self.current_turn: int = 0
+        self._handlers: dict[str, Callable[[dict], Awaitable[None]]] = {}
+        self._on_turn_change: Callable[[int], Awaitable[None]] | None = None
 
-    def register(self, phase_name: str, handler: PhaseHandler) -> None:
-        try:
-            phase = Phase(phase_name)
-        except ValueError:
-            log.warning("Unknown phase name: %s", phase_name)
-            return
+    def register(self, phase: str, handler: Callable[[dict], Awaitable[None]]):
+        """Register a handler for a specific phase."""
+        if phase not in self.VALID_PHASES:
+            raise ValueError(f"Unknown phase: {phase}")
         self._handlers[phase] = handler
 
-    # ── Phase transition ──────────────────────────────────────────
+    def on_turn_change(self, handler: Callable[[int], Awaitable[None]]):
+        """Register a callback for turn changes (stopped → speaking)."""
+        self._on_turn_change = handler
 
-    async def handle_phase_change(self, data: dict[str, Any]) -> None:
-        """Called by the event bus on ``game_phase_changed``."""
-        raw = data.get("phase", "unknown")
-        try:
-            new_phase = Phase(raw)
-        except ValueError:
-            log.warning("Unrecognized phase: %s", raw)
-            new_phase = Phase.UNKNOWN
+    async def handle_phase_change(self, data: dict):
+        """
+        Called by event_bus on 'game_phase_changed' events.
 
-        old = self._phase
-        self._phase = new_phase
-        log.info("Phase transition: %s → %s", old.value, new_phase.value)
+        data format: {"phase": "serving", "turn_id": 3, ...}
+        """
+        new_phase = data.get("phase", "").lower()
+        turn_id = data.get("turn_id", self.current_turn)
 
+        if new_phase not in self.VALID_PHASES:
+            logger.warning(f"Unknown phase received: {new_phase}")
+            return
+
+        # Detect turn change
+        if new_phase == "speaking" and self.current_phase == "stopped":
+            self.current_turn = turn_id
+            logger.info(f"=== TURN {self.current_turn} STARTED ===")
+            if self._on_turn_change:
+                await self._on_turn_change(self.current_turn)
+
+        old_phase = self.current_phase
+        self.current_phase = new_phase
+        self.current_turn = turn_id
+
+        logger.info(f"Phase: {old_phase} → {new_phase} (turn {turn_id})")
+
+        # Dispatch to phase handler
         handler = self._handlers.get(new_phase)
         if handler:
             try:
                 await handler(data)
-            except Exception as exc:
-                log.error("Phase handler error (%s): %s", new_phase.value, exc, exc_info=True)
+            except Exception as e:
+                logger.error(f"Phase handler error ({new_phase}): {e}", exc_info=True)
+        else:
+            logger.warning(f"No handler registered for phase: {new_phase}")
 
-    # ── Guards ────────────────────────────────────────────────────
+    async def handle_game_started(self, data: dict):
+        """Called on game_started SSE event."""
+        self.current_phase = None
+        self.current_turn = 0
+        logger.info("Game started — awaiting first phase")
 
-    @property
-    def phase(self) -> Phase:
-        return self._phase
+    async def handle_game_reset(self, data: dict):
+        """
+        Called on game_reset SSE event.
+        Clear turn-scoped state, preserve cross-turn memory.
+        Do NOT call any MCP tools — wait for next game_started.
+        """
+        logger.info("Game reset — clearing turn-scoped state")
+        self.current_phase = None
+        self.current_turn = 0
 
-    @property
-    def phase_name(self) -> str:
-        return self._phase.value
-
-    def is_allowed(self, operation: str) -> bool:
-        """Check whether *operation* is allowed in the current phase."""
-        perms = _ALLOWED.get(self._phase, {})
-        val = perms.get(operation, False)
-        if val == "close_only":
-            return True  # caller must ensure is_open=false
-        return bool(val)
-
-    def can_save_menu(self) -> bool:
-        return self.is_allowed("save_menu")
-
-    def can_bid(self) -> bool:
-        return self.is_allowed("closed_bid")
-
-    def can_serve(self) -> bool:
-        return self.is_allowed("prepare_dish")
-
-    def can_send_message(self) -> bool:
-        return self.is_allowed("send_message")
-
-    def can_trade(self) -> bool:
-        return self.is_allowed("create_market_entry")
-
-    def is_stopped(self) -> bool:
-        return self._phase == Phase.STOPPED
+    # ── Phase guard methods ──
 
     def is_serving(self) -> bool:
-        return self._phase == Phase.SERVING
+        return self.current_phase == "serving"
+
+    def is_bidding(self) -> bool:
+        return self.current_phase == "closed_bid"
+
+    def is_waiting(self) -> bool:
+        return self.current_phase == "waiting"
+
+    def can_set_menu(self) -> bool:
+        """save_menu allowed in speaking, closed_bid, waiting — NOT serving/stopped."""
+        return self.current_phase in {"speaking", "closed_bid", "waiting"}
+
+    def can_send_message(self) -> bool:
+        """send_message allowed in speaking, closed_bid, waiting, serving — NOT stopped."""
+        return self.current_phase in {"speaking", "closed_bid", "waiting", "serving"}
+
+    def can_prepare_dish(self) -> bool:
+        """prepare_dish only in serving."""
+        return self.current_phase == "serving"
+
+    def can_serve_dish(self) -> bool:
+        """serve_dish only in serving."""
+        return self.current_phase == "serving"
+
+    def can_open_restaurant(self) -> bool:
+        """update_restaurant_is_open(true) only in waiting (NOT serving)."""
+        return self.current_phase == "waiting"
+
+    def can_close_restaurant(self) -> bool:
+        """update_restaurant_is_open(false) in waiting or serving."""
+        return self.current_phase in {"waiting", "serving"}
+
+    def can_bid(self) -> bool:
+        """closed_bid only in closed_bid phase."""
+        return self.current_phase == "closed_bid"
+
+    def can_use_market(self) -> bool:
+        """Market ops in speaking, closed_bid, waiting, serving."""
+        return self.current_phase in {"speaking", "closed_bid", "waiting", "serving"}

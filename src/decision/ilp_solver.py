@@ -1,230 +1,437 @@
 """
-ILP solver — zone-specific bid and menu optimisation.
+SPAM! — ILP Solver
+====================
+Zone-specific ILP bid and menu optimization.
+Uses scipy.optimize.milp for exact optimal solutions.
 
-Uses ``scipy.optimize.milp`` when available, otherwise falls back
-to a greedy heuristic so the agent always has a workable plan.
+Decision variables (stacked into a single vector):
+  y_j  (j=0..J-1)  — binary: 1 if recipe j is on the menu
+  x_i  (i=0..I-1)  — integer: quantity of ingredient i to bid on
+
+Objective: maximize  sum_j(revenue_j * y_j) - sum_i(bid_price_i * x_i)
+           (milp minimises, so we negate)
+
+Constraints:
+  C1  menu_min  ≤ sum(y_j)                ≤ menu_max        (zone menu size)
+  C2  For each ingredient i used by recipe j:
+        sum_j(need_{ij} * y_j) ≤ inventory_i + x_i           (ingredient supply)
+  C3  sum_i(bid_price_i * x_i) ≤ balance * spending_fraction (budget cap)
 """
 
-from __future__ import annotations
-
 import logging
-from typing import Any
 
 import numpy as np
+from scipy.optimize import milp, LinearConstraint, Bounds
+from scipy.sparse import eye as speye
 
 from src.config import (
-    ARCHETYPE_CEILINGS,
-    HIGH_DELTA_INGREDIENTS,
+    ZONE_PRESTIGE_RANGE,
+    ZONE_MENU_SIZE,
+    ZONE_MAX_PREP_TIME,
     ZONE_PRICE_FACTORS,
+    ARCHETYPE_CEILINGS,
+    ZONE_TARGET_ARCHETYPES,
+    HIGH_DELTA_INGREDIENTS,
 )
-from src.models import GameState, Recipe, ZoneDecision
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger("spam.decision.ilp_solver")
+
+
+class ZoneDecision:
+    """Output of the ILP solver for a specific zone."""
+
+    def __init__(self):
+        self.bids: list[dict] = []  # [{ingredient, bid, quantity}]
+        self.menu: list[dict] = []  # [{name, price}]
+        self.zone: str = ""
+        self.expected_revenue: float = 0.0
+        self.total_bid_cost: float = 0.0
 
 
 def solve_zone_ilp(
     zone: str,
-    game_state: GameState,
-    recipes: dict[str, Recipe],
-    demand_forecast: dict[str, float] | None = None,
-    briefings: dict[int, dict] | None = None,
-) -> ZoneDecision:
-    """Produce a ``ZoneDecision`` (bids + menu + prices) for the given zone.
-
-    The full ILP formulation is described in §7 of the implementation
-    strategy.  Here we implement the greedy heuristic version that is
-    always available and refine with scipy.optimize.milp where possible.
-    """
-    demand_forecast = demand_forecast or {}
-    briefings = briefings or {}
-
-    # ── 1. Select candidate recipes for this zone ─────────────────
-    candidates = _filter_recipes_for_zone(zone, recipes)
-    if not candidates:
-        candidates = list(recipes.values())[:6]  # absolute fallback
-
-    # ── 2. Rank candidates by desirability ────────────────────────
-    scored: list[tuple[Recipe, float]] = []
-    for recipe in candidates:
-        score = _recipe_zone_score(recipe, zone, game_state)
-        scored.append((recipe, score))
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    # ── 3. Select menu (respect zone menu-size constraints) ───────
-    max_dishes = _zone_menu_size(zone)
-    menu_recipes = [r for r, _ in scored[:max_dishes]]
-
-    # ── 4. Compute ingredient needs ───────────────────────────────
-    ingredient_needs: dict[str, int] = {}
-    for recipe in menu_recipes:
-        for ing, qty in recipe.ingredients.items():
-            ingredient_needs[ing] = ingredient_needs.get(ing, 0) + qty
-
-    # ── 5. Generate bids ─────────────────────────────────────────
-    balance_for_bids = game_state.balance * _zone_bid_fraction(zone)
-    bids = _generate_bids(
-        ingredient_needs, balance_for_bids, demand_forecast, briefings
-    )
-
-    # ── 6. Compute prices ─────────────────────────────────────────
-    price_factor = ZONE_PRICE_FACTORS.get(zone, 0.7)
-    target_archetype = _zone_target_archetype(zone)
-    ceiling = ARCHETYPE_CEILINGS.get(target_archetype, 120)
-    base_price = int(ceiling * price_factor)
-
-    menu_items: list[dict] = []
-    prices: dict[str, float] = {}
-    for recipe in menu_recipes:
-        # Adjust price by prestige
-        prestige_mult = recipe.prestige / 70.0  # normalise around 70
-        price = max(10, int(base_price * prestige_mult))
-        menu_items.append({"name": recipe.name, "price": price})
-        prices[recipe.name] = price
-
-    expected_revenue = sum(prices.values()) * 0.5  # conservative 50% served
-    expected_cost = sum(b["bid"] * b["quantity"] for b in bids)
-
-    return ZoneDecision(
-        zone=zone,
-        bids=bids,
-        menu=menu_items,
-        prices=prices,
-        expected_revenue=expected_revenue,
-        expected_cost=expected_cost,
-    )
-
-
-# ── helpers ──────────────────────────────────────────────────────
-
-
-def _filter_recipes_for_zone(
-    zone: str, recipes: dict[str, Recipe]
-) -> list[Recipe]:
-    """Return recipes matching the zone's prestige / prep-time constraints."""
-    out: list[Recipe] = []
-    for r in recipes.values():
-        if zone == "PREMIUM_MONOPOLIST":
-            if r.prestige >= 85 and r.prep_time_s <= 8:
-                out.append(r)
-        elif zone == "BUDGET_OPPORTUNIST":
-            if r.prestige <= 60 and r.prep_time_s <= 5:
-                out.append(r)
-        elif zone == "NICHE_SPECIALIST":
-            if 60 <= r.prestige <= 90:
-                out.append(r)
-        elif zone == "SPEED_CONTENDER":
-            if r.prep_time_s <= 5 and r.prestige >= 50:
-                out.append(r)
-        elif zone == "MARKET_ARBITRAGEUR":
-            if r.prestige >= 40 and r.ingredient_count <= 5:
-                out.append(r)
-        else:
-            out.append(r)
-    return out
-
-
-def _zone_menu_size(zone: str) -> int:
-    sizes = {
-        "PREMIUM_MONOPOLIST": 5,
-        "BUDGET_OPPORTUNIST": 10,
-        "NICHE_SPECIALIST": 6,
-        "SPEED_CONTENDER": 7,
-        "MARKET_ARBITRAGEUR": 2,
-    }
-    return sizes.get(zone, 5)
-
-
-def _zone_bid_fraction(zone: str) -> float:
-    """Fraction of balance to allocate to bids."""
-    fracs = {
-        "PREMIUM_MONOPOLIST": 0.5,
-        "BUDGET_OPPORTUNIST": 0.25,
-        "NICHE_SPECIALIST": 0.35,
-        "SPEED_CONTENDER": 0.30,
-        "MARKET_ARBITRAGEUR": 0.6,
-    }
-    return fracs.get(zone, 0.3)
-
-
-def _zone_target_archetype(zone: str) -> str:
-    mapping = {
-        "PREMIUM_MONOPOLIST": "Saggi del Cosmo",
-        "BUDGET_OPPORTUNIST": "Esploratore Galattico",
-        "NICHE_SPECIALIST": "Famiglie Orbitali",
-        "SPEED_CONTENDER": "Famiglie Orbitali",
-        "MARKET_ARBITRAGEUR": "Esploratore Galattico",
-    }
-    return mapping.get(zone, "Esploratore Galattico")
-
-
-def _recipe_zone_score(
-    recipe: Recipe, zone: str, game_state: GameState
-) -> float:
-    """Score a recipe for how well it fits the given zone."""
-    score = recipe.prestige
-
-    # Penalise slow recipes (except for niche)
-    if zone != "NICHE_SPECIALIST":
-        if recipe.prep_time_s > 6:
-            score -= (recipe.prep_time_s - 6) * 5
-
-    # Bonus for high-Δ ingredients
-    for ing in recipe.ingredients:
-        if ing in HIGH_DELTA_INGREDIENTS:
-            score += HIGH_DELTA_INGREDIENTS[ing]
-
-    # Penalise recipes with many ingredients (complex to source)
-    score -= recipe.ingredient_count * 2
-
-    return score
-
-
-def _generate_bids(
-    needs: dict[str, int],
-    budget: float,
+    balance: float,
+    inventory: dict[str, int],
+    recipes: list[dict],
     demand_forecast: dict[str, float],
-    briefings: dict[int, dict],
-) -> list[dict]:
-    """Generate a bid list within the available budget."""
-    bids: list[dict] = []
-    remaining = budget
+    competitor_briefings: dict[int, dict],
+    reputation: float = 100.0,
+    spending_fraction: float = 0.6,
+) -> ZoneDecision:
+    """
+    Solve the zone-specific MILP for menu selection and bid allocation.
 
-    # Sort ingredients by priority (high-Δ first)
-    high_delta_names = set(HIGH_DELTA_INGREDIENTS.keys())
-    sorted_ings = sorted(
-        needs.items(),
-        key=lambda x: (x[0] in high_delta_names, x[1]),
-        reverse=True,
+    Decision variables  (stacked vector  v = [y_0 … y_{J-1}, x_0 … x_{I-1}]):
+      y_j ∈ {0,1}  — include recipe j on menu
+      x_i ∈ Z≥0    — quantity of ingredient i to bid on
+
+    Objective (minimised by scipy):
+      min  -Σ_j(revenue_j · y_j) + Σ_i(bid_price_i · x_i)
+
+    Subject to:
+      menu_min ≤ Σ y_j ≤ menu_max                                      (C1)
+      Σ_j(need_{ij} · y_j) - x_i ≤ inventory_i   ∀ ingredient i       (C2)
+      Σ_i(bid_price_i · x_i) ≤ budget                                  (C3)
+    """
+    decision = ZoneDecision()
+    decision.zone = zone
+
+    # ── Zone constraints ──
+    prestige_min, prestige_max = ZONE_PRESTIGE_RANGE.get(zone, (0, 100))
+    menu_min, menu_max = ZONE_MENU_SIZE.get(zone, (3, 10))
+    max_prep_time = ZONE_MAX_PREP_TIME.get(zone, 10.0)
+
+    # ── Filter eligible recipes ──
+    eligible_recipes: list[dict] = []
+    for recipe in recipes:
+        prestige = recipe.get("prestige", 50)
+        prep_time = recipe.get("prep_time", 5.0)
+        if prestige_min <= prestige <= prestige_max and prep_time <= max_prep_time:
+            eligible_recipes.append(recipe)
+
+    if not eligible_recipes:
+        logger.warning(f"No eligible recipes for zone {zone}")
+        return decision
+
+    J = len(eligible_recipes)
+
+    # ── Collect the union of all ingredients used by eligible recipes ──
+    all_ingredients_set: set[str] = set()
+    for recipe in eligible_recipes:
+        all_ingredients_set.update(recipe.get("ingredients", {}).keys())
+    all_ingredients = sorted(all_ingredients_set)
+    I = len(all_ingredients)
+    ing_idx = {name: idx for idx, name in enumerate(all_ingredients)}
+
+    # ── Per-recipe revenue (price estimate) ──
+    revenues = np.array(
+        [compute_menu_price(r, zone, reputation) for r in eligible_recipes],
+        dtype=float,
     )
 
-    for ingredient, quantity in sorted_ings:
-        if remaining <= 0:
+    # ── Per-ingredient bid price ──
+    bid_prices = np.array(
+        [
+            compute_bid_price(ing, competitor_briefings, demand_forecast)
+            for ing in all_ingredients
+        ],
+        dtype=float,
+    )
+
+    # ── need matrix  need[i, j] = qty of ingredient i required by recipe j ──
+    need = np.zeros((I, J), dtype=float)
+    for j, recipe in enumerate(eligible_recipes):
+        for ing, qty in recipe.get("ingredients", {}).items():
+            need[ing_idx[ing], j] = qty
+
+    # ── Current inventory for each ingredient ──
+    inv = np.array(
+        [inventory.get(ing, 0) for ing in all_ingredients], dtype=float
+    )
+
+    budget = balance * spending_fraction
+
+    # ── Decision variable layout:  v = [y_0 … y_{J-1},  x_0 … x_{I-1}] ──
+    N = J + I
+
+    # Objective:  min  -revenue·y + bidprice·x
+    c = np.zeros(N)
+    c[:J] = -revenues          # negate because milp minimises
+    c[J:] = bid_prices
+
+    # Integrality: y_j binary (1), x_i integer (1)
+    integrality = np.ones(N, dtype=int)  # 1 = integer for all
+
+    # Bounds: y_j ∈ [0,1], x_i ∈ [0, large]
+    lb = np.zeros(N)
+    ub = np.full(N, np.inf)
+    ub[:J] = 1.0  # binary
+
+    bounds = Bounds(lb=lb, ub=ub)
+
+    # ── Constraints ──
+    constraints: list[LinearConstraint] = []
+
+    # C1: menu_min ≤ Σ y_j ≤ menu_max
+    A_menu = np.zeros((1, N))
+    A_menu[0, :J] = 1.0
+    constraints.append(LinearConstraint(A_menu, lb=menu_min, ub=menu_max))
+
+    # C2: For each ingredient i:  Σ_j(need_{ij} · y_j) - x_i ≤ inv_i
+    #     i.e.   need[i,:] · y  -  x_i  ≤  inv_i
+    A_supply = np.zeros((I, N))
+    A_supply[:, :J] = need            # need[i,j] * y_j
+    for i in range(I):
+        A_supply[i, J + i] = -1.0     # - x_i
+    constraints.append(
+        LinearConstraint(A_supply, lb=-np.inf, ub=inv)
+    )
+
+    # C3: Σ_i(bid_price_i · x_i) ≤ budget
+    A_budget = np.zeros((1, N))
+    A_budget[0, J:] = bid_prices
+    constraints.append(LinearConstraint(A_budget, lb=0, ub=budget))
+
+    # ── Solve ──
+    try:
+        result = milp(
+            c=c,
+            constraints=constraints,
+            integrality=integrality,
+            bounds=bounds,
+        )
+
+        if result.success:
+            y_sol = np.round(result.x[:J]).astype(int)
+            x_sol = np.round(result.x[J:]).astype(int)
+        else:
+            logger.warning(
+                f"MILP infeasible for zone {zone}: {result.message} — "
+                f"falling back to greedy"
+            )
+            return _greedy_fallback(
+                zone, balance, inventory, eligible_recipes,
+                demand_forecast, competitor_briefings, reputation,
+                spending_fraction,
+            )
+    except Exception as e:
+        logger.warning(f"MILP solver error for zone {zone}: {e} — falling back to greedy")
+        return _greedy_fallback(
+            zone, balance, inventory, eligible_recipes,
+            demand_forecast, competitor_briefings, reputation,
+            spending_fraction,
+        )
+
+    # ── Build decision from solution ──
+    for j in range(J):
+        if y_sol[j]:
+            recipe = eligible_recipes[j]
+            price = int(revenues[j])
+            decision.menu.append({"name": recipe["name"], "price": price})
+
+    for i in range(I):
+        if x_sol[i] > 0:
+            decision.bids.append({
+                "ingredient": all_ingredients[i],
+                "bid": int(bid_prices[i]),
+                "quantity": int(x_sol[i]),
+            })
+
+    decision.total_bid_cost = float(bid_prices @ x_sol)
+    decision.expected_revenue = float(revenues @ y_sol) * 0.7
+
+    logger.info(
+        f"MILP [{zone}]: {len(decision.menu)} menu items, "
+        f"{len(decision.bids)} bids, cost={decision.total_bid_cost:.0f}, "
+        f"expected_rev={decision.expected_revenue:.0f}"
+    )
+
+    return decision
+
+
+def _greedy_fallback(
+    zone: str,
+    balance: float,
+    inventory: dict[str, int],
+    eligible_recipes: list[dict],
+    demand_forecast: dict[str, float],
+    competitor_briefings: dict[int, dict],
+    reputation: float,
+    spending_fraction: float,
+) -> ZoneDecision:
+    """
+    Greedy fallback when MILP is infeasible / errors out.
+    Scores and ranks recipes then greedily allocates bids within budget.
+    """
+    decision = ZoneDecision()
+    decision.zone = zone
+
+    menu_min, menu_max = ZONE_MENU_SIZE.get(zone, (3, 10))
+
+    scored_recipes = _score_recipes(
+        eligible_recipes, zone, inventory, reputation, demand_forecast
+    )
+
+    selected = scored_recipes[:menu_max]
+    if len(selected) < menu_min:
+        selected = scored_recipes[:menu_min]
+
+    for entry in selected:
+        recipe = entry["recipe"]
+        price = compute_menu_price(recipe, zone, reputation)
+        decision.menu.append({"name": recipe["name"], "price": int(price)})
+
+    needed_ingredients: dict[str, int] = {}
+    for entry in selected:
+        recipe = entry["recipe"]
+        for ing, qty in recipe.get("ingredients", {}).items():
+            current = inventory.get(ing, 0)
+            need = max(0, qty - current)
+            needed_ingredients[ing] = needed_ingredients.get(ing, 0) + need
+
+    budget = balance * spending_fraction
+    total_bid_cost = 0.0
+
+    for ing, qty in needed_ingredients.items():
+        if qty <= 0:
+            continue
+        bid_price = compute_bid_price(ing, competitor_briefings, demand_forecast)
+        cost = bid_price * qty
+        if total_bid_cost + cost <= budget:
+            decision.bids.append({
+                "ingredient": ing,
+                "bid": int(bid_price),
+                "quantity": qty,
+            })
+            total_bid_cost += cost
+        else:
+            affordable_qty = max(1, int((budget - total_bid_cost) / bid_price))
+            if affordable_qty > 0:
+                decision.bids.append({
+                    "ingredient": ing,
+                    "bid": int(bid_price),
+                    "quantity": affordable_qty,
+                })
+                total_bid_cost += bid_price * affordable_qty
             break
 
-        # Base bid price — factor in competition
-        forecast_demand = demand_forecast.get(ingredient, 1.0)
-        base_bid = 20 + int(forecast_demand * 5)
+    decision.total_bid_cost = total_bid_cost
+    decision.expected_revenue = sum(
+        item["price"] for item in decision.menu
+    ) * 0.7
 
-        # High-Δ ingredients deserve higher bids
-        if ingredient in high_delta_names:
-            base_bid = int(base_bid * 1.5)
+    logger.info(
+        f"Greedy [{zone}]: {len(decision.menu)} menu items, "
+        f"{len(decision.bids)} bids, cost={total_bid_cost:.0f}, "
+        f"expected_rev={decision.expected_revenue:.0f}"
+    )
 
-        # Clamp to remaining budget
-        total_cost = base_bid * quantity
-        if total_cost > remaining:
-            quantity = max(1, int(remaining / base_bid))
-            total_cost = base_bid * quantity
+    return decision
 
-        if quantity <= 0:
-            continue
 
-        bids.append(
-            {
-                "ingredient": ingredient,
-                "bid": base_bid,
-                "quantity": quantity,
-            }
+def _score_recipes(
+    recipes: list[dict],
+    zone: str,
+    inventory: dict[str, int],
+    reputation: float,
+    demand_forecast: dict[str, float],
+) -> list[dict]:
+    """Score and rank recipes for a zone."""
+    scored = []
+
+    high_delta_set = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
+
+    for recipe in recipes:
+        prestige = recipe.get("prestige", 50)
+        prep_time = recipe.get("prep_time", 5.0)
+        ingredients = recipe.get("ingredients", {})
+
+        # Score components
+        prestige_score = prestige / 100.0
+
+        # Speed score (faster = better)
+        speed_score = max(0, 1.0 - prep_time / 15.0)
+
+        # Inventory fit (how many ingredients do we already have?)
+        total_needed = sum(ingredients.values())
+        have = sum(
+            min(inventory.get(ing, 0), qty)
+            for ing, qty in ingredients.items()
         )
-        remaining -= total_cost
+        inventory_score = have / max(total_needed, 1)
 
-    return bids
+        # High-delta ingredient bonus
+        delta_bonus = sum(
+            0.1
+            for ing in ingredients
+            if ing in high_delta_set
+        )
+
+        # Competition penalty (high demand forecast = harder to get)
+        competition_penalty = sum(
+            demand_forecast.get(ing, 0) * 0.01
+            for ing in ingredients
+        )
+
+        total_score = (
+            prestige_score * 0.3
+            + speed_score * 0.25
+            + inventory_score * 0.25
+            + delta_bonus * 0.1
+            - competition_penalty * 0.1
+        )
+
+        scored.append({"recipe": recipe, "score": total_score})
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
+def compute_menu_price(
+    recipe: dict, zone: str, reputation: float
+) -> float:
+    """
+    Compute menu price for a dish.
+
+    Price = archetype_ceiling × reputation_multiplier × zone_factor
+    """
+    target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
+    if target_archetypes:
+        archetype = target_archetypes[0]
+    else:
+        archetype = "Famiglie Orbitali"  # default
+
+    base_price = ARCHETYPE_CEILINGS.get(archetype, 120)
+
+    # Reputation multiplier
+    rep_mult = 1.0 + (reputation - 50) / 200
+
+    # Zone factor
+    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.7)
+
+    # Prestige bonus
+    prestige = recipe.get("prestige", 50)
+    prestige_mult = 1.0 + (prestige - 50) / 200
+
+    return max(10, int(base_price * rep_mult * zone_factor * prestige_mult))
+
+
+def compute_bid_price(
+    ingredient: str,
+    competitor_briefings: dict[int, dict],
+    demand_forecast: dict[str, float],
+) -> float:
+    """
+    Compute bid price for an ingredient.
+
+    bid = max(predicted_competitor_bids) + epsilon
+    """
+    predicted_competitor_bids = []
+
+    for rid, brief in competitor_briefings.items():
+        if ingredient in brief.get("top_bid_ingredients", []):
+            est_bid = brief.get("predicted_bid_spend", 100) / max(
+                len(brief.get("top_bid_ingredients", [1])), 1
+            )
+            strategy = brief.get("strategy", "")
+            if strategy == "AGGRESSIVE_HOARDER":
+                est_bid *= 1.3
+            elif strategy == "REACTIVE_CHASER":
+                est_bid *= 1.15
+            elif strategy == "DECLINING":
+                est_bid *= 0.7
+            predicted_competitor_bids.append(est_bid)
+
+    if not predicted_competitor_bids:
+        # Check if it's a high-delta ingredient
+        high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
+        base = 40 if ingredient in high_delta_names else 20
+        return base
+
+    predicted_max = max(predicted_competitor_bids)
+
+    # Demand pressure
+    demand = demand_forecast.get(ingredient, 0)
+    demand_multiplier = 1.0 + min(demand / 20, 0.5)
+
+    return int(predicted_max * demand_multiplier) + 1

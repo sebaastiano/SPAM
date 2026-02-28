@@ -1,37 +1,57 @@
 """
-Trajectory prediction — multi-level predictor using feature-space
-momentum and observable-field extrapolation.
+SPAM! — Advanced Trajectory Predictor
+========================================
+Multi-level trajectory prediction powered by tracker observables.
+
+Level 1: Feature-space trajectory (embedding momentum)
+Level 2: Observable-field prediction (concrete balance/inventory/bid forecasts)
+Level 3: Behavioral pattern detection (strategy switches)
 """
 
-from __future__ import annotations
+import logging
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from src.models import CompetitorPrediction, CompetitorTurnState, Recipe
+from src.intelligence.competitor_state import CompetitorTurnState
+
+logger = logging.getLogger("spam.intelligence.trajectory")
+
+
+@dataclass
+class CompetitorPrediction:
+    """Predicted state of a competitor for next turn."""
+    restaurant_id: int = 0
+    predicted_balance: float = 0.0
+    predicted_bid_ingredients: set = field(default_factory=set)
+    predicted_bid_spend: float = 0.0
+    predicted_menu_changes: list = field(default_factory=list)
+    predicted_strategy: str = "UNCLASSIFIED"
+    predicted_feature_vector: np.ndarray = field(default_factory=lambda: np.zeros(14))
+    threat_level: float = 0.0
+    opportunity_level: float = 0.0
+    vulnerable_ingredients: list = field(default_factory=list)
+    bid_denial_cost: float = 0.0
+    menu_overlap: float = 0.0
 
 
 class AdvancedTrajectoryPredictor:
-    """Multi-level trajectory predictor powered by tracker observables."""
+    """
+    Multi-level trajectory prediction.
 
-    def __init__(
-        self,
-        recipe_db: dict[str, Recipe] | None = None,
-        momentum_factor: float = 0.7,
-    ) -> None:
+    Level 1: Feature-space momentum (where in strategic space)
+    Level 2: Observable-field prediction (balance, bids, menu)
+    Level 3: Behavioral pattern detection (strategy switches)
+    """
+
+    def __init__(self, recipe_db: dict = None, momentum_factor: float = 0.7):
         self.momentum_factor = momentum_factor
-        self.recipe_db: dict[str, Recipe] = recipe_db or {}
+        self.recipe_db = recipe_db or {}
         self.feature_history: dict[int, list[np.ndarray]] = {}
         self.state_history: dict[int, list[CompetitorTurnState]] = {}
 
-    def set_recipe_db(self, recipes: dict[str, Recipe]) -> None:
-        self.recipe_db = recipes
-
-    # ── Public API ────────────────────────────────────────────────
-
-    def update(
-        self, rid: int, state: CompetitorTurnState, features: np.ndarray
-    ) -> None:
-        self.feature_history.setdefault(rid, []).append(features)
+    def update(self, rid: int, state: CompetitorTurnState, features: np.ndarray):
+        self.feature_history.setdefault(rid, []).append(features.copy())
         self.state_history.setdefault(rid, []).append(state)
 
     def predict(self, rid: int) -> CompetitorPrediction:
@@ -41,103 +61,81 @@ class AdvancedTrajectoryPredictor:
             return CompetitorPrediction(restaurant_id=rid)
 
         current = states[-1]
+
+        # Level 1: Feature-space momentum
+        predicted_features = self._predict_features(features)
+
+        # Level 2: Observable field predictions
+        predicted_balance = self._predict_balance(states)
+        predicted_bids = self._predict_bid_targets(states)
+        predicted_bid_spend = self._predict_bid_spend(states)
+        predicted_menu = self._predict_menu_changes(states)
+
+        # Level 3: Behavioral pattern detection
+        strategy = self._detect_strategy_trend(states)
+        threat = self._compute_threat_level(states, predicted_bids)
+        opportunity = self._compute_opportunity_level(states)
+
+        # Actionable intelligence
+        vulnerable = self._find_vulnerable_ingredients(states)
+        denial_cost = self._estimate_denial_cost(states, vulnerable)
+
         return CompetitorPrediction(
             restaurant_id=rid,
-            predicted_balance=self._predict_balance(states),
-            predicted_bid_ingredients=self._predict_bid_targets(states),
-            predicted_bid_spend=self._predict_bid_spend(states),
-            predicted_menu_changes=self._predict_menu_changes(states),
-            predicted_strategy=self._detect_strategy_trend(states),
-            predicted_feature_vector=(
-                self._predict_features(features) if features else np.zeros(14)
-            ),
-            threat_level=self._compute_threat(states),
-            opportunity_level=self._compute_opportunity(states),
-            vulnerable_ingredients=self._find_vulnerable(states),
-            bid_denial_cost=self._estimate_denial_cost(states),
-            menu_overlap=0.0,
+            predicted_balance=predicted_balance,
+            predicted_bid_ingredients=predicted_bids,
+            predicted_bid_spend=predicted_bid_spend,
+            predicted_menu_changes=predicted_menu,
+            predicted_strategy=strategy,
+            predicted_feature_vector=predicted_features,
+            threat_level=threat,
+            opportunity_level=opportunity,
+            vulnerable_ingredients=vulnerable,
+            bid_denial_cost=denial_cost,
         )
 
-    # ── Aggregates ────────────────────────────────────────────────
-
-    def get_ingredient_demand_forecast(self) -> dict[str, float]:
-        """Predicted per-ingredient demand summed across all competitors."""
-        demand: dict[str, float] = {}
-        for rid, states in self.state_history.items():
-            predicted = self._predict_bid_targets(states)
-            for ing in predicted:
-                recent_qty = 1.0
-                for s in states[-2:]:
-                    for b in s.bids:
-                        if b.get("ingredient") == ing:
-                            recent_qty = max(recent_qty, b.get("quantity", 1))
-                demand[ing] = demand.get(ing, 0) + recent_qty
-        return demand
-
-    def generate_briefings(self) -> dict[int, dict]:
-        """Per-competitor tactical briefing for decision & diplomacy."""
-        briefings: dict[int, dict] = {}
-        for rid, states in self.state_history.items():
-            pred = self.predict(rid)
-            cur = states[-1]
-            briefings[rid] = {
-                "name": cur.name,
-                "strategy": pred.predicted_strategy,
-                "threat_level": pred.threat_level,
-                "opportunity_level": pred.opportunity_level,
-                "balance": cur.balance,
-                "balance_trend": "rising" if cur.balance_delta > 0 else "falling",
-                "top_bid_ingredients": list(pred.predicted_bid_ingredients)[:5],
-                "predicted_bid_spend": pred.predicted_bid_spend,
-                "vulnerable_ingredients": pred.vulnerable_ingredients,
-                "bid_denial_cost": pred.bid_denial_cost,
-                "menu_price_avg": (
-                    float(np.mean(list(cur.menu.values()))) if cur.menu else 0
-                ),
-                "menu_size": len(cur.menu),
-                "reputation": cur.reputation,
-                "recommended_action": self._recommend_action(pred, cur),
-            }
-        return briefings
-
-    # ── Level 1: feature-space momentum ───────────────────────────
+    # ── Level 1: Feature-space momentum ──
 
     def _predict_features(self, features: list[np.ndarray]) -> np.ndarray:
         if len(features) < 2:
-            return features[-1]
-        vel = features[-1] - features[-2]
+            return features[-1] if features else np.zeros(14)
+        velocity = features[-1] - features[-2]
         if len(features) >= 3:
-            prev_vel = features[-2] - features[-3]
-            vel = self.momentum_factor * vel + (1 - self.momentum_factor) * prev_vel
-        return features[-1] + vel
+            prev_v = features[-2] - features[-3]
+            velocity = self.momentum_factor * velocity + (1 - self.momentum_factor) * prev_v
+        return features[-1] + velocity
 
-    # ── Level 2: observable field prediction ──────────────────────
+    # ── Level 2: Observable field predictions ──
 
     def _predict_balance(self, states: list[CompetitorTurnState]) -> float:
         if len(states) < 2:
             return states[-1].balance
         deltas = [s.balance_delta for s in states[-5:]]
         weights = [0.5 ** (len(deltas) - 1 - i) for i in range(len(deltas))]
-        return states[-1].balance + float(np.average(deltas, weights=weights))
+        predicted_delta = np.average(deltas, weights=weights)
+        return states[-1].balance + predicted_delta
 
-    def _predict_bid_targets(
-        self, states: list[CompetitorTurnState]
-    ) -> set[str]:
+    def _predict_bid_targets(self, states: list[CompetitorTurnState]) -> set[str]:
         if not states:
             return set()
-        freq: dict[str, int] = {}
+
+        # Frequency: bid on in last 3 turns
+        recent_bids: dict[str, int] = {}
         for s in states[-3:]:
             for ing in s.bid_ingredients:
-                freq[ing] = freq.get(ing, 0) + 1
-        consistent = {ing for ing, c in freq.items() if c >= 2}
+                recent_bids[ing] = recent_bids.get(ing, 0) + 1
 
-        menu_needed: set[str] = set()
-        for dish in states[-1].menu:
-            recipe = self.recipe_db.get(dish)
-            if recipe:
-                for ing in recipe.ingredients:
-                    if states[-1].inventory.get(ing, 0) == 0:
-                        menu_needed.add(ing)
+        # Consistent: bid on 2+ of last 3 turns
+        consistent = {ing for ing, count in recent_bids.items() if count >= 2}
+
+        # Menu-driven: ingredients needed for current menu
+        menu_needed = set()
+        for dish_name in states[-1].menu:
+            recipe = self.recipe_db.get(dish_name, {})
+            for ing in recipe.get("ingredients", {}):
+                if states[-1].inventory.get(ing, 0) == 0:
+                    menu_needed.add(ing)
+
         return consistent | menu_needed
 
     def _predict_bid_spend(self, states: list[CompetitorTurnState]) -> float:
@@ -146,9 +144,7 @@ class AdvancedTrajectoryPredictor:
         spends = [s.total_bid_spend for s in states[-3:]]
         return float(np.mean(spends) * 1.05)
 
-    def _predict_menu_changes(
-        self, states: list[CompetitorTurnState]
-    ) -> list[str]:
+    def _predict_menu_changes(self, states: list[CompetitorTurnState]) -> list[str]:
         if len(states) < 2:
             return []
         curr = set(states[-1].menu.keys())
@@ -157,13 +153,12 @@ class AdvancedTrajectoryPredictor:
             return list(curr - prev)
         return []
 
-    # ── Level 3: behavioural patterns ─────────────────────────────
+    # ── Level 3: Behavioral pattern detection ──
 
-    def _detect_strategy_trend(
-        self, states: list[CompetitorTurnState]
-    ) -> str:
+    def _detect_strategy_trend(self, states: list[CompetitorTurnState]) -> str:
         if len(states) < 3:
             return states[-1].inferred_strategy
+
         recent = [s.inferred_strategy for s in states[-3:]]
         if len(set(recent)) == 1:
             return recent[0]
@@ -171,69 +166,144 @@ class AdvancedTrajectoryPredictor:
             return f"TRANSITIONING→{recent[-1]}"
         return recent[-1]
 
-    def _compute_threat(self, states: list[CompetitorTurnState]) -> float:
-        cur = states[-1]
+    def _compute_threat_level(
+        self, states: list[CompetitorTurnState], predicted_bids: set[str]
+    ) -> float:
+        current = states[-1]
         threat = 0.0
-        if cur.balance > 7000:
-            threat += 0.3
-        elif cur.balance > 5000:
-            threat += 0.15
-        if cur.reputation > 90:
+
+        # Balance advantage
+        if current.balance > 7000:
             threat += 0.2
-        if cur.menu and len(cur.menu) >= 4:
-            threat += 0.2
+        elif current.balance > 5000:
+            threat += 0.1
+
+        # Bid competition
+        threat += 0.3 if len(predicted_bids) > 5 else 0.1
+
+        # Reputation
+        if current.reputation > 90:
+            threat += 0.1
+
+        # Menu overlap (placeholder)
+        threat += 0.1
+
         return min(1.0, threat)
 
-    def _compute_opportunity(
-        self, states: list[CompetitorTurnState]
-    ) -> float:
-        cur = states[-1]
-        opp = 0.0
-        if len(states) >= 2 and cur.balance_delta < -200:
-            opp += 0.3
-        if cur.balance < 4000:
-            opp += 0.2
-        if cur.reputation < 80:
-            opp += 0.2
-        if cur.inferred_strategy == "REACTIVE_CHASER":
-            opp += 0.3
-        return min(1.0, opp)
+    def _compute_opportunity_level(self, states: list[CompetitorTurnState]) -> float:
+        current = states[-1]
+        opportunity = 0.0
 
-    def _find_vulnerable(
-        self, states: list[CompetitorTurnState]
-    ) -> list[str]:
-        bid_prices: dict[str, list[float]] = {}
+        if len(states) >= 2 and states[-1].balance_delta < -200:
+            opportunity += 0.3
+        if current.balance < 4000:
+            opportunity += 0.2
+        if current.reputation < 80:
+            opportunity += 0.2
+        if current.inferred_strategy == "REACTIVE_CHASER":
+            opportunity += 0.3
+
+        return min(1.0, opportunity)
+
+    def _find_vulnerable_ingredients(self, states: list[CompetitorTurnState]) -> list[str]:
+        if not states:
+            return []
+        ingredient_bids: dict[str, list[float]] = {}
         for s in states[-3:]:
             for b in s.bids:
                 ing = b.get("ingredient", "")
-                bid_prices.setdefault(ing, []).append(b.get("bid", 0))
+                ingredient_bids.setdefault(ing, []).append(b.get("bid", 0))
+
         return [
             ing
-            for ing, prices in bid_prices.items()
-            if len(prices) >= 2 and float(np.mean(prices)) < 100
+            for ing, prices in ingredient_bids.items()
+            if len(prices) >= 2 and np.mean(prices) < 100
         ]
 
     def _estimate_denial_cost(
-        self, states: list[CompetitorTurnState]
+        self, states: list[CompetitorTurnState], vulnerable: list[str]
     ) -> float:
-        vulnerable = self._find_vulnerable(states)
-        cost = 0.0
-        for b in states[-1].bids:
-            if b.get("ingredient") in vulnerable:
-                cost += (b.get("bid", 0) + 1) * b.get("quantity", 1)
-        return cost
+        total = 0.0
+        if states:
+            for b in states[-1].bids:
+                if b.get("ingredient") in vulnerable:
+                    total += (b.get("bid", 0) + 1) * b.get("quantity", 1)
+        return total
 
-    @staticmethod
+    # ── Aggregate methods ──
+
+    def competitors_approaching_zone(
+        self, zone_center: np.ndarray, threshold: float
+    ) -> list[int]:
+        approaching = []
+        for rid, features in self.feature_history.items():
+            if len(features) < 2:
+                continue
+            predicted = self._predict_features(features)
+            current_dist = np.linalg.norm(features[-1] - zone_center)
+            predicted_dist = np.linalg.norm(predicted - zone_center)
+            if predicted_dist < current_dist and predicted_dist < threshold:
+                approaching.append(rid)
+        return approaching
+
+    def get_ingredient_demand_forecast(self) -> dict[str, float]:
+        """Predict aggregate demand for each ingredient next turn."""
+        demand: dict[str, float] = {}
+        for rid in self.state_history:
+            predicted_bids = self._predict_bid_targets(self.state_history[rid])
+            for ing in predicted_bids:
+                recent_qty = 0
+                for s in self.state_history[rid][-2:]:
+                    for b in s.bids:
+                        if b.get("ingredient") == ing:
+                            recent_qty = max(recent_qty, b.get("quantity", 1))
+                demand[ing] = demand.get(ing, 0) + max(recent_qty, 1)
+        return demand
+
+    def generate_per_competitor_briefing(self) -> dict[int, dict]:
+        """Generate a tactical briefing for each competitor."""
+        briefings = {}
+        for rid in self.state_history:
+            prediction = self.predict(rid)
+            states = self.state_history[rid]
+            current = states[-1]
+
+            briefings[rid] = {
+                "name": current.name,
+                "strategy": prediction.predicted_strategy,
+                "threat_level": prediction.threat_level,
+                "opportunity_level": prediction.opportunity_level,
+                "balance": current.balance,
+                "balance_trend": "rising" if current.balance_delta > 0 else "falling",
+                "top_bid_ingredients": list(prediction.predicted_bid_ingredients)[:5],
+                "predicted_bid_spend": prediction.predicted_bid_spend,
+                "vulnerable_ingredients": prediction.vulnerable_ingredients,
+                "bid_denial_cost": prediction.bid_denial_cost,
+                "menu_price_avg": (
+                    float(np.mean(list(current.menu.values())))
+                    if current.menu
+                    else 0
+                ),
+                "menu_size": len(current.menu),
+                "reputation": current.reputation,
+                "recommended_action": self._recommend_action(prediction, current),
+            }
+        return briefings
+
     def _recommend_action(
-        pred: CompetitorPrediction, state: CompetitorTurnState
+        self, prediction: CompetitorPrediction, state: CompetitorTurnState
     ) -> str:
-        if pred.threat_level > 0.7:
-            if pred.bid_denial_cost < 200:
-                return f"BID_DENY: {pred.vulnerable_ingredients[:2]}"
-            return "ZONE_AVOID"
-        if pred.opportunity_level > 0.6:
+        if prediction.threat_level > 0.7:
+            if prediction.bid_denial_cost < 200:
+                return (
+                    f"BID_DENY: outbid on "
+                    f"{prediction.vulnerable_ingredients[:2]} "
+                    f"(cost≈{prediction.bid_denial_cost:.0f})"
+                )
+            return "ZONE_AVOID: too expensive to deny, consider zone switch"
+        if prediction.opportunity_level > 0.6:
             if state.inferred_strategy == "REACTIVE_CHASER":
-                return "DECEIVE"
+                return "DECEIVE: send misleading menu/ingredient signal"
             if state.inferred_strategy == "DECLINING":
-                return "ALLIANCE"
-        return "MONITOR"
+                return "ALLIANCE: offer cheap ingredient trade"
+        return "MONITOR: no immediate action needed"

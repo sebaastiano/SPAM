@@ -1,155 +1,235 @@
 """
-Client profiling — two-level memory (Global + Zone) with Bayesian
-intolerance detection.
+SPAM! — Client Profile Memory
+===============================
+Two-level client profiling: GlobalClientLibrary + ZoneClientLibrary.
+Includes Bayesian intolerance detection.
 """
 
-from __future__ import annotations
+import logging
+from dataclasses import dataclass, field
 
-from typing import Any
+from src.config import KNOWN_ARCHETYPES, ZONE_TARGET_ARCHETYPES
 
-from src.config import KNOWN_ARCHETYPES, ZONES
-from src.models import ArchetypeStats, ClientProfile, Recipe
+logger = logging.getLogger("spam.memory.client_profile")
 
 
-# ── Intolerance Detector ─────────────────────────────────────────
+@dataclass
+class ClientProfile:
+    """Profile of a single client interaction."""
+    archetype: str
+    order_text: str
+    matched_dish: str | None = None
+    served: bool = False
+    revenue: float = 0.0
+    intolerance_triggered: bool = False
+    prep_time_ms: int = 0
+    turn_id: int = 0
+    timestamp: str = ""
+
+
+@dataclass
+class ArchetypeStats:
+    """Aggregate statistics for one archetype."""
+    total_visits: int = 0
+    total_served: int = 0
+    total_revenue: float = 0.0
+    total_failures: int = 0
+    avg_revenue_per_serve: float = 0.0
+    intolerance_rate: float = 0.0
+    common_orders: dict = field(default_factory=dict)  # order_text → count
+    preferred_dishes: dict = field(default_factory=dict)  # dish_name → count
+
+    def update(self, profile: ClientProfile):
+        self.total_visits += 1
+        if profile.served:
+            self.total_served += 1
+            self.total_revenue += profile.revenue
+            self.avg_revenue_per_serve = (
+                self.total_revenue / max(self.total_served, 1)
+            )
+            if profile.matched_dish:
+                self.preferred_dishes[profile.matched_dish] = (
+                    self.preferred_dishes.get(profile.matched_dish, 0) + 1
+                )
+        if profile.intolerance_triggered:
+            self.total_failures += 1
+        self.intolerance_rate = self.total_failures / max(self.total_visits, 1)
+
+        # Track order patterns
+        self.common_orders[profile.order_text] = (
+            self.common_orders.get(profile.order_text, 0) + 1
+        )
 
 
 class IntoleranceDetector:
-    """Bayesian intolerance detection.
+    """
+    Bayesian intolerance detection.
 
-    When a serve fails (revenue=0 + reputation loss), one of the dish's
-    ingredients triggered an intolerance.  We track suspicion scores per
-    ``archetype × ingredient`` pair as Beta(α, β) distributions.
+    When a serve fails (revenue = 0 + reputation loss), we know ONE of the
+    ingredients in the served dish triggered an intolerance. We track suspicion
+    scores per archetype×ingredient pair using Beta distributions.
     """
 
-    def __init__(self) -> None:
+    def __init__(self):
         # suspicion[archetype][ingredient] = (alpha, beta)
-        self.suspicion: dict[str, dict[str, tuple[float, float]]] = {}
+        # alpha = evidence of danger, beta = evidence of safety
+        self.suspicion: dict[str, dict[str, tuple[float, float]]] = {
+            arch: {} for arch in KNOWN_ARCHETYPES
+        }
 
-    def record_success(self, archetype: str, ingredients: list[str]) -> None:
-        """Dish served OK — lower suspicion for all ingredients."""
+    def record_success(self, archetype: str, ingredients: list[str]):
+        """Dish served successfully — lower suspicion for all ingredients."""
+        if archetype not in self.suspicion:
+            self.suspicion[archetype] = {}
         for ing in ingredients:
-            a, b = self._get(archetype, ing)
-            self._set(archetype, ing, (a, b + 1))
+            a, b = self.suspicion[archetype].get(ing, (1.0, 1.0))
+            self.suspicion[archetype][ing] = (a, b + 1)
 
-    def record_failure(self, archetype: str, ingredients: list[str]) -> None:
+    def record_failure(self, archetype: str, ingredients: list[str]):
         """Dish serve failed — raise suspicion for all ingredients."""
+        if archetype not in self.suspicion:
+            self.suspicion[archetype] = {}
         for ing in ingredients:
-            a, b = self._get(archetype, ing)
-            self._set(archetype, ing, (a + 1, b))
+            a, b = self.suspicion[archetype].get(ing, (1.0, 1.0))
+            self.suspicion[archetype][ing] = (a + 1, b)
 
-    def is_safe(
-        self, archetype: str, ingredient: str, threshold: float = 0.3
-    ) -> bool:
-        a, b = self._get(archetype, ingredient)
+    def is_safe(self, archetype: str, ingredient: str, threshold: float = 0.3) -> bool:
+        """Is this ingredient safe for this archetype? (Bayesian estimate)"""
+        if archetype not in self.suspicion:
+            return True  # unknown archetype = assume safe
+        a, b = self.suspicion[archetype].get(ingredient, (1.0, 1.0))
         p_intolerant = a / (a + b)
         return p_intolerant < threshold
 
-    def filter_safe_recipes(
-        self, archetype: str, recipes: list[Recipe]
-    ) -> list[Recipe]:
-        """Return recipes whose ingredients are all safe for *archetype*."""
-        safe: list[Recipe] = []
-        for recipe in recipes:
-            if all(
-                self.is_safe(archetype, ing)
-                for ing in recipe.ingredients
-            ):
-                safe.append(recipe)
-        return safe
+    def is_recipe_safe(self, archetype: str, ingredients: list[str], threshold: float = 0.3) -> bool:
+        """Are ALL ingredients in a recipe safe for this archetype?"""
+        return all(self.is_safe(archetype, ing, threshold) for ing in ingredients)
 
-    # ── internals ─────────────────────────────────────────────────
-
-    def _get(self, arch: str, ing: str) -> tuple[float, float]:
-        return self.suspicion.setdefault(arch, {}).get(ing, (1.0, 1.0))
-
-    def _set(self, arch: str, ing: str, val: tuple[float, float]) -> None:
-        self.suspicion.setdefault(arch, {})[ing] = val
-
-
-# ── Global Client Library ────────────────────────────────────────
+    def get_danger_score(self, archetype: str, ingredient: str) -> float:
+        """Get the intolerance probability for an ingredient+archetype pair."""
+        if archetype not in self.suspicion:
+            return 0.0
+        a, b = self.suspicion[archetype].get(ingredient, (1.0, 1.0))
+        return a / (a + b)
 
 
 class GlobalClientLibrary:
-    """Cross-turn, cross-zone aggregate client knowledge."""
+    """
+    Cross-turn, cross-zone aggregate client knowledge.
 
-    def __init__(self) -> None:
+    Tracks per-archetype statistics and intolerance patterns
+    across all turns and zones.
+    """
+
+    def __init__(self):
         self.archetype_stats: dict[str, ArchetypeStats] = {
             arch: ArchetypeStats() for arch in KNOWN_ARCHETYPES
         }
-        self.known_intolerances: dict[str, set[str]] = {
-            arch: set() for arch in KNOWN_ARCHETYPES
-        }
+        self.intolerance_detector = IntoleranceDetector()
         self.order_to_dish_cache: dict[str, str] = {}
+        self.all_profiles: list[ClientProfile] = []
 
-    def update_from_turn(self, profiles: list[ClientProfile]) -> None:
-        for profile in profiles:
-            arch = profile.archetype
-            if arch not in self.archetype_stats:
-                self.archetype_stats[arch] = ArchetypeStats()
-            self.archetype_stats[arch].update(profile)
+    def update_from_profile(self, profile: ClientProfile):
+        """Integrate a single client interaction."""
+        self.all_profiles.append(profile)
 
-            # Cache successful order→dish mapping
-            if profile.served and profile.matched_dish:
-                key = profile.order_text.lower().strip()
-                self.order_to_dish_cache[key] = profile.matched_dish
+        # Update archetype stats
+        if profile.archetype in self.archetype_stats:
+            self.archetype_stats[profile.archetype].update(profile)
+        else:
+            self.archetype_stats[profile.archetype] = ArchetypeStats()
+            self.archetype_stats[profile.archetype].update(profile)
+
+        # Cache successful order→dish mappings
+        if profile.served and profile.matched_dish:
+            normalized = profile.order_text.lower().strip()
+            self.order_to_dish_cache[normalized] = profile.matched_dish
+
+    def update_intolerance(
+        self,
+        archetype: str,
+        ingredients: list[str],
+        success: bool,
+    ):
+        """Update intolerance model from serve result."""
+        if success:
+            self.intolerance_detector.record_success(archetype, ingredients)
+        else:
+            self.intolerance_detector.record_failure(archetype, ingredients)
 
     def get_cached_dish(self, order_text: str) -> str | None:
+        """Look up a previously successful order→dish mapping."""
         return self.order_to_dish_cache.get(order_text.lower().strip())
 
 
-# ── Zone Client Library ──────────────────────────────────────────
-
-
-# Target archetypes per zone
-_ZONE_ARCHETYPES: dict[str, list[str]] = {
-    "PREMIUM_MONOPOLIST": ["Saggi del Cosmo", "Astrobarone"],
-    "BUDGET_OPPORTUNIST": ["Esploratore Galattico", "Famiglie Orbitali"],
-    "NICHE_SPECIALIST": [],  # dynamically chosen
-    "SPEED_CONTENDER": list(KNOWN_ARCHETYPES),
-    "MARKET_ARBITRAGEUR": [],
-}
-
-
 class ZoneClientLibrary:
-    """Zone-specific view of the global client library."""
+    """Zone-specific client profile subset."""
 
-    def __init__(self, zone: str) -> None:
+    def __init__(self, zone: str):
         self.zone = zone
-        self.target_archetypes = _ZONE_ARCHETYPES.get(zone, [])
+        self.target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
 
     def get_relevant_stats(
         self, global_lib: GlobalClientLibrary
     ) -> dict[str, ArchetypeStats]:
+        """Get stats for this zone's target archetypes only."""
         return {
-            arch: global_lib.archetype_stats[arch]
+            arch: global_lib.archetype_stats.get(arch, ArchetypeStats())
             for arch in self.target_archetypes
-            if arch in global_lib.archetype_stats
         }
 
+    def recommend_menu(
+        self,
+        inventory: dict[str, int],
+        recipes: list[dict],
+        global_lib: GlobalClientLibrary,
+    ) -> list[dict]:
+        """
+        Select recipes that best serve this zone's target archetypes.
 
-# ── Combined profile memory ────────────────────────────────────
+        Returns recipes sorted by composite score:
+        archetype_fit × intolerance_safety × throughput_value
+        """
+        scored = []
+        for recipe in recipes:
+            # Check ingredient availability
+            recipe_ings = recipe.get("ingredients", {})
+            if not all(
+                inventory.get(ing, 0) >= qty
+                for ing, qty in recipe_ings.items()
+            ):
+                continue
 
+            # Archetype fit score
+            archetype_fit = self._score_archetype_fit(recipe)
 
-class ClientProfileMemory:
-    """Aggregation wrapper that holds the global library, per-zone
-    libraries, intolerance detector, and interaction log."""
+            # Intolerance safety score
+            safety = 1.0
+            for arch in self.target_archetypes:
+                ings = list(recipe_ings.keys())
+                if not global_lib.intolerance_detector.is_recipe_safe(arch, ings):
+                    safety *= 0.3  # penalize risky recipes
 
-    def __init__(self) -> None:
-        self.global_lib = GlobalClientLibrary()
-        self.intolerance = IntoleranceDetector()
-        self.zone_libs: dict[str, ZoneClientLibrary] = {
-            z: ZoneClientLibrary(z) for z in ZONES
-        }
-        self.turn_profiles: list[ClientProfile] = []
+            # Throughput value (faster = better)
+            prep_time = recipe.get("prep_time", 5.0)
+            throughput = 1.0 / max(prep_time, 0.1)
 
-    def record_interaction(self, profile: ClientProfile) -> None:
-        self.turn_profiles.append(profile)
+            score = archetype_fit * safety * throughput
+            scored.append({"recipe": recipe, "score": score})
 
-    def end_turn(self) -> None:
-        """Flush turn profiles into the global library and reset."""
-        self.global_lib.update_from_turn(self.turn_profiles)
-        self.turn_profiles.clear()
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored
 
-    def reset(self) -> None:
-        self.turn_profiles.clear()
+    def _score_archetype_fit(self, recipe: dict) -> float:
+        """Score how well a recipe fits this zone's target archetypes."""
+        prestige = recipe.get("prestige", 50)
+
+        from src.config import ZONE_PRESTIGE_RANGE
+        pmin, pmax = ZONE_PRESTIGE_RANGE.get(self.zone, (0, 100))
+
+        if pmin <= prestige <= pmax:
+            return 1.0
+        elif prestige < pmin:
+            return max(0.1, 1.0 - (pmin - prestige) / 50)
+        else:
+            return max(0.1, 1.0 - (prestige - pmax) / 50)

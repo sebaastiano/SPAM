@@ -1,50 +1,64 @@
 """
-TrackerBridge — async interface between tracker.py sidecar (localhost:5555)
-and the agent's intelligence pipeline.
+SPAM! — Tracker Bridge
+=======================
+Bridge between tracker.py sidecar (localhost:5555) and the agent's
+intelligence pipeline.
 
-tracker.py already polls the game server every 5s, computes diffs, and
-exposes a local REST API.  This bridge queries it at decision points.
+tracker.py runs independently, polling the game server every 5s.
+This bridge queries tracker's local API at decision points.
 """
-
-from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from typing import Any
+from dataclasses import dataclass, field
 
-import aiohttp
+import httpx
 
-from src.config import BASE_URL, HEADERS, TEAM_ID, TRACKER_BASE_URL
-from src.models import TrackerSnapshot
+from src.config import TRACKER_BASE_URL, TEAM_ID
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger("spam.intelligence.tracker_bridge")
+
+
+@dataclass
+class TrackerSnapshot:
+    """Complete snapshot from tracker at a single point in time."""
+    restaurants: dict = field(default_factory=dict)       # rid → flattened restaurant data
+    change_logs: dict = field(default_factory=dict)       # rid → list of changes
+    bid_history: list = field(default_factory=list)       # all bids across all teams
+    market_entries: list = field(default_factory=list)     # all market BUY/SELL entries
+    own_meals: list = field(default_factory=list)          # our completed meals
+    timestamp: float = 0.0
 
 
 class TrackerBridge:
-    """Async gateway to the tracker sidecar running on localhost:5555."""
+    """
+    Bridge between tracker.py sidecar and the intelligence pipeline.
 
-    def __init__(
-        self,
-        base_url: str = TRACKER_BASE_URL,
-        own_id: int = TEAM_ID,
-        timeout: float = 5.0,
-    ) -> None:
+    tracker.py already polls GET /restaurants every 5s — no need to duplicate.
+    This bridge queries tracker's pre-computed diffs at decision points only.
+    """
+
+    def __init__(self, base_url: str = TRACKER_BASE_URL, own_id: int = TEAM_ID):
         self.base_url = base_url
         self.own_id = own_id
-        self._timeout = aiohttp.ClientTimeout(total=timeout)
-        self._session: aiohttp.ClientSession | None = None
+        self._client: httpx.AsyncClient | None = None
         self._last_snapshot: TrackerSnapshot | None = None
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=self._timeout)
-        return self._session
-
-    # ── Main entry point ──────────────────────────────────────────
+    async def _ensure_client(self):
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url, timeout=5.0
+            )
 
     async def snapshot(self) -> TrackerSnapshot:
-        """Pull a complete snapshot from the tracker sidecar."""
+        """
+        Pull a complete snapshot from tracker.
+        Called once at the start of each decision cycle.
+        """
+        await self._ensure_client()
+
+        # Parallel fetch from all tracker endpoints
         restaurants, bids, market, meals = await asyncio.gather(
             self._fetch_all_restaurants(),
             self._fetch_bid_history(),
@@ -52,14 +66,15 @@ class TrackerBridge:
             self._fetch_own_meals(),
         )
 
-        change_logs: dict[int, list] = {}
+        # Fetch change logs for all known restaurants
+        change_logs = {}
         if restaurants:
-            rid_list = list(restaurants.keys())
-            logs = await asyncio.gather(
-                *(self._fetch_change_log(rid) for rid in rid_list)
-            )
-            for rid, cl in zip(rid_list, logs):
-                change_logs[rid] = cl
+            tasks = {
+                rid: self._fetch_change_log(rid) for rid in restaurants.keys()
+            }
+            results = await asyncio.gather(*tasks.values())
+            for rid, log in zip(tasks.keys(), results):
+                change_logs[rid] = log
 
         snap = TrackerSnapshot(
             restaurants=restaurants,
@@ -72,74 +87,66 @@ class TrackerBridge:
         self._last_snapshot = snap
         return snap
 
-    # ── Individual fetchers ───────────────────────────────────────
-
-    async def _fetch_json(self, path: str) -> Any:
-        session = await self._get_session()
-        try:
-            async with session.get(f"{self.base_url}{path}") as resp:
-                resp.raise_for_status()
-                return await resp.json()
-        except Exception as exc:
-            log.warning("TrackerBridge: %s failed: %s", path, exc)
-            return None
-
     async def _fetch_all_restaurants(self) -> dict[int, dict]:
-        data = await self._fetch_json("/api/all_restaurants")
-        if isinstance(data, list):
-            return {r["id"]: r for r in data if "id" in r}
-        if isinstance(data, dict):
-            return data
-        return {}
-
-    async def _fetch_change_log(self, rid: int) -> list[dict]:
-        data = await self._fetch_json(f"/api/restaurant/{rid}")
-        if isinstance(data, dict):
-            return data.get("change_log", [])
-        return []
-
-    async def _fetch_bid_history(self) -> list[dict]:
-        data = await self._fetch_json("/api/bid_history")
-        return data if isinstance(data, list) else []
-
-    async def _fetch_market_entries(self) -> list[dict]:
-        data = await self._fetch_json("/api/market")
-        return data if isinstance(data, list) else []
-
-    async def _fetch_own_meals(self) -> list[dict]:
-        data = await self._fetch_json("/api/meals")
-        return data if isinstance(data, list) else []
-
-    # ── Fallback: direct game-server polling ──────────────────────
-
-    async def fetch_restaurants_direct(self) -> list[dict]:
-        """Fallback if tracker.py is unreachable."""
-        session = await self._get_session()
         try:
-            async with session.get(
-                f"{BASE_URL}/restaurants", headers=HEADERS
-            ) as resp:
-                resp.raise_for_status()
-                return await resp.json()
-        except Exception as exc:
-            log.error("Direct restaurants fetch failed: %s", exc)
-            return []
-
-    async def fetch_own_state_direct(self) -> dict:
-        """Fallback: GET /restaurant/17."""
-        session = await self._get_session()
-        try:
-            async with session.get(
-                f"{BASE_URL}/restaurant/{self.own_id}", headers=HEADERS
-            ) as resp:
-                resp.raise_for_status()
-                return await resp.json()
-        except Exception as exc:
-            log.error("Direct own-state fetch failed: %s", exc)
+            resp = await self._client.get("/api/all_restaurants")
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                return {r.get("id", i): r for i, r in enumerate(data)}
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"Failed to fetch restaurants from tracker: {e}")
             return {}
 
-    # ── Lifecycle ─────────────────────────────────────────────────
+    async def _fetch_change_log(self, rid: int) -> list[dict]:
+        try:
+            resp = await self._client.get(f"/api/restaurant/{rid}")
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("change_log", []) if isinstance(data, dict) else []
+        except Exception:
+            return []
 
-    async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
+    async def _fetch_bid_history(self) -> list[dict]:
+        try:
+            resp = await self._client.get("/api/bid_history")
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Failed to fetch bid history: {e}")
+            return []
+
+    async def _fetch_market_entries(self) -> list[dict]:
+        try:
+            resp = await self._client.get("/api/market")
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Failed to fetch market entries: {e}")
+            return []
+
+    async def _fetch_own_meals(self) -> list[dict]:
+        try:
+            resp = await self._client.get("/api/meals")
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Failed to fetch meals: {e}")
+            return []
+
+    def delta_since_last(self, rid: int) -> dict:
+        """Compare current snapshot vs previous for a specific restaurant."""
+        if not self._last_snapshot or rid not in self._last_snapshot.change_logs:
+            return {}
+        return {
+            entry.get("field", ""): {"old": entry.get("old"), "new": entry.get("new")}
+            for entry in self._last_snapshot.change_logs.get(rid, [])
+        }
+
+    async def close(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()

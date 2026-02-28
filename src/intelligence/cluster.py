@@ -1,53 +1,84 @@
 """
-Cluster classifier — assigns each competitor to one of five
-behavioural clusters.
+SPAM! — Cluster Classifier
+=============================
+Classify competitors into behavioral clusters based on
+14-dim feature vectors and their PCA embeddings.
+
+Clusters:
+  STABLE_SPECIALIST, REACTIVE_CHASER, AGGRESSIVE_HOARDER,
+  DECLINING, DORMANT, UNCLASSIFIED
 """
 
-from __future__ import annotations
+import logging
 
 import numpy as np
 
+from src.config import CLUSTER_STRATEGIES
 
-# Cluster label → heuristic centre (will be refined after enough data)
-# These are rough hand-tuned starting points in the 2-dim PCA space.
-_CLUSTER_CENTRES: dict[str, np.ndarray] = {
-    "STABLE_SPECIALIST": np.array([1.0, 0.5]),
-    "REACTIVE_CHASER": np.array([-0.5, 1.0]),
-    "AGGRESSIVE_HOARDER": np.array([1.5, -0.5]),
-    "DECLINING": np.array([-1.0, -1.0]),
-    "DORMANT": np.array([0.0, 0.0]),
-}
+logger = logging.getLogger("spam.intelligence.cluster")
+
+# Cluster definitions for rule-based classification
+CLUSTERS = list(CLUSTER_STRATEGIES.keys())
 
 
-def classify_cluster(
-    embedding_2d: np.ndarray,
-    inferred_strategy: str = "UNCLASSIFIED",
-) -> str:
-    """Classify a competitor based on 2-dim embedding + strategy hint.
-
-    If the ``StrategyInferrer`` already produced a high-confidence label
-    we prefer that; otherwise we fall back to nearest-centroid in the
-    2-dim PCA space.
+class ClusterClassifier:
     """
-    # Trust the strategy inferrer for strong signals
-    strategy_to_cluster: dict[str, str] = {
-        "PREMIUM_MONOPOLIST": "STABLE_SPECIALIST",
-        "BUDGET_OPPORTUNIST": "STABLE_SPECIALIST",
-        "AGGRESSIVE_HOARDER": "AGGRESSIVE_HOARDER",
-        "MARKET_ARBITRAGEUR": "STABLE_SPECIALIST",
-        "REACTIVE_CHASER": "REACTIVE_CHASER",
-        "DECLINING": "DECLINING",
-        "DORMANT": "DORMANT",
-    }
-    if inferred_strategy in strategy_to_cluster:
-        return strategy_to_cluster[inferred_strategy]
+    Rule-based competitor classification into behavioral clusters.
 
-    # Nearest centroid fallback
-    best_label = "STABLE_SPECIALIST"
-    best_dist = float("inf")
-    for label, centre in _CLUSTER_CENTRES.items():
-        dist = float(np.linalg.norm(embedding_2d - centre))
-        if dist < best_dist:
-            best_dist = dist
-            best_label = label
-    return best_label
+    Uses strategy inference results and feature vectors for
+    classification. Falls back to k-means when sufficient data
+    is available (>= 5 restaurants, >= 3 turns).
+    """
+
+    def classify(self, strategy: str, features: np.ndarray | None = None) -> str:
+        """
+        Classify a competitor into a cluster.
+
+        Primary classification uses the StrategyInferrer result directly,
+        mapping strategy names to cluster names.
+        """
+        strategy_to_cluster = {
+            "PREMIUM_MONOPOLIST": "STABLE_SPECIALIST",
+            "BUDGET_OPPORTUNIST": "STABLE_SPECIALIST",
+            "AGGRESSIVE_HOARDER": "AGGRESSIVE_HOARDER",
+            "MARKET_ARBITRAGEUR": "STABLE_SPECIALIST",
+            "REACTIVE_CHASER": "REACTIVE_CHASER",
+            "DECLINING": "DECLINING",
+            "DORMANT": "DORMANT",
+            "UNCLASSIFIED": "UNCLASSIFIED",
+        }
+
+        cluster = strategy_to_cluster.get(strategy, "UNCLASSIFIED")
+
+        # Transitioning strategies
+        if strategy.startswith("TRANSITIONING→"):
+            target = strategy.split("→")[-1]
+            cluster = strategy_to_cluster.get(target, "REACTIVE_CHASER")
+
+        return cluster
+
+    def get_relational_strategy(self, cluster: str) -> str:
+        """Get the recommended relational strategy for a cluster."""
+        return CLUSTER_STRATEGIES.get(cluster, "Probe — classify first")
+
+    async def process(self, input_data: dict) -> dict:
+        """
+        Pipeline module interface.
+
+        input_data should contain:
+          - strategies: {rid: {strategy: str, ...}} from strategy inferrer
+          - features: {rid: np.ndarray} from feature extractor (optional)
+          - embeddings: {rid: np.ndarray} from embedding module (optional)
+
+        Returns dict with 'clusters': {rid: cluster_name}
+        """
+        strategies = input_data.get("strategies", {})
+        features = input_data.get("features", {})
+
+        clusters = {}
+        for rid, strat_data in strategies.items():
+            strategy = strat_data if isinstance(strat_data, str) else strat_data.get("strategy", "UNCLASSIFIED")
+            feat = features.get(rid)
+            clusters[rid] = self.classify(strategy, feat)
+
+        return {"clusters": clusters}

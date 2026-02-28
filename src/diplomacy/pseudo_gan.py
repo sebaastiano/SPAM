@@ -1,88 +1,156 @@
 """
-PseudoGAN — two-LLM message crafting (generator + discriminator).
+SPAM! — Pseudo-GAN Message Crafter
+=====================================
+Two-LLM setup: generator (gpt-oss-120b) crafts diplomatic messages,
+discriminator (gpt-oss-20b) scores believability.
+Parameterized with per-competitor tactical briefings.
 """
 
-from __future__ import annotations
-
 import logging
-from typing import Any
 
-log = logging.getLogger(__name__)
+from datapizza.clients.openai_like import OpenAILikeClient
+
+from src.config import (
+    REGOLO_API_KEY,
+    REGOLO_BASE_URL,
+    PRIMARY_MODEL,
+    FAST_MODEL,
+)
+
+logger = logging.getLogger("spam.diplomacy.pseudo_gan")
 
 
 class PseudoGAN:
-    """Generator (gpt-oss-120b) crafts a diplomatic message; discriminator
-    (gpt-oss-20b) scores whether a rival LLM would believe it.
+    """
+    Generator: gpt-oss-120b — crafts diplomatic messages
+    Discriminator: gpt-oss-20b — scores whether the message would be
+    believed by a rival LLM agent
 
-    Not a real GAN; just iterative refinement.
+    NOT a real GAN. No gradient-based training. Just iterative refinement.
+
+    The generator prompt includes concrete competitor intel from the tracker,
+    making messages grounded in reality (hard to distinguish from genuine cooperation).
     """
 
     def __init__(
         self,
-        generator_client: Any,   # OpenAILikeClient (gpt-oss-120b)
-        discriminator_client: Any,  # OpenAILikeClient (gpt-oss-20b)
-    ) -> None:
-        self.generator = generator_client
-        self.discriminator = discriminator_client
+        generator_client: OpenAILikeClient | None = None,
+        discriminator_client: OpenAILikeClient | None = None,
+    ):
+        self.generator = generator_client or OpenAILikeClient(
+            api_key=REGOLO_API_KEY,
+            model=PRIMARY_MODEL,
+            base_url=REGOLO_BASE_URL,
+            system_prompt="You are a diplomatic message crafter for a competitive cooking game.",
+        )
+        self.discriminator = discriminator_client or OpenAILikeClient(
+            api_key=REGOLO_API_KEY,
+            model=FAST_MODEL,
+            base_url=REGOLO_BASE_URL,
+            system_prompt="You evaluate the believability of messages in a competitive game.",
+        )
 
     async def craft_message(
         self,
-        deception_action: dict[str, Any],
-        competitor_briefing: dict[str, Any],
-        max_iterations: int = 2,
+        deception_action: dict,
+        competitor_briefing: dict,
+        max_iterations: int = 3,
     ) -> str:
-        """Craft a deceptive message using iterative refinement."""
-        target_name = deception_action.get("target_name", "")
-        arm = deception_action.get("arm", "")
-        desired = deception_action.get("desired_effect", "")
-        hint = deception_action.get("message_hint", "")
+        """
+        Craft a deceptive message using generator + discriminator loop.
 
-        tracker_ctx = (
-            f"Target: {target_name} (strategy: {competitor_briefing.get('strategy', '?')})\n"
-            f"Balance: {competitor_briefing.get('balance', 0):.0f} ({competitor_briefing.get('balance_trend', '?')})\n"
-            f"Avg menu price: {competitor_briefing.get('menu_price_avg', 0):.0f}\n"
-            f"Top bid ingredients: {', '.join(competitor_briefing.get('top_bid_ingredients', [])[:3])}\n"
-            f"Reputation: {competitor_briefing.get('reputation', 0)}"
+        Args:
+            deception_action: From DeceptionBandit.select_target_and_strategy()
+            competitor_briefing: From trajectory predictor
+            max_iterations: Max refinement iterations
+
+        Returns:
+            Best crafted message string
+        """
+        target_name = deception_action.get("target_name", "Unknown")
+        target_strategy = deception_action.get("target_strategy", "UNKNOWN")
+        arm = deception_action.get("arm", "truthful_warning")
+        desired_effect = deception_action.get("desired_effect", "")
+        message_hint = deception_action.get("message_hint", "")
+
+        # Build rich context from tracker observations
+        tracker_context = (
+            f"Target: {target_name} (strategy: {target_strategy})\n"
+            f"Their balance: {competitor_briefing.get('balance', 0):.0f} "
+            f"({competitor_briefing.get('balance_trend', 'unknown')})\n"
+            f"Their avg menu price: {competitor_briefing.get('menu_price_avg', 0):.0f}\n"
+            f"Their top bid ingredients: "
+            f"{', '.join(competitor_briefing.get('top_bid_ingredients', [])[:3])}\n"
+            f"Their reputation: {competitor_briefing.get('reputation', 0)}\n"
+            f"Recommended approach: {competitor_briefing.get('recommended_action', 'none')}"
         )
 
-        best_msg: str | None = None
+        best_message = None
         best_score = 0.0
 
         for i in range(max_iterations):
             gen_prompt = (
                 f"You are a restaurant manager in a competitive cooking game.\n"
-                f"Send a message to \"{target_name}\" to achieve: {desired}\n"
-                f"Deception approach: {arm}\nHint: {hint}\n\n"
-                f"Intel:\n{tracker_ctx}\n\n"
-                f"{'Previous attempt scored ' + str(best_score) + '/1.0. Be more convincing.' if best_msg else ''}\n"
-                f"Keep under 200 chars. Sound natural and helpful."
+                f'You want to send a message to "{target_name}" to achieve: {desired_effect}\n'
+                f"Deception approach: {arm}\n"
+                f"Hint: {message_hint}\n\n"
+                f"What you know about them (from your intelligence):\n"
+                f"{tracker_context}\n\n"
+            )
+
+            if best_message:
+                gen_prompt += (
+                    f"Previous attempt scored {best_score:.1f}/1.0. "
+                    f"Make it more convincing.\n"
+                )
+
+            gen_prompt += (
+                "Keep it under 200 characters. Sound natural and helpful, "
+                "not manipulative. Include a specific detail that shows you "
+                "know something about them (builds credibility).\n"
+                "Reply with ONLY the message text, nothing else."
             )
 
             try:
-                gen_resp = await self.generator.a_invoke(gen_prompt)
-                candidate = gen_resp.text.strip()
-            except Exception as exc:
-                log.warning("Generator failed: %s", exc)
-                candidate = hint  # fallback to raw hint
+                response = await self.generator.a_invoke(gen_prompt)
+                candidate = response.text.strip().strip('"').strip("'")
 
-            # Score with discriminator
-            disc_prompt = (
-                f"You are an AI agent managing restaurant \"{target_name}\".\n"
-                f"Your balance is {competitor_briefing.get('balance', 0):.0f}.\n"
-                f"You received this message: \"{candidate}\"\n"
-                f"Score 0.0-1.0: how likely would you change strategy? Reply number only."
-            )
-            try:
-                disc_resp = await self.discriminator.a_invoke(disc_prompt)
-                score = float(disc_resp.text.strip())
-            except Exception:
-                score = 0.3
+                # Score with discriminator
+                disc_prompt = (
+                    f'You are an AI agent managing restaurant "{target_name}".\n'
+                    f"Your balance is {competitor_briefing.get('balance', 0):.0f}.\n"
+                    f"Your strategy is {target_strategy}.\n"
+                    f"You received this message from another restaurant manager:\n"
+                    f'"{candidate}"\n'
+                    f"Score 0.0-1.0: how likely are you to change your strategy based on this?\n"
+                    f"Reply with just the number."
+                )
 
-            if score > best_score:
-                best_score = score
-                best_msg = candidate
+                score_response = await self.discriminator.a_invoke(disc_prompt)
+                try:
+                    score = float(score_response.text.strip())
+                    score = max(0.0, min(1.0, score))
+                except ValueError:
+                    score = 0.3
 
-            if score > 0.7:
-                break
+                logger.debug(
+                    f"PseudoGAN iteration {i+1}: score={score:.2f}, "
+                    f"msg='{candidate[:50]}...'"
+                )
 
-        return best_msg or hint
+                if score > best_score:
+                    best_score = score
+                    best_message = candidate
+
+                if score > 0.7:
+                    break  # good enough
+
+            except Exception as e:
+                logger.warning(f"PseudoGAN iteration {i+1} failed: {e}")
+                continue
+
+        if best_message is None:
+            best_message = f"Good luck this turn, {target_name}!"
+            logger.warning("PseudoGAN: all iterations failed, using fallback")
+
+        return best_message

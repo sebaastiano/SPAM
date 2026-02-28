@@ -1,107 +1,187 @@
 """
-Zone selector — ILP-based zone classification that picks the best
-strategic zone for the current turn.
+SPAM! — Zone Selector
+=======================
+ILP-driven zone selection per turn.
+
+Scores each zone by:
+  revenue_potential × 0.4 + inventory_fit × 0.3
+  − competitor_penalty × 0.2 + reputation_bonus × 0.1
 """
 
-from __future__ import annotations
-
-from typing import Any
+import logging
 
 import numpy as np
 
-from src.config import ZONES
-from src.models import GameState
+from src.config import (
+    ZONES,
+    ZONE_PRESTIGE_RANGE,
+    ZONE_MENU_SIZE,
+    ZONE_TARGET_ARCHETYPES,
+    ARCHETYPE_CEILINGS,
+)
+
+logger = logging.getLogger("spam.decision.zone_selector")
 
 
 def select_zone(
-    game_state: GameState,
-    clusters: dict[int, str],
-    briefings: dict[int, dict],
-    inventory: dict[str, int] | None = None,
+    balance: float,
+    inventory: dict[str, int],
+    reputation: float,
+    recipes: list[dict],
+    competitor_clusters: dict[int, str],
+    competitor_briefings: dict[int, dict],
 ) -> str:
-    """Score each zone and return the best one.
-
-    Scoring factors:
-      * Revenue potential  (weight 0.40)
-      * Inventory fit      (weight 0.30)
-      * Competitor penalty  (weight −0.20)
-      * Reputation bonus   (weight 0.10)
     """
-    inv = inventory or game_state.inventory
-    scores: dict[str, float] = {}
+    Select the optimal zone for this turn.
+
+    Score each zone by:
+      revenue_potential × 0.4 + inventory_fit × 0.3
+      − competitor_penalty × 0.2 + reputation_bonus × 0.1
+    """
+    zone_scores: dict[str, float] = {}
 
     for zone in ZONES:
-        competitor_penalty = _competitor_density(zone, clusters, briefings)
-        inv_fit = _inventory_alignment(zone, inv)
-        revenue = _revenue_potential(zone, game_state, briefings)
-        rep_bonus = _reputation_alignment(zone, game_state.reputation)
+        # 1. Revenue potential
+        revenue_potential = _estimate_zone_revenue(zone, reputation, balance)
 
-        scores[zone] = (
-            revenue * 0.40
-            + inv_fit * 0.30
-            - competitor_penalty * 0.20
-            + rep_bonus * 0.10
+        # 2. Inventory fit
+        inventory_fit = _calculate_inventory_alignment(zone, inventory, recipes)
+
+        # 3. Competitor penalty
+        competitor_penalty = _count_competitors_in_zone(
+            zone, competitor_clusters, competitor_briefings
         )
 
-    best = max(scores, key=scores.get)  # type: ignore[arg-type]
-    return best
+        # 4. Reputation bonus
+        reputation_bonus = _reputation_alignment(zone, reputation)
+
+        score = (
+            revenue_potential * 0.4
+            + inventory_fit * 0.3
+            - competitor_penalty * 0.2
+            + reputation_bonus * 0.1
+        )
+
+        zone_scores[zone] = score
+        logger.debug(
+            f"Zone {zone}: rev={revenue_potential:.2f} inv={inventory_fit:.2f} "
+            f"comp={competitor_penalty:.2f} rep={reputation_bonus:.2f} → {score:.2f}"
+        )
+
+    best_zone = max(zone_scores, key=zone_scores.get)
+    logger.info(
+        f"Selected zone: {best_zone} "
+        f"(score={zone_scores[best_zone]:.2f})"
+    )
+
+    return best_zone
 
 
-# ── scoring helpers ───────────────────────────────────────────────
+def _estimate_zone_revenue(zone: str, reputation: float, balance: float) -> float:
+    """Estimate revenue potential for a zone."""
+    target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
+    if not target_archetypes:
+        return 0.3  # minimal for zones without defined targets
+
+    # Sum of archetype ceilings × expected fill rate
+    total_ceiling = sum(
+        ARCHETYPE_CEILINGS.get(arch, 100) for arch in target_archetypes
+    )
+    avg_ceiling = total_ceiling / len(target_archetypes)
+
+    # Reputation affects which archetypes visit
+    rep_factor = min(1.0, reputation / 100)
+
+    # Budget constraint
+    budget_factor = min(1.0, balance / 5000)
+
+    return (avg_ceiling / 250) * rep_factor * budget_factor
 
 
-_ZONE_STRATEGY_MAP: dict[str, set[str]] = {
-    "PREMIUM_MONOPOLIST": {"STABLE_SPECIALIST"},
-    "BUDGET_OPPORTUNIST": {"REACTIVE_CHASER"},
-    "NICHE_SPECIALIST": {"STABLE_SPECIALIST"},
-    "SPEED_CONTENDER": {"REACTIVE_CHASER", "AGGRESSIVE_HOARDER"},
-    "MARKET_ARBITRAGEUR": {"AGGRESSIVE_HOARDER"},
-}
-
-
-def _competitor_density(
-    zone: str, clusters: dict[int, str], briefings: dict[int, dict]
+def _calculate_inventory_alignment(
+    zone: str, inventory: dict[str, int], recipes: list[dict]
 ) -> float:
-    """How many competitors occupy this zone's niche?"""
-    target_clusters = _ZONE_STRATEGY_MAP.get(zone, set())
-    count = sum(1 for c in clusters.values() if c in target_clusters)
-    return float(count) / max(len(clusters), 1)
+    """How well does our inventory match this zone's recipe pool?"""
+    prestige_min, prestige_max = ZONE_PRESTIGE_RANGE.get(zone, (0, 100))
+
+    eligible = [
+        r
+        for r in recipes
+        if prestige_min <= r.get("prestige", 50) <= prestige_max
+    ]
+
+    if not eligible:
+        return 0.0
+
+    # How many eligible recipes can we fully cook?
+    cookable = 0
+    for recipe in eligible:
+        ingredients = recipe.get("ingredients", {})
+        if all(inventory.get(ing, 0) >= qty for ing, qty in ingredients.items()):
+            cookable += 1
+
+    # Also consider partial coverage
+    partial_scores = []
+    for recipe in eligible[:10]:  # check top 10
+        ingredients = recipe.get("ingredients", {})
+        total = sum(ingredients.values())
+        have = sum(
+            min(inventory.get(ing, 0), qty) for ing, qty in ingredients.items()
+        )
+        partial_scores.append(have / max(total, 1))
+
+    full_score = cookable / max(len(eligible), 1)
+    partial_score = np.mean(partial_scores) if partial_scores else 0
+
+    return full_score * 0.6 + partial_score * 0.4
 
 
-def _inventory_alignment(zone: str, inventory: dict[str, int]) -> float:
-    """How well does our inventory support this zone's recipes?"""
-    # Simple heuristic: total ingredient quantity as a proxy
-    total = sum(inventory.values()) if inventory else 0
-    if zone == "PREMIUM_MONOPOLIST":
-        # Premium needs fewer but right ingredients
-        return min(1.0, total / 10)
-    if zone == "BUDGET_OPPORTUNIST":
-        # Budget needs many ingredients
-        return min(1.0, total / 20)
-    return min(1.0, total / 15)
-
-
-def _revenue_potential(
-    zone: str, game_state: GameState, briefings: dict[int, dict]
+def _count_competitors_in_zone(
+    zone: str,
+    competitor_clusters: dict[int, str],
+    competitor_briefings: dict[int, dict],
 ) -> float:
-    """Estimated revenue opportunity for this zone."""
-    if zone == "PREMIUM_MONOPOLIST":
-        return 0.9 if game_state.reputation >= 80 else 0.5
-    if zone == "BUDGET_OPPORTUNIST":
-        return 0.7
-    if zone == "NICHE_SPECIALIST":
-        return 0.6
-    if zone == "SPEED_CONTENDER":
-        return 0.75
-    if zone == "MARKET_ARBITRAGEUR":
-        return 0.4
-    return 0.5
+    """Count how many competitors are in or approaching this zone."""
+    # Map zone targets to approximate competitor strategies
+    zone_to_strategies = {
+        "PREMIUM_MONOPOLIST": {"PREMIUM_MONOPOLIST", "STABLE_SPECIALIST"},
+        "BUDGET_OPPORTUNIST": {"BUDGET_OPPORTUNIST"},
+        "NICHE_SPECIALIST": {"STABLE_SPECIALIST"},
+        "SPEED_CONTENDER": set(),  # universal
+        "MARKET_ARBITRAGEUR": {"MARKET_ARBITRAGEUR"},
+    }
+
+    target_strategies = zone_to_strategies.get(zone, set())
+    if not target_strategies:
+        return 0.1  # universal zones have minimal penalty
+
+    count = 0
+    for rid, brief in competitor_briefings.items():
+        strategy = brief.get("strategy", "")
+        if strategy in target_strategies:
+            count += 1
+        # Also check menu overlap
+        if brief.get("menu_size", 0) > 0:
+            avg_price = brief.get("menu_price_avg", 0)
+            if zone == "PREMIUM_MONOPOLIST" and avg_price > 150:
+                count += 0.5
+            elif zone == "BUDGET_OPPORTUNIST" and avg_price < 80:
+                count += 0.5
+
+    return count / max(len(competitor_briefings), 1)
 
 
 def _reputation_alignment(zone: str, reputation: float) -> float:
-    """Does our reputation attract the right archetypes for this zone?"""
+    """Does our reputation support this zone's target archetypes?"""
+    prestige_min, _ = ZONE_PRESTIGE_RANGE.get(zone, (0, 100))
+
     if zone == "PREMIUM_MONOPOLIST":
+        # Need high reputation for premium clients
         return min(1.0, reputation / 100)
-    if zone == "BUDGET_OPPORTUNIST":
-        return 0.7  # always viable
-    return min(1.0, reputation / 80)
+    elif zone == "BUDGET_OPPORTUNIST":
+        # Budget works at any reputation
+        return 0.7
+    elif zone == "SPEED_CONTENDER":
+        return 0.6
+    else:
+        return min(1.0, (reputation + 20) / 100)

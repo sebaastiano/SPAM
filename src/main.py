@@ -1,548 +1,668 @@
 """
-main.py — SPAM! Agent entry point.
+SPAM! — Main Entry Point
+==========================
+Wires SSE → EventBus → PhaseRouter → all subsystems.
+Implements the complete game agent loop.
 
-Initializes all subsystems, wires SSE events to the event bus,
-and runs the phase-based game loop.
+Usage:
+    python -m src.main
 """
 
-from __future__ import annotations
-
 import asyncio
-import json
 import logging
+import signal
 import sys
-from typing import Any
 
-import aiohttp
+from datapizza.clients.openai_like import OpenAILikeClient
+from datapizza.tools.mcp_client import MCPClient
 
 from src.config import (
+    TEAM_ID,
+    TEAM_NAME,
+    API_KEY,
     BASE_URL,
-    HEADERS,
     REGOLO_API_KEY,
     REGOLO_BASE_URL,
-    SSE_HEADERS,
-    SSE_URL,
-    TEAM_ID,
     PRIMARY_MODEL,
     FAST_MODEL,
+    MCP_URL,
+    HEADERS,
 )
-from src.decision.pricing import compute_menu_price
-from src.decision.subagent_router import SubagentRouter
-from src.diplomacy.agent import DiplomacyAgent
-from src.diplomacy.deception_bandit import DeceptionBandit
-from src.diplomacy.firewall import GroundTruthFirewall
-from src.diplomacy.pseudo_gan import PseudoGAN
 from src.event_bus import ReactiveEventBus
-from src.intelligence.pipeline import IntelligencePipeline
-from src.intelligence.tracker_bridge import TrackerBridge
-from src.memory.client_profile import ClientProfileMemory, IntoleranceDetector
-from src.memory.competitor import CompetitorMemory
-from src.memory.event_log import EventLog
-from src.memory.game_state import GameStateMemory
-from src.memory.message_log import MessageMemory
-from src.models import Recipe
 from src.phase_router import PhaseRouter
+from src.recipe_loader import load_recipes, load_our_restaurant
+
+# Memory
+from src.memory.event_log import EventLog, event_log_middleware, set_global_log
+from src.memory.message_log import MessageLog
+from src.memory.game_state import GameStateMemory, RestaurantState
+from src.memory.competitor import CompetitorMemory
+from src.memory.client_profile import (
+    GlobalClientLibrary,
+    ZoneClientLibrary,
+    IntoleranceDetector,
+)
+
+# Serving
 from src.serving.pipeline import ServingPipeline
 
+# Intelligence
+from src.intelligence.tracker_bridge import TrackerBridge
+from src.intelligence.pipeline import IntelligencePipeline
+from src.intelligence.feature_extractor import set_recipe_db
+
+# Decision
+from src.decision.ilp_solver import solve_zone_ilp
+from src.decision.subagent_router import SubagentRouter
+from src.decision.pricing import compute_menu_prices, adjust_prices_competitive
+
+# Diplomacy
+from src.diplomacy.agent import DiplomacyAgent
+from src.diplomacy.firewall import GroundTruthFirewall
+
+# ── Logging ──
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(name)-28s | %(levelname)-5s | %(message)s",
-    datefmt="%H:%M:%S",
+    format="%(asctime)s %(name)-30s %(levelname)-7s %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("spam_game.log", mode="a"),
+    ],
 )
-log = logging.getLogger("main")
+logger = logging.getLogger("spam.main")
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  Global state — instantiated once in ``main()``
-# ═══════════════════════════════════════════════════════════════════
-
-recipe_db: dict[str, Recipe] = {}
-session: aiohttp.ClientSession | None = None
-
-# Subsystem singletons (set in main)
-event_log: EventLog
-game_memory: GameStateMemory
-competitor_memory: CompetitorMemory
-client_memory: ClientProfileMemory
-message_memory: MessageMemory
-intolerance: IntoleranceDetector
-
-tracker_bridge: TrackerBridge
-intel_pipeline: IntelligencePipeline
-router: SubagentRouter
-serving: ServingPipeline
-diplomacy: DiplomacyAgent
-phase_router: PhaseRouter
-event_bus: ReactiveEventBus
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  Bootstrap helpers
-# ═══════════════════════════════════════════════════════════════════
-
-
-async def fetch_recipes(sess: aiohttp.ClientSession) -> dict[str, Recipe]:
-    """GET /recipes → dict[name, Recipe]."""
-    url = f"{BASE_URL}/recipes"
-    async with sess.get(url, headers=HEADERS) as resp:
-        resp.raise_for_status()
-        raw = await resp.json()
-
-    db: dict[str, Recipe] = {}
-    for r in raw:
-        name = r.get("name", "")
-        db[name] = Recipe(
-            name=name,
-            preparation_time_ms=r.get("preparationTimeMs", 0),
-            ingredients=r.get("ingredients", {}),
-            prestige=r.get("prestige", 0),
-        )
-    log.info("Loaded %d recipes from server", len(db))
-    return db
-
-
-async def fetch_own_state(sess: aiohttp.ClientSession) -> dict:
-    """GET /restaurant/17 → raw JSON dict."""
-    url = f"{BASE_URL}/restaurant/{TEAM_ID}"
-    async with sess.get(url, headers=HEADERS) as resp:
-        resp.raise_for_status()
-        return await resp.json()
-
-
-async def mcp_call(
-    sess: aiohttp.ClientSession,
-    tool_name: str,
-    arguments: dict,
-) -> dict:
-    """Execute an MCP JSON-RPC tool call."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments},
-    }
-    async with sess.post(
-        f"{BASE_URL}/mcp", json=payload, headers=HEADERS
-    ) as resp:
-        result = await resp.json()
-    is_error = result.get("result", {}).get("isError", False)
-    content = (
-        result.get("result", {}).get("content", [{}])[0].get("text", "")
-    )
-    if is_error:
-        log.warning("MCP %s error: %s", tool_name, content)
-    else:
-        log.info("MCP %s OK: %s", tool_name, content[:120])
-    return result
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  Phase handlers
-# ═══════════════════════════════════════════════════════════════════
-
-
-async def on_speaking(data: dict[str, Any]) -> None:
-    """Phase: speaking — intelligence + set menu + diplomacy."""
-    global recipe_db, session
-    assert session is not None
-
-    game_memory.set_phase("speaking")
-    log.info("── SPEAKING (turn %d) ──", game_memory.current.turn_id)
-
-    # 1. Run intelligence pipeline
-    intel = await intel_pipeline.run(game_memory.current.turn_id)
-    briefings = intel["briefings"]
-    clusters = intel["clusters"]
-    demand_forecast = intel["demand_forecast"]
-
-    # 2. Select zone
-    zone = router.select(game_memory.current, clusters, briefings)
-
-    # 3. Generate ILP plan
-    decision = router.plan(
-        game_memory.current, recipe_db, demand_forecast, briefings
-    )
-
-    # 4. Set menu (save_menu MCP)
-    if decision.menu:
-        await mcp_call(session, "save_menu", {"items": decision.menu})
-        game_memory.current.menu = decision.menu
-        log.info("Menu set: %d items", len(decision.menu))
-
-    # 5. Diplomacy
-    if phase_router.can_send_message():
-        try:
-            await diplomacy.run_speaking_phase(
-                briefings, session, game_memory.current.turn_id
-            )
-        except Exception as exc:
-            log.warning("Diplomacy error: %s", exc)
-
-
-async def on_closed_bid(data: dict[str, Any]) -> None:
-    """Phase: closed_bid — submit bids."""
-    global session
-    assert session is not None
-
-    game_memory.set_phase("closed_bid")
-    log.info("── CLOSED_BID (turn %d) ──", game_memory.current.turn_id)
-
-    # Use latest decision from speaking phase
-    decision = router.last_decision
-    if decision and decision.bids:
-        await mcp_call(session, "closed_bid", {"bids": decision.bids})
-        log.info("Bids submitted: %d items, est. cost %.0f",
-                 len(decision.bids),
-                 sum(b["bid"] * b["quantity"] for b in decision.bids))
-    else:
-        log.warning("No bids to submit — no ILP decision available")
-
-
-async def on_waiting(data: dict[str, Any]) -> None:
-    """Phase: waiting — refresh inventory, adjust menu, open restaurant."""
-    global session, recipe_db
-    assert session is not None
-
-    game_memory.set_phase("waiting")
-    log.info("── WAITING (turn %d) ──", game_memory.current.turn_id)
-
-    # 1. Fetch fresh state (post-bid inventory is now accurate)
-    own = await fetch_own_state(session)
-    game_memory.update_from_server(own)
-    log.info(
-        "Post-bid state: balance=%.0f, inventory=%s",
-        game_memory.current.balance,
-        game_memory.current.inventory,
-    )
-
-    # 2. Re-evaluate menu against actual inventory
-    available_dishes = []
-    for item in game_memory.current.menu:
-        dish_name = item.get("name", "")
-        recipe = recipe_db.get(dish_name)
-        if not recipe:
-            continue
-        # Check we have all ingredients
-        can_cook = all(
-            game_memory.current.inventory.get(ing, 0) >= qty
-            for ing, qty in recipe.ingredients.items()
-        )
-        if can_cook:
-            available_dishes.append(item)
-
-    if available_dishes != game_memory.current.menu:
-        log.info(
-            "Menu trimmed: %d → %d dishes (inventory check)",
-            len(game_memory.current.menu),
-            len(available_dishes),
-        )
-        if available_dishes:
-            await mcp_call(session, "save_menu", {"items": available_dishes})
-            game_memory.current.menu = available_dishes
-        else:
-            log.warning("No dishes can be cooked with current inventory!")
-
-    # 3. Pre-compute serving lookup
-    await serving.start_phase(
-        game_memory.current.turn_id, game_memory.current.menu
-    )
-
-    # 4. Open the restaurant
-    await mcp_call(
-        session, "update_restaurant_is_open", {"is_open": True}
-    )
-    game_memory.current.is_open = True
-
-
-async def on_serving(data: dict[str, Any]) -> None:
-    """Phase: serving — handled reactively via client_spawned events."""
-    game_memory.set_phase("serving")
-    log.info("── SERVING (turn %d) ──", game_memory.current.turn_id)
-    # Actual serving is handled by on_client_spawned / on_preparation_complete
-
-
-async def on_stopped(data: dict[str, Any]) -> None:
-    """Phase: stopped — end-of-turn snapshot, memory updates."""
-    global session
-    assert session is not None
-
-    game_memory.set_phase("stopped")
-    log.info("── STOPPED (turn %d) ──", game_memory.current.turn_id)
-
-    # 1. Close serving pipeline
-    await serving.end_phase()
-
-    # 2. Fetch final state (GET only — no MCP allowed)
-    try:
-        own = await fetch_own_state(session)
-        game_memory.update_from_server(own)
-    except Exception as exc:
-        log.warning("Failed to fetch final state: %s", exc)
-
-    # 3. Snapshot + zero inventory (expires each turn)
-    game_memory.end_turn_snapshot()
-
-    # 4. Log summary
-    last = game_memory.last_turn()
-    if last:
-        log.info(
-            "Turn %d summary: balance=%.0f, rep=%.1f, clients=%d, revenue=%.0f",
-            last.turn_id, last.balance, last.reputation,
-            last.clients_served, last.revenue_this_turn,
-        )
-
-    # 5. Persist event log
-    event_log.log({
-        "type": "turn_end",
-        "turn_id": game_memory.current.turn_id,
-        "balance": game_memory.current.balance,
-        "reputation": game_memory.current.reputation,
-    })
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  SSE event handlers
-# ═══════════════════════════════════════════════════════════════════
-
-
-async def on_game_started(data: dict[str, Any]) -> None:
-    """game_started — initialize / re-initialize."""
-    global recipe_db, session
-    assert session is not None
-
-    log.info("=== GAME STARTED ===")
-    game_memory.reset()
-    game_memory.set_turn(1)
-
-    # Fetch recipes if not cached
-    if not recipe_db:
-        recipe_db = await fetch_recipes(session)
-        intel_pipeline.set_recipe_db(recipe_db)
-
-    # Initial state pull
-    own = await fetch_own_state(session)
-    game_memory.update_from_server(own)
-    log.info(
-        "Initial state: balance=%.0f, reputation=%.1f",
-        game_memory.current.balance,
-        game_memory.current.reputation,
-    )
-
-    event_log.log({"type": "game_started"})
-
-
-async def on_game_phase_changed(data: dict[str, Any]) -> None:
-    """game_phase_changed — delegate to PhaseRouter."""
-    phase = data.get("phase", "unknown")
-
-    # Update turn counter on transition to speaking (new turn)
-    if phase == "speaking":
-        current_turn = game_memory.current.turn_id
-        game_memory.set_turn(current_turn + 1 if current_turn > 0 else 1)
-
-    event_log.log({"type": "phase_changed", "phase": phase})
-    await phase_router.handle_phase_change(data)
-
-
-async def on_client_spawned(data: dict[str, Any]) -> None:
-    """client_spawned — route to serving pipeline."""
-    if not phase_router.is_serving():
-        log.warning("client_spawned outside serving phase — ignoring")
-        return
-
-    event_log.log({"type": "client_spawned", "data": data})
-    await serving.handle_client_spawned(data)
-
-
-async def on_preparation_complete(data: dict[str, Any]) -> None:
-    """preparation_complete — route to serving pipeline."""
-    if not phase_router.is_serving():
-        log.warning("preparation_complete outside serving — ignoring")
-        return
-
-    event_log.log({"type": "preparation_complete", "data": data})
-    await serving.handle_preparation_complete(data)
-
-
-async def on_new_message(data: dict[str, Any]) -> None:
-    """new_message — process through diplomacy firewall."""
-    event_log.log({"type": "new_message", "data": data})
-    await diplomacy.handle_incoming(data)
-
-
-async def on_message(data: dict[str, Any]) -> None:
-    """message (broadcast) — log market broadcasts."""
-    event_log.log({"type": "broadcast_message", "data": data})
-    message_memory.record_broadcast(data)
-
-
-async def on_game_reset(data: dict[str, Any]) -> None:
-    """game_reset — clear turn-scoped state, preserve cross-turn memory."""
-    log.info("=== GAME RESET ===")
-    game_memory.reset()
-    event_log.log({"type": "game_reset"})
-    # Don't call any MCP — wait for next game_started
-
-
-async def on_heartbeat(data: dict[str, Any]) -> None:
-    """heartbeat — just confirm connection is alive."""
-    pass  # no-op; logged by middleware if needed
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  Event bus middleware
-# ═══════════════════════════════════════════════════════════════════
-
-
-async def logging_middleware(
-    event_type: str, data: dict[str, Any]
-) -> dict[str, Any] | None:
-    """Logs every SSE event (lightweight)."""
-    if event_type != "heartbeat":
-        log.debug("SSE event: %s — %s", event_type, json.dumps(data)[:200])
-    return data
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  LLM client factory (optional — for PseudoGAN)
-# ═══════════════════════════════════════════════════════════════════
-
-
-def _build_llm_clients() -> tuple[Any, Any] | tuple[None, None]:
-    """Try to build datapizza OpenAILikeClient instances.
-
-    Returns (generator_client, discriminator_client) or (None, None)
-    if the API key is missing or the import fails.
+class GameOrchestrator:
     """
-    if not REGOLO_API_KEY:
-        log.warning("REGOLO_API_KEY not set — PseudoGAN disabled")
-        return None, None
+    Central orchestrator wiring all subsystems together.
 
-    try:
-        from datapizza.clients.openai_like import OpenAILikeClient
+    Lifecycle:
+      1. Initialise datapizza clients & MCP
+      2. Connect SSE via ReactiveEventBus
+      3. Route events to phase-specific handlers
+      4. Each phase handler coordinates subsystems
+    """
 
-        gen = OpenAILikeClient(
-            base_url=REGOLO_BASE_URL,
+    def __init__(self):
+        # ── LLM Clients ──
+        self.primary_client = OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=PRIMARY_MODEL,
-        )
-        disc = OpenAILikeClient(
             base_url=REGOLO_BASE_URL,
+            system_prompt=(
+                f"You are the AI brain of restaurant '{TEAM_NAME}' (ID {TEAM_ID}). "
+                "Make optimal decisions for bidding, menu, and serving."
+            ),
+        )
+        self.fast_client = OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=FAST_MODEL,
+            base_url=REGOLO_BASE_URL,
+            system_prompt="Fast parsing and evaluation assistant.",
         )
-        log.info("LLM clients created (generator=%s, discriminator=%s)",
-                 PRIMARY_MODEL, FAST_MODEL)
-        return gen, disc
-    except Exception as exc:
-        log.warning("Failed to create LLM clients: %s", exc)
-        return None, None
+
+        # ── MCP Client ──
+        self.mcp_client = MCPClient(
+            url=MCP_URL,
+            headers={"x-api-key": API_KEY},
+            timeout=30,
+        )
+
+        # ── Memory ──
+        self.event_log = EventLog()
+        set_global_log(self.event_log)
+        self.message_log = MessageLog()
+        self.game_state = GameStateMemory()
+        self.competitor_memory = CompetitorMemory()
+        self.client_library = GlobalClientLibrary()
+        self.intolerance_detector = IntoleranceDetector()
+
+        # ── Intelligence ──
+        self.tracker_bridge = TrackerBridge()
+        self.intelligence = IntelligencePipeline(
+            bridge=self.tracker_bridge,
+            recipe_db={},  # set after recipes loaded
+            competitor_memory=self.competitor_memory,
+        )
+
+        # ── Serving ──
+        self.serving = ServingPipeline(
+            recipes={},  # set after recipes loaded
+            intolerance_detector=self.intolerance_detector,
+            client_library=self.client_library,
+            mcp_client=self.mcp_client,
+        )
+
+        # ── Decision ──
+        self.subagent_router = SubagentRouter()
+
+        # ── Diplomacy ──
+        self.diplomacy = DiplomacyAgent(
+            mcp_client=self.mcp_client,
+            message_log=self.message_log,
+        )
+        self.firewall = GroundTruthFirewall(self.message_log)
+
+        # ── Event Bus ──
+        self.bus = ReactiveEventBus()
+        self.phase_router = PhaseRouter()
+
+        # ── State ──
+        self.recipe_db: dict[str, dict] = {}
+        self._latest_intel: dict = {}
+        self._running = False
+
+    async def start(self):
+        """Initialise and start the game agent."""
+        logger.info(f"=== SPAM! (Team {TEAM_ID}) Starting ===")
+
+        # Load MCP tools list
+        try:
+            mcp_tools = await self.mcp_client.a_list_tools()
+            logger.info(f"MCP tools available: {[t.name for t in mcp_tools]}")
+        except Exception as e:
+            logger.warning(f"MCP tool list failed: {e}")
+            mcp_tools = []
+
+        # Initialise subagent router with MCP tools
+        self.subagent_router.initialize(mcp_tools=mcp_tools)
+
+        # Load recipes
+        self.recipe_db = await load_recipes()
+        self.serving.recipes = self.recipe_db
+        self.intelligence.state_builder.recipe_db = self.recipe_db
+        self.intelligence.trajectory_predictor.recipe_db = self.recipe_db
+        set_recipe_db(self.recipe_db)
+        logger.info(f"Loaded {len(self.recipe_db)} recipes")
+
+        # Fetch initial state
+        our_state = await load_our_restaurant()
+        if our_state:
+            self.game_state.snapshot(RestaurantState(
+                turn_id=0,
+                phase="init",
+                balance=our_state.get("balance", 10000),
+                inventory=our_state.get("inventory", {}),
+                reputation=our_state.get("reputation", 50),
+                menu=[],
+                clients_served=0,
+                revenue_this_turn=0,
+            ))
+            logger.info(
+                f"Initial state: balance={our_state.get('balance')}, "
+                f"reputation={our_state.get('reputation')}"
+            )
+
+        # Wire event bus
+        self._wire_events()
+
+        # Connect SSE (runs forever)
+        self._running = True
+        logger.info("Connecting to SSE stream...")
+        await self.bus.connect_sse()
+
+    def _wire_events(self):
+        """Wire all SSE event types to handlers."""
+        # Middleware
+        self.bus.use(event_log_middleware)
+        self.bus.use(self.firewall.middleware)
+
+        # Phase routing
+        self.bus.on("game_phase_changed", self.phase_router.handle_phase_change, priority=0)
+        self.bus.on("game_started", self._handle_game_started, priority=0)
+        self.bus.on("game_reset", self._handle_game_reset, priority=0)
+
+        # Serving events
+        self.bus.on("client_spawned", self._handle_client_spawned, priority=0)
+        self.bus.on("preparation_complete", self._handle_preparation_complete, priority=0)
+
+        # Message events
+        self.bus.on("new_message", self._handle_new_message, priority=1)
+
+        # Register phase handlers
+        self.phase_router.register("speaking", self._phase_speaking)
+        self.phase_router.register("closed_bid", self._phase_closed_bid)
+        self.phase_router.register("waiting", self._phase_waiting)
+        self.phase_router.register("serving", self._phase_serving)
+        self.phase_router.register("stopped", self._phase_stopped)
+
+        # Turn change callback
+        self.phase_router.on_turn_change(self._on_turn_change)
+
+    # ── Game Events ──
+
+    async def _handle_game_started(self, data: dict):
+        """Handle game_started SSE event."""
+        logger.info("Game started event received")
+        self.phase_router.current_phase = None
+        self.phase_router.current_turn = 0
+
+        # Reload recipes in case they changed
+        self.recipe_db = await load_recipes()
+        self.serving.recipes = self.recipe_db
+
+    async def _handle_game_reset(self, data: dict):
+        """Handle game_reset — clear turn-scoped state, preserve cross-turn memory."""
+        logger.info("Game reset — clearing turn state")
+        self.game_state.reset()
+        self.serving.set_menu([])
+        self.phase_router.current_phase = None
+        self.phase_router.current_turn = 0
+        # Keep: competitor_memory, client_library, event_log, message_log
+
+    async def _on_turn_change(self, turn_id: int):
+        """Called when a new turn starts (stopped → speaking)."""
+        logger.info(f"Turn change: {turn_id}")
+        self.game_state.new_turn(turn_id)
+
+    # ── Client / Serving Events ──
+
+    async def _handle_client_spawned(self, data: dict):
+        """Handle client_spawned SSE event — only during serving phase."""
+        if self.phase_router.current_phase != "serving":
+            logger.warning("client_spawned outside serving phase — ignoring")
+            return
+        await self.serving.handle_client(data)
+
+    async def _handle_preparation_complete(self, data: dict):
+        """Handle preparation_complete SSE event."""
+        if self.phase_router.current_phase != "serving":
+            return
+        await self.serving.handle_preparation_complete(data)
+
+    async def _handle_new_message(self, data: dict):
+        """Handle new_message SSE event — process through diplomacy firewall."""
+        processed = self.diplomacy.process_incoming_message(data)
+        logger.info(
+            f"Message from {processed.get('sender_name', '?')}: "
+            f"'{processed.get('text', '')[:80]}' "
+            f"(credibility={processed.get('sender_credibility', 0):.2f})"
+        )
+
+    # ── Phase Handlers ──
+
+    async def _phase_speaking(self, data: dict):
+        """
+        Speaking phase:
+        1. Run intelligence pipeline
+        2. Set tentative menu (pre-bid)
+        3. Run diplomacy
+
+        Zone selection is deferred to waiting phase (after bids resolve,
+        when we know our actual inventory).
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        logger.info(f"[SPEAKING] Turn {turn_id}")
+
+        # 1. Run intelligence pipeline
+        try:
+            intel = await self.intelligence.run(turn_id)
+            self._latest_intel = intel
+            logger.info(
+                f"Intelligence: {len(intel.get('briefings', {}))} briefings, "
+                f"{len(intel.get('clusters', {}))} clusters"
+            )
+        except Exception as e:
+            logger.error(f"Intelligence pipeline failed: {e}", exc_info=True)
+            intel = {}
+            self._latest_intel = intel
+
+        # 2. Fetch our current state
+        our_state = await load_our_restaurant()
+        balance = our_state.get("balance", 10000) if our_state else 10000
+        inventory = our_state.get("inventory", {}) if our_state else {}
+        reputation = our_state.get("reputation", 50) if our_state else 50
+
+        # 3. Tentative zone selection (pre-bid — will be re-evaluated in waiting)
+        zone = self.subagent_router.route(
+            balance=balance,
+            inventory=inventory,
+            reputation=reputation,
+            recipes=list(self.recipe_db.values()),
+            competitor_clusters=intel.get("clusters", {}),
+            competitor_briefings=intel.get("briefings", {}),
+        )
+        logger.info(f"Tentative zone: {zone}")
+
+        # 4. Compute tentative menu via MILP
+        decision = solve_zone_ilp(
+            zone=zone,
+            balance=balance,
+            inventory=inventory,
+            recipes=list(self.recipe_db.values()),
+            demand_forecast=intel.get("demand_forecast", {}),
+            competitor_briefings=intel.get("briefings", {}),
+            reputation=reputation,
+        )
+
+        # 5. Set tentative menu via MCP
+        if decision.menu:
+            try:
+                result = await self.mcp_client.call_tool(
+                    "save_menu",
+                    {"items": decision.menu},
+                )
+                self.serving.set_menu(decision.menu)
+                logger.info(f"Tentative menu set: {len(decision.menu)} items")
+            except Exception as e:
+                logger.error(f"Failed to set menu: {e}")
+
+        # 6. Run diplomacy
+        try:
+            sent = await self.diplomacy.run_diplomacy_turn(
+                competitor_briefings=intel.get("briefings", {}),
+                competitor_states=intel.get("all_states", {}),
+                turn_id=turn_id,
+            )
+            logger.info(f"Diplomacy: sent {len(sent)} messages")
+        except Exception as e:
+            logger.error(f"Diplomacy failed: {e}", exc_info=True)
+
+    async def _phase_closed_bid(self, data: dict):
+        """
+        Closed bid phase:
+        1. Compute optimal bids from ILP
+        2. Submit bids via MCP (single call, final)
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        logger.info(f"[CLOSED_BID] Turn {turn_id}")
+
+        intel = self._latest_intel
+
+        # Get current state
+        our_state = await load_our_restaurant()
+        balance = our_state.get("balance", 10000) if our_state else 10000
+        inventory = our_state.get("inventory", {}) if our_state else {}
+        reputation = our_state.get("reputation", 50) if our_state else 50
+
+        # Get zone from subagent router
+        zone = self.subagent_router.active_zone
+
+        # Compute bids via ILP
+        decision = solve_zone_ilp(
+            zone=zone,
+            balance=balance,
+            inventory=inventory,
+            recipes=list(self.recipe_db.values()),
+            demand_forecast=intel.get("demand_forecast", {}),
+            competitor_briefings=intel.get("briefings", {}),
+            reputation=reputation,
+        )
+
+        if decision.bids:
+            try:
+                result = await self.mcp_client.call_tool(
+                    "closed_bid",
+                    {"bids": decision.bids},
+                )
+                logger.info(
+                    f"Bids submitted: {len(decision.bids)} items, "
+                    f"total cost={decision.total_bid_cost:.0f}"
+                )
+            except Exception as e:
+                logger.error(f"Bid submission failed: {e}")
+        else:
+            logger.warning("No bids computed — skipping bid phase")
+
+    async def _phase_waiting(self, data: dict):
+        """
+        Waiting phase (after bids resolve):
+        1. Fetch fresh post-bid inventory
+        2. Re-select zone with actual inventory (ILP zone classification)
+        3. Verify/rebuild menu to match actual inventory
+        4. Market operations — buy missing, sell surplus
+        5. Set final menu
+        6. Open restaurant
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        logger.info(f"[WAITING] Turn {turn_id}")
+
+        intel = self._latest_intel
+
+        # 1. Fetch fresh inventory (post-bid)
+        our_state = await load_our_restaurant()
+        if our_state:
+            balance = our_state.get("balance", 10000)
+            inventory = our_state.get("inventory", {})
+            reputation = our_state.get("reputation", 50)
+            logger.info(
+                f"Post-bid state: balance={balance}, "
+                f"inventory_items={len(inventory)}, rep={reputation}"
+            )
+        else:
+            balance = 10000
+            inventory = {}
+            reputation = 50
+
+        # 2. Re-select zone with actual post-bid inventory
+        zone = self.subagent_router.route(
+            balance=balance,
+            inventory=inventory,
+            reputation=reputation,
+            recipes=list(self.recipe_db.values()),
+            competitor_clusters=intel.get("clusters", {}),
+            competitor_briefings=intel.get("briefings", {}),
+        )
+        logger.info(f"Post-bid zone selection: {zone}")
+
+        # 3. Verify menu items can be cooked with actual inventory
+        current_menu = list(self.serving.menu.values())
+        verified_menu = []
+
+        for item in current_menu:
+            recipe = self.recipe_db.get(item["name"])
+            if recipe:
+                can_cook = all(
+                    inventory.get(ing, 0) >= qty
+                    for ing, qty in recipe.get("ingredients", {}).items()
+                )
+                if can_cook:
+                    verified_menu.append(item)
+                else:
+                    logger.info(f"Removing {item['name']} — insufficient ingredients")
+
+        # If menu shrunk too much, recompute with MILP
+        if len(verified_menu) < 2 and self.recipe_db:
+            logger.info("Menu too small — recomputing with MILP for actual inventory")
+            decision = solve_zone_ilp(
+                zone=zone,
+                balance=balance,
+                inventory=inventory,
+                recipes=list(self.recipe_db.values()),
+                demand_forecast=intel.get("demand_forecast", {}),
+                competitor_briefings=intel.get("briefings", {}),
+                reputation=reputation,
+                spending_fraction=0.0,  # no more bids in waiting
+            )
+            verified_menu = decision.menu
+
+        # 4. Market operations — buy missing ingredients, sell surplus
+        await self._market_operations(
+            inventory=inventory,
+            verified_menu=verified_menu,
+            balance=balance,
+        )
+
+        # 5. Set final menu
+        if verified_menu:
+            try:
+                result = await self.mcp_client.call_tool(
+                    "save_menu",
+                    {"items": verified_menu},
+                )
+                self.serving.set_menu(verified_menu)
+                logger.info(f"Final menu: {len(verified_menu)} items")
+            except Exception as e:
+                logger.error(f"Failed to update menu: {e}")
+
+        # 6. Open restaurant
+        try:
+            result = await self.mcp_client.call_tool(
+                "update_restaurant_is_open",
+                {"is_open": True},
+            )
+            logger.info("Restaurant opened")
+        except Exception as e:
+            logger.error(f"Failed to open restaurant: {e}")
+
+        # 7. Pre-start serving pipeline
+        await self.serving.start_serving(turn_id)
+
+    async def _market_operations(
+        self,
+        inventory: dict[str, int],
+        verified_menu: list[dict],
+        balance: float,
+    ):
+        """
+        Market buy/sell operations:
+        - BUY: ingredients we need for the menu but don't have enough of
+        - SELL: ingredients we have surplus of (not needed by any menu recipe)
+        """
+        # Compute what the menu needs
+        needed: dict[str, int] = {}
+        for item in verified_menu:
+            recipe = self.recipe_db.get(item["name"], {})
+            for ing, qty in recipe.get("ingredients", {}).items():
+                needed[ing] = needed.get(ing, 0) + qty
+
+        # BUY: ingredients where inventory < needed
+        for ing, need_qty in needed.items():
+            have = inventory.get(ing, 0)
+            deficit = need_qty - have
+            if deficit > 0:
+                buy_price = max(10, int(balance * 0.02))  # conservative price
+                try:
+                    await self.mcp_client.call_tool(
+                        "create_market_entry",
+                        {
+                            "side": "BUY",
+                            "ingredient_name": ing,
+                            "quantity": deficit,
+                            "price": buy_price,
+                        },
+                    )
+                    logger.info(f"Market BUY: {deficit}x {ing} @ {buy_price}")
+                except Exception as e:
+                    logger.warning(f"Market BUY failed for {ing}: {e}")
+
+        # SELL: ingredients we have but no menu recipe uses
+        needed_ings = set(needed.keys())
+        for ing, qty in inventory.items():
+            if ing not in needed_ings and qty > 0:
+                sell_price = max(5, int(balance * 0.01))  # low price to move
+                try:
+                    await self.mcp_client.call_tool(
+                        "create_market_entry",
+                        {
+                            "side": "SELL",
+                            "ingredient_name": ing,
+                            "quantity": qty,
+                            "price": sell_price,
+                        },
+                    )
+                    logger.info(f"Market SELL: {qty}x {ing} @ {sell_price}")
+                except Exception as e:
+                    logger.warning(f"Market SELL failed for {ing}: {e}")
+
+    async def _phase_serving(self, data: dict):
+        """
+        Serving phase:
+        Clients are handled by SSE events → client_spawned → preparation_complete.
+        This handler just logs the transition.
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        logger.info(f"[SERVING] Turn {turn_id} — awaiting clients")
+
+    async def _phase_stopped(self, data: dict):
+        """
+        Stopped phase:
+        1. Stop serving pipeline
+        2. End-of-turn snapshot
+        3. Update all memories
+        4. Measure deception rewards
+        5. Zero inventory
+        6. Persist state
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        logger.info(f"[STOPPED] Turn {turn_id}")
+
+        # 1. Stop serving
+        await self.serving.stop_serving()
+
+        # 2. End-of-turn snapshot
+        our_state = await load_our_restaurant()
+        if our_state:
+            current = RestaurantState(
+                turn_id=turn_id,
+                phase="stopped",
+                balance=our_state.get("balance", 0),
+                inventory=our_state.get("inventory", {}),
+                reputation=our_state.get("reputation", 0),
+                menu=our_state.get("menu", []),
+                clients_served=len(self.serving.served_this_turn),
+                revenue_this_turn=0,
+            )
+            self.game_state.snapshot(current)
+
+        # 3. Update competitor memory from intelligence
+        intel = self._latest_intel
+        all_features = intel.get("features", {})
+        for rid, feat in all_features.items():
+            self.competitor_memory.update_entity(rid, feat)
+        clusters = intel.get("clusters", {})
+        for rid, cluster in clusters.items():
+            self.competitor_memory.classify_entity(rid, cluster)
+
+        # 4. Measure deception rewards
+        try:
+            await self.diplomacy.measure_deception_rewards(
+                competitor_states=intel.get("all_states", {})
+            )
+        except Exception as e:
+            logger.warning(f"Deception reward measurement failed: {e}")
+
+        # 5. Zero inventory (all ingredients expire at end of turn)
+        self.game_state.end_turn(turn_id)
+
+        # 6. Log turn summary
+        profiles = self.serving.served_this_turn
+        logger.info(
+            f"Turn {turn_id} complete: "
+            f"served={len(profiles)}, "
+            f"balance={our_state.get('balance', '?')}, "
+            f"reputation={our_state.get('reputation', '?')}"
+        )
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  Main
-# ═══════════════════════════════════════════════════════════════════
+async def main():
+    """Entry point."""
+    orchestrator = GameOrchestrator()
 
+    # Handle graceful shutdown
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(
+            sig, lambda: asyncio.create_task(_shutdown(orchestrator))
+        )
 
-async def main() -> None:
-    global recipe_db, session
-    global event_log, game_memory, competitor_memory
-    global client_memory, message_memory, intolerance
-    global tracker_bridge, intel_pipeline, router
-    global serving, diplomacy, phase_router, event_bus
-
-    log.info("Starting SPAM! agent (Team %d)", TEAM_ID)
-
-    # ── 1. Memory layer ──────────────────────────────────────────
-    event_log = EventLog()
-    game_memory = GameStateMemory()
-    competitor_memory = CompetitorMemory()
-    client_memory = ClientProfileMemory()
-    message_memory = MessageMemory()
-    intolerance = IntoleranceDetector()
-
-    # ── 2. Intelligence layer ────────────────────────────────────
-    tracker_bridge = TrackerBridge()
-    intel_pipeline = IntelligencePipeline(
-        bridge=tracker_bridge,
-        competitor_memory=competitor_memory,
-    )
-
-    # ── 3. Decision engine ───────────────────────────────────────
-    router = SubagentRouter()
-
-    # ── 4. Serving pipeline (recipes set later after fetch) ──────
-    serving = ServingPipeline(
-        recipes={},  # populated on game_started
-        intolerance=intolerance,
-        client_memory=client_memory,
-    )
-
-    # ── 5. Diplomacy ─────────────────────────────────────────────
-    bandit = DeceptionBandit()
-    firewall = GroundTruthFirewall()
-
-    gen_client, disc_client = _build_llm_clients()
-    pseudo_gan = PseudoGAN(gen_client, disc_client) if gen_client else None
-
-    diplomacy = DiplomacyAgent(
-        bandit=bandit,
-        pseudo_gan=pseudo_gan,
-        firewall=firewall,
-        message_memory=message_memory,
-    )
-
-    # ── 6. Phase router ──────────────────────────────────────────
-    phase_router = PhaseRouter()
-    phase_router.register("speaking", on_speaking)
-    phase_router.register("closed_bid", on_closed_bid)
-    phase_router.register("waiting", on_waiting)
-    phase_router.register("serving", on_serving)
-    phase_router.register("stopped", on_stopped)
-
-    # ── 7. Event bus ─────────────────────────────────────────────
-    event_bus = ReactiveEventBus()
-
-    # Middleware
-    event_bus.use(logging_middleware)
-
-    # Register SSE handlers (includes new_message — template bug fix)
-    event_bus.on("game_started", on_game_started)
-    event_bus.on("game_phase_changed", on_game_phase_changed)
-    event_bus.on("client_spawned", on_client_spawned, priority=0)
-    event_bus.on("preparation_complete", on_preparation_complete, priority=0)
-    event_bus.on("message", on_message)
-    event_bus.on("new_message", on_new_message)      # ← template fix
-    event_bus.on("heartbeat", on_heartbeat, priority=10)
-    event_bus.on("game_reset", on_game_reset)
-
-    # ── 8. Shared HTTP session ───────────────────────────────────
-    session = aiohttp.ClientSession()
-
-    # ── 9. Pre-fetch recipes ─────────────────────────────────────
     try:
-        recipe_db = await fetch_recipes(session)
-        intel_pipeline.set_recipe_db(recipe_db)
-        serving.recipes = recipe_db
-        log.info("Pre-loaded %d recipes", len(recipe_db))
-    except Exception as exc:
-        log.warning("Could not pre-fetch recipes: %s", exc)
-
-    # ── 10. Connect SSE (blocks forever) ─────────────────────────
-    log.info("Connecting to SSE at %s …", SSE_URL)
-    try:
-        await event_bus.connect_sse(SSE_URL, SSE_HEADERS)
+        await orchestrator.start()
     except KeyboardInterrupt:
-        log.info("Shutting down (Ctrl-C)")
-    finally:
-        if session and not session.closed:
-            await session.close()
-        await tracker_bridge.close()
-        log.info("Cleanup complete — goodbye")
+        logger.info("Keyboard interrupt — shutting down")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
+
+
+async def _shutdown(orchestrator: GameOrchestrator):
+    """Graceful shutdown."""
+    logger.info("Shutting down...")
+    orchestrator._running = False
+    # Allow pending tasks to complete
+    await asyncio.sleep(0.5)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())
