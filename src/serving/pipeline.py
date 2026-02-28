@@ -162,6 +162,8 @@ class ServingPipeline:
 
     async def start_serving(self, turn_id: int):
         """Called at the start of serving phase."""
+        if turn_id <= 0:
+            logger.error(f"start_serving called with invalid turn_id={turn_id} — polling will be skipped")
         self.current_turn = turn_id
         self.preparing.clear()
         self.served_this_turn.clear()
@@ -317,6 +319,8 @@ class ServingPipeline:
           - When client_spawned triggers _poll_event (low latency)
           - On a fixed interval (catches anything missed)
         """
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5  # stop hammering server after this many
         try:
             while self._serving_active:
                 # Wait for either a trigger or the interval timeout
@@ -336,8 +340,16 @@ class ServingPipeline:
                 # Fetch current meals
                 meals = await self._fetch_meals()
                 if meals is None:
+                    consecutive_errors += 1
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        logger.error(
+                            f"GET /meals failed {consecutive_errors} times in a row "
+                            f"(turn_id={self.current_turn}) — backing off to 10s intervals"
+                        )
+                        await asyncio.sleep(10)
                     continue
 
+                consecutive_errors = 0  # reset on success
                 self.metrics.polls_performed += 1
 
                 # Process each unexecuted meal we haven't started yet
@@ -466,12 +478,22 @@ class ServingPipeline:
 
     async def _fetch_meals(self) -> list[dict] | None:
         """Fetch current meals from GET /meals."""
+        if self.current_turn <= 0:
+            logger.warning(f"GET /meals skipped — current_turn={self.current_turn} (not set)")
+            return None
+
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
 
         url = f"{BASE_URL}/meals?turn_id={self.current_turn}&restaurant_id={TEAM_ID}"
         try:
             async with self._session.get(url, headers=HEADERS) as resp:
+                if resp.status == 400:
+                    body = await resp.text()
+                    logger.error(
+                        f"GET /meals returned 400 (turn_id={self.current_turn}): {body}"
+                    )
+                    return None
                 if resp.status != 200:
                     logger.error(f"GET /meals returned {resp.status}")
                     return None

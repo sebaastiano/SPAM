@@ -180,13 +180,14 @@ class PhaseRouter:
 
     async def handle_game_started(self, data: dict):
         """Called on game_started SSE event."""
+        turn_id = data.get("turn_id", 0)
         self.current_phase = None
-        self.current_turn = 0
+        self.current_turn = turn_id  # preserve the real turn_id from the server
         self._first_phase_received = False
         self._is_mid_turn_entry = False
         self._skipped_phases = []
         self._turn_has_seen_speaking = False
-        logger.info("Game started — awaiting first phase")
+        logger.info(f"Game started — turn_id={turn_id}, awaiting first phase")
 
     async def handle_game_reset(self, data: dict):
         """

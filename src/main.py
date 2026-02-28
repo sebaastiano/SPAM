@@ -513,6 +513,11 @@ class GameOrchestrator:
 
         # game_started IS the speaking phase — run speaking logic immediately.
         # Manually advance the router so _build_skill_context sees the right state.
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        if turn_id <= 0:
+            logger.warning(f"game_started had turn_id={turn_id} — using 1 as fallback")
+            turn_id = max(turn_id, 1)
+        self.phase_router.current_turn = turn_id
         self.phase_router.current_phase = "speaking"
         self.phase_router._turn_has_seen_speaking = True
         self.phase_router._first_phase_received = True
@@ -520,9 +525,10 @@ class GameOrchestrator:
 
         speaking_data = dict(data)
         speaking_data["phase"] = "speaking"
-        speaking_data.setdefault("turn_id", self.phase_router.current_turn)
+        speaking_data["turn_id"] = turn_id
         speaking_data["is_mid_turn_entry"] = False
         speaking_data["skipped_phases"] = []
+        logger.info(f"Dispatching speaking phase with turn_id={turn_id}")
         await self._phase_speaking(speaking_data)
 
     async def _handle_game_reset(self, data: dict):
