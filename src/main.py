@@ -490,14 +490,33 @@ class GameOrchestrator:
     # ══════════════════════════════════════════════════════════════
 
     async def _handle_game_started(self, data: dict):
-        """Handle game_started SSE event."""
-        logger.info("Game started event received")
+        """Handle game_started SSE event.
+
+        NOTE: game_started == speaking. The server NEVER fires a separate
+        'speaking' phase event, so all speaking-phase logic must run here.
+        """
+        logger.info("Game started event received (= speaking phase)")
         await self.phase_router.handle_game_started(data)
         self.skill_orchestrator.new_turn()
 
         # Reload recipes in case they changed
         self.recipe_db = await load_recipes()
         self.serving.recipes = self.recipe_db
+        set_recipe_db(self.recipe_db)
+
+        # game_started IS the speaking phase — run speaking logic immediately.
+        # Manually advance the router so _build_skill_context sees the right state.
+        self.phase_router.current_phase = "speaking"
+        self.phase_router._turn_has_seen_speaking = True
+        self.phase_router._first_phase_received = True
+        self.phase_router.phase_start_time = time.time()
+
+        speaking_data = dict(data)
+        speaking_data["phase"] = "speaking"
+        speaking_data.setdefault("turn_id", self.phase_router.current_turn)
+        speaking_data["is_mid_turn_entry"] = False
+        speaking_data["skipped_phases"] = []
+        await self._phase_speaking(speaking_data)
 
     async def _handle_game_reset(self, data: dict):
         """Handle game_reset — clear turn-scoped state, preserve cross-turn memory."""
