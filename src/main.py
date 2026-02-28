@@ -12,8 +12,11 @@ Usage:
 import asyncio
 import logging
 import signal
+import socket
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 from datapizza.clients.openai.openai_client import OpenAIClient
 from datapizza.tools.mcp_client import MCPClient
@@ -1285,6 +1288,10 @@ class GameOrchestrator:
 
 async def main():
     """Entry point."""
+    # Start (or reuse) the tracker sidecar before anything else.
+    # Blocks until tracker is ready or all retries are exhausted.
+    _start_tracker()
+
     orchestrator = GameOrchestrator()
 
     # Handle graceful shutdown
@@ -1305,6 +1312,7 @@ async def main():
 
 async def _shutdown(orchestrator: GameOrchestrator):
     """Graceful shutdown."""
+    global _tracker_proc
     logger.info("Shutting down...")
     orchestrator._running = False
     # Cancel countdown timer
@@ -1312,7 +1320,122 @@ async def _shutdown(orchestrator: GameOrchestrator):
         orchestrator._countdown_task.cancel()
     # Allow pending tasks to complete
     await asyncio.sleep(0.5)
+    # Terminate tracker sidecar if we launched it
+    if _tracker_proc is not None and _tracker_proc.poll() is None:
+        logger.info(f"Terminating tracker (pid={_tracker_proc.pid})")
+        _tracker_proc.terminate()
+        try:
+            _tracker_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _tracker_proc.kill()
+        _tracker_proc = None
     sys.exit(0)
+
+
+# ── Tracker sidecar process (set by _start_tracker, torn down by _shutdown) ──
+_tracker_proc: subprocess.Popen | None = None
+
+# ── Tracker startup constants ──
+_TRACKER_PORT = 5555
+_TRACKER_RETRIES = 3          # attempts to launch a fresh tracker
+_TRACKER_RETRY_DELAY = 3      # seconds between launch attempts
+_TRACKER_STARTUP_TIMEOUT = 15 # seconds to wait for Flask to bind after each launch
+_TRACKER_SCRIPT = (
+    Path(__file__).parent.parent / "_server_changes" / "tracker.py"
+)
+
+
+def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True if something is already listening on *port*."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.0)
+        return s.connect_ex((host, port)) == 0
+
+
+def _wait_for_port(port: int, timeout: float) -> bool:
+    """Poll until port is open or timeout expires. Returns True if open."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_port_open(port):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _start_tracker() -> bool:
+    """
+    Ensure the tracker sidecar is running on port 5555.
+
+    Strategy:
+      1. If port already open → someone started it manually, reuse it.
+      2. Otherwise, launch _server_changes/tracker.py as a subprocess and
+         wait up to _TRACKER_STARTUP_TIMEOUT seconds for Flask to bind.
+      3. Retry up to _TRACKER_RETRIES times on failure.
+      4. If all retries exhausted, log a prominent warning and return False
+         (agent continues in degraded mode — no competitor intelligence,
+         serving / bidding / menu logic all still work).
+
+    Returns True if tracker is available, False if running without it.
+    """
+    global _tracker_proc
+
+    if _is_port_open(_TRACKER_PORT):
+        logger.info(
+            f"Tracker already running on port {_TRACKER_PORT} — reusing existing instance"
+        )
+        return True
+
+    if not _TRACKER_SCRIPT.exists():
+        logger.error(f"Tracker script not found at {_TRACKER_SCRIPT} — running without tracker")
+        return False
+
+    log_path = Path("tracker.log")
+    for attempt in range(1, _TRACKER_RETRIES + 1):
+        logger.info(
+            f"Starting tracker (attempt {attempt}/{_TRACKER_RETRIES}) — "
+            f"log → {log_path.resolve()}"
+        )
+        try:
+            log_file = open(log_path, "a")
+            proc = subprocess.Popen(
+                [sys.executable, str(_TRACKER_SCRIPT)],
+                stdout=log_file,
+                stderr=log_file,
+                # New process group so Ctrl-C in the terminal doesn't
+                # also kill the tracker (we handle teardown ourselves).
+                start_new_session=True,
+            )
+            ready = _wait_for_port(_TRACKER_PORT, _TRACKER_STARTUP_TIMEOUT)
+            if ready:
+                _tracker_proc = proc
+                logger.info(
+                    f"Tracker ready on port {_TRACKER_PORT} (pid={proc.pid})"
+                )
+                return True
+
+            # Flask didn't bind in time — kill and retry
+            logger.warning(
+                f"Tracker did not become ready within {_TRACKER_STARTUP_TIMEOUT}s "
+                f"(attempt {attempt}/{_TRACKER_RETRIES})"
+            )
+            proc.terminate()
+            proc.wait(timeout=5)
+
+        except Exception as exc:
+            logger.warning(f"Tracker launch attempt {attempt} failed: {exc}")
+
+        if attempt < _TRACKER_RETRIES:
+            logger.info(f"Retrying in {_TRACKER_RETRY_DELAY}s…")
+            time.sleep(_TRACKER_RETRY_DELAY)
+
+    logger.warning(
+        "=" * 60 + "\n"
+        "  TRACKER UNAVAILABLE — running in DEGRADED MODE\n"
+        "  Competitor intelligence will be empty this run.\n"
+        "  Serving, bidding and menu logic are unaffected.\n"
+        + "=" * 60
+    )
+    return False
 
 
 if __name__ == "__main__":
