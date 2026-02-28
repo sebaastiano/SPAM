@@ -33,6 +33,7 @@ from src.memory.client_profile import (
     GlobalClientLibrary,
     IntoleranceDetector,
 )
+from src.serving.archetype_classifier import ArchetypeClassifier
 from src.serving.order_matcher import OrderMatcher
 from src.serving.priority_queue import ClientPriorityQueue, classify_archetype
 
@@ -101,11 +102,24 @@ class ServingPipeline:
         intolerance_detector: IntoleranceDetector,
         client_library: GlobalClientLibrary,
         mcp_client=None,
+        archetype_classifier: ArchetypeClassifier | None = None,
     ):
+<<<<<<< HEAD
+=======
+        """
+        Args:
+            recipes: dict mapping recipe_name → {ingredients: {name: qty}, prestige, prep_time, ...}
+            intolerance_detector: Bayesian intolerance detector
+            client_library: Global client knowledge base
+            mcp_client: datapizza MCPClient for MCP calls
+            archetype_classifier: LLM-based archetype classifier (Regolo gpt-oss-120b)
+        """
+>>>>>>> 8393507 (added the archetipe classificator)
         self.recipes = recipes
         self.intolerance_detector = intolerance_detector
         self.client_library = client_library
         self.mcp_client = mcp_client
+        self.archetype_classifier = archetype_classifier or ArchetypeClassifier()
 
         # Set during waiting phase
         self.menu: dict[str, dict] = {}  # dish_name → {name, price}
@@ -277,7 +291,26 @@ class ServingPipeline:
         """
         client_name = client_data.get("clientName", "unknown")
         order_text = client_data.get("orderText", "")
-        archetype = client_data.get("_archetype", classify_archetype(client_name))
+
+        # Classify archetype from order text via LLM (Regolo gpt-oss-120b)
+        # Falls back to name-based heuristic if LLM fails
+        name_archetype = client_data.get("_archetype", classify_archetype(client_name))
+        try:
+            llm_archetype, confidence = await self.archetype_classifier.classify(
+                order_text=order_text,
+                client_name=client_name,
+            )
+            if llm_archetype != "unknown" and confidence >= 0.5:
+                archetype = llm_archetype
+                logger.info(
+                    f"Archetype override: {name_archetype} → {llm_archetype} "
+                    f"(conf={confidence:.2f}) for '{order_text[:50]}'"
+                )
+            else:
+                archetype = name_archetype
+        except Exception as exc:
+            logger.warning(f"Archetype classification error, falling back: {exc}")
+            archetype = name_archetype
 
         # Step 1: Match dish
         if self.order_matcher is None:

@@ -47,6 +47,7 @@ from src.memory.client_profile import (
 
 # Serving
 from src.serving.pipeline import ServingPipeline
+from src.serving.archetype_classifier import ArchetypeClassifier
 
 # Intelligence
 from src.intelligence.tracker_bridge import TrackerBridge
@@ -142,11 +143,13 @@ class GameOrchestrator:
         )
 
         # ── Serving ──
+        self.archetype_classifier = ArchetypeClassifier(client=self.primary_client)
         self.serving = ServingPipeline(
             recipes={},  # set after recipes loaded
             intolerance_detector=self.intolerance_detector,
             client_library=self.client_library,
             mcp_client=self.mcp_client,
+            archetype_classifier=self.archetype_classifier,
         )
 
         # ── Decision ──
@@ -498,8 +501,14 @@ class GameOrchestrator:
         logger.info("Game reset — clearing turn state")
         self.game_state.reset()
         self.serving.set_menu([])
+<<<<<<< HEAD
         await self.phase_router.handle_game_reset(data)
         self.skill_orchestrator.new_turn()
+=======
+        self.archetype_classifier.clear_cache()
+        self.phase_router.current_phase = None
+        self.phase_router.current_turn = 0
+>>>>>>> 8393507 (added the archetipe classificator)
         # Keep: competitor_memory, client_library, event_log, message_log
 
     async def _on_turn_change(self, turn_id: int):
