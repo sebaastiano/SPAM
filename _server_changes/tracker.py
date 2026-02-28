@@ -434,6 +434,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .feed-header { padding: 8px 12px; background: #1a1a1a; border-bottom: 1px solid var(--border); font-size: 11px; letter-spacing: 1px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
   #feed-count { background: var(--accent); color: #fff; border-radius: 3px; padding: 1px 6px; font-size: 10px; }
   .market-row td { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+  .table-scroll { overflow-x: auto; overflow-y: auto; max-height: 300px; }
   #filter-bar { padding: 6px 12px; background: #111; border-bottom: 1px solid var(--border); display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
   .filter-btn { padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-family: var(--font); font-size: 11px; }
   .filter-btn.active { color: #fff; }
@@ -459,8 +460,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #modal-refresh { background:transparent; border:1px solid #444; color:#aaa; cursor:pointer; font-size:11px; padding:4px 10px; border-radius:4px; font-family:var(--font); }
   #modal-refresh:hover { border-color:var(--blue); color:var(--blue); }
   #modal-body { overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:16px; }
-  .detail-section { border:1px solid var(--border); border-radius:6px; overflow:hidden; }
-  .detail-section-header { padding:7px 12px; background:#111; font-size:10px; letter-spacing:1.5px; color:var(--muted); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; }
+  .detail-section { border:1px solid var(--border); border-radius:6px; overflow-y:auto; overflow-x:hidden; max-height:300px; }
+  .detail-section-header { padding:7px 12px; background:#111; font-size:10px; letter-spacing:1.5px; color:var(--muted); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; position:sticky; top:0; z-index:2; }
   .detail-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:0; }
   .detail-kv { padding:8px 12px; border-right:1px solid #1a1a1a; border-bottom:1px solid #1a1a1a; }
   .detail-kv .dk { font-size:10px; color:var(--muted); margin-bottom:3px; letter-spacing:.5px; }
@@ -498,7 +499,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <!-- Restaurants table -->
     <div class="panel">
       <div class="panel-header">🏪 ALL RESTAURANTS <span class="badge" id="rest-count">0</span> <span style="color:var(--muted);font-size:10px;font-weight:normal">click a row to inspect</span></div>
-      <div style="overflow-x:auto;">
+      <div class="table-scroll">
         <table id="rest-table">
           <thead>
             <tr>
@@ -513,7 +514,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <!-- Market table -->
     <div class="panel">
       <div class="panel-header">📈 MARKET ENTRIES <span class="badge" id="mkt-count">0</span></div>
-      <div style="overflow-x:auto;">
+      <div class="table-scroll">
         <table id="mkt-table">
           <thead>
             <tr>
@@ -528,7 +529,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <!-- Meals table -->
     <div class="panel">
       <div class="panel-header">🍽️ OUR MEALS (this turn) <span class="badge" id="meal-count">0</span></div>
-      <div style="overflow-x:auto;">
+      <div class="table-scroll">
         <table id="meal-table">
           <thead>
             <tr><th>CLIENT</th><th>ORDER</th><th>DISH</th><th>SERVED</th></tr>
