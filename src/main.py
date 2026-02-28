@@ -501,14 +501,11 @@ class GameOrchestrator:
         logger.info("Game reset — clearing turn state")
         self.game_state.reset()
         self.serving.set_menu([])
-<<<<<<< HEAD
         await self.phase_router.handle_game_reset(data)
         self.skill_orchestrator.new_turn()
-=======
         self.archetype_classifier.clear_cache()
         self.phase_router.current_phase = None
         self.phase_router.current_turn = 0
->>>>>>> 8393507 (added the archetipe classificator)
         # Keep: competitor_memory, client_library, event_log, message_log
 
     async def _on_turn_change(self, turn_id: int):
