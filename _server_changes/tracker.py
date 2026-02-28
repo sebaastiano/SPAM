@@ -26,6 +26,10 @@ HEADERS   = {"x-api-key": API_KEY}
 SSE_HEADERS = {**HEADERS, "Accept": "text/event-stream"}
 POLL_INTERVAL = 5  # seconds between REST polls
 
+# Set to False when the SPAM bot is running (it owns the SSE connection).
+# The tracker will still get all data via REST polling.
+USE_SSE = False
+
 app = Flask(__name__)
 
 # Shared state
@@ -120,9 +124,11 @@ def sse_relay_thread():
 # Helper: safe GET
 # ──────────────────────────────────────────────
 
-def api_get(path: str, params: dict = None):
+def api_get(path: str, params: dict = None, silent_404: bool = False):
     try:
         r = requests.get(f"{BASE_URL}{path}", headers=HEADERS, params=params, timeout=10)
+        if r.status_code == 404 and silent_404:
+            return None
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -206,9 +212,40 @@ def flatten_market_entry(e: dict) -> dict:
 # Polling thread
 # ──────────────────────────────────────────────
 
+def _poll_game_state():
+    """Infer turn_id from our own restaurant data (no dedicated game-state endpoint)."""
+    # Try /restaurant/{TEAM_ID} — our own record often contains turnId / currentTurn
+    data = api_get(f"/restaurant/{TEAM_ID}", silent_404=True)
+    if data:
+        turn = (data.get("turn_id") or data.get("turnId") or
+                data.get("currentTurn") or data.get("current_turn"))
+        if turn:
+            with state_lock:
+                if state["turn_id"] != turn:
+                    state["turn_id"] = turn
+                    push_event("system", {"msg": f"turn_id detected from restaurant data: {turn}"})
+            return
+
+    # Fallback: scan the last polled raw restaurant snapshots for any turnId field
+    with state_lock:
+        for r in state["restaurants_raw"].values():
+            turn = (r.get("turn_id") or r.get("turnId") or
+                    r.get("currentTurn") or r.get("current_turn"))
+            if turn:
+                if state["turn_id"] != turn:
+                    state["turn_id"] = turn
+                    push_event("system", {"msg": f"turn_id inferred from restaurants: {turn}"})
+                break
+
+
 def polling_thread():
     time.sleep(1)  # small delay so SSE thread connects first
     while True:
+        if not USE_SSE:
+            try:
+                _poll_game_state()
+            except Exception as e:
+                push_event("system", {"msg": f"Poll game state error: {e}"})
         try:
             _poll_restaurants()
         except Exception as e:
@@ -1092,9 +1129,13 @@ def stream():
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     # Start background threads
-    t1 = threading.Thread(target=sse_relay_thread, daemon=True, name="sse-relay")
+    if USE_SSE:
+        t1 = threading.Thread(target=sse_relay_thread, daemon=True, name="sse-relay")
+        t1.start()
+        print("  ⚡  SSE relay ENABLED (tracker owns the game stream)")
+    else:
+        print("  ⚠️   SSE relay DISABLED (SPAM bot owns /events/17 — using REST polling only)")
     t2 = threading.Thread(target=polling_thread, daemon=True, name="poller")
-    t1.start()
     t2.start()
 
     print("=" * 55)

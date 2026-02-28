@@ -46,9 +46,14 @@ class GameStateMemory:
             if hasattr(self.current, key):
                 setattr(self.current, key, value)
 
-    def snapshot(self):
-        """Save current state as a historical snapshot."""
+    def snapshot(self, state=None):
+        """Save current state as a historical snapshot.
+        
+        If *state* is provided it replaces ``self.current`` before snapshotting.
+        """
         import copy
+        if state is not None:
+            self.current = state
         self.history.append(copy.deepcopy(self.current))
 
     def end_turn(self):
