@@ -1005,12 +1005,21 @@ class ServingPipeline:
         if client_id is None:
             return  # cannot serve without client_id
 
-        # Step 5: Prepare
+        # Step 5: Prepare (only valid in serving phase — caller must guard phase)
         self.preparing[dish] = client_id
         await self._mcp_prepare_dish(dish)
 
-    async def handle_preparation_complete(self, dish_name: str):
-        """Called on preparation_complete SSE event."""
+    async def handle_preparation_complete(self, raw_event_data: dict):
+        """
+        Called on preparation_complete SSE event.
+
+        IMPORTANT: the SSE payload field is `dish` (not `dish_name`).
+        The caller must pass `data` from the SSE event directly:
+            pipeline.handle_preparation_complete(event_data)  # data["dish"]
+        """
+        dish_name = raw_event_data.get("dish")  # field name per INSTR line 340
+        if not dish_name:
+            return
         client_id = self.preparing.pop(dish_name, None)
         if client_id:
             await self._mcp_serve_dish(dish_name, client_id)
@@ -1054,22 +1063,24 @@ class ServingPipeline:
         client_spawned SSE event does NOT include client_id (confirmed by
         dialogue_retrieval_report.md). The only documented source for client_id
         is GET /meals?turn_id=<id>&restaurant_id=17, which returns client
-        requests with their respective IDs.
+        requests with their respective IDs plus `executed` boolean.
 
-        We match the returned meal entries against client_name/order_text
-        to find the correct client_id for serve_dish.
+        We match the returned meal entries against order_text to find the
+        correct client_id for serve_dish.
+
+        NOTE: uses self.session (shared aiohttp.ClientSession) — do NOT create
+        a new session per call; that causes resource exhaustion under load.
+        The session must be injected at __init__ time or created once per
+        serving phase and stored on the pipeline instance.
         """
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            url = f"{BASE_URL}/meals?turn_id={self.current_turn}&restaurant_id={TEAM_ID}"
-            async with session.get(url, headers=HEADERS) as resp:
-                meals = await resp.json()
+        url = f"{BASE_URL}/meals?turn_id={self.current_turn}&restaurant_id={TEAM_ID}"
+        async with self.session.get(url, headers=HEADERS) as resp:
+            meals = await resp.json()
 
         # Match by order text (most reliable) — skip already-executed meals
         for meal in meals:
             if meal.get("executed"):
                 continue
-            # Match heuristic: compare order text or client name
             if meal.get("orderText", "").lower() == order_text.lower():
                 return meal.get("client_id") or meal.get("id")
 
@@ -1258,12 +1269,18 @@ async def end_of_turn_snapshot(turn_id: int) -> dict:
             "recipes": session.get(f"{BASE}/recipes", headers=HEADERS),
         }
 
-        # Also get menus from all competitors
-        for rid in range(1, 26):
-            if rid != 17:
-                tasks[f"menu_{rid}"] = session.get(
-                    f"{BASE}/restaurant/{rid}/menu", headers=HEADERS
-                )
+        # Also get menus from all competitors.
+        # Use IDs from GET /restaurants — do NOT hardcode range(1, 26);
+        # the actual number of teams and their IDs are dynamic.
+        all_restaurants_resp = await session.get(f"{BASE}/restaurants", headers=HEADERS)
+        all_restaurants_data = await all_restaurants_resp.json()
+        competitor_ids = [r["id"] for r in all_restaurants_data if r["id"] != TEAM_ID]
+        for rid in competitor_ids:
+            tasks[f"menu_{rid}"] = session.get(
+                f"{BASE}/restaurant/{rid}/menu", headers=HEADERS
+            )
+        # NOTE: GET /restaurant/:id (singular) is restricted to own restaurant only (403
+        # for others). GET /restaurant/:id/menu is public—no 403 restriction.
 
         results = {}
         for key, coro in tasks.items():
@@ -1411,18 +1428,45 @@ class ReactiveEventBus:
             except Exception as e:
                 print(f"Handler error for {event_type}: {e}")
 
-    async def connect_sse(self, url: str, headers: dict):
-        """Connect to an SSE stream and dispatch events."""
+    async def connect_sse(self, url: str, headers: dict, retry_delay: float = 2.0):
+        """
+        Connect to an SSE stream and dispatch events.
+
+        Error handling per spec:
+          401 — bad API key (fatal, raise)
+          403 — not your restaurantId (fatal, raise)
+          404 — restaurant not found (fatal, raise)
+          409 — connection already active (wait and retry; only ONE active SSE
+                connection per restaurant is allowed)
+
+        On any network error or unexpected disconnect, reconnect with backoff.
+        """
         import aiohttp
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                async for line in resp.content:
-                    line = line.decode().strip()
-                    if line.startswith("data:"):
-                        data = json.loads(line[5:])
-                        event_type = data.get("type", "unknown")
-                        await self.emit(event_type, data.get("data", {}))
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 409:
+                            # Another connection is still active; wait and retry
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        if resp.status in (401, 403, 404):
+                            resp.raise_for_status()  # fatal — let it propagate
+                        async for line in resp.content:
+                            line = line.decode().strip()
+                            if line.startswith("data:"):
+                                payload = line[5:].strip()
+                                if payload == "connected":
+                                    continue  # SSE handshake acknowledgement
+                                data = json.loads(payload)
+                                event_type = data.get("type", "unknown")
+                                await self.emit(event_type, data.get("data", {}))
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                # Network error — reconnect after backoff
+                await asyncio.sleep(retry_delay)
+                continue
+            break  # clean exit
 ```
 
 **Value to datapizza-ai**: Enables event-driven architectures beyond request-response. Useful for any real-time application (chatbots with push notifications, IoT monitoring, game agents).
@@ -1771,53 +1815,87 @@ pipeline.connect("features", "clusters")
 
 ### Phase: `speaking`
 
-| Action                    | Component           | Details                                                                 |
-| ------------------------- | ------------------- | ----------------------------------------------------------------------- |
-| Run intelligence pipeline | DagPipeline         | Fetch competitors, compute embeddings, classify clusters                |
-| Select active zone        | SubagentRouter      | ILP zone classification based on competitor positions                   |
-| Set menu                  | Active Subagent     | Zone-appropriate dishes + prices via `save_menu`                        |
-| Diplomacy                 | DiplomacyAgent      | DeceptionBandit selects arm → PseudoGAN crafts message → `send_message` |
-| Process incoming messages | GroundTruthFirewall | Log, verify claims, update credibility                                  |
+> ℹ️ `send_message` is allowed in `speaking`, `closed_bid`, `waiting`, and `serving` — but **NOT in `stopped`**. The DiplomacyAgent must check current phase before sending any message.
+
+| Action                    | Component           | Details                                                                                        |
+| ------------------------- | ------------------- | ---------------------------------------------------------------------------------------------- |
+| Run intelligence pipeline | DagPipeline         | Fetch competitors, compute embeddings, classify clusters                                       |
+| Select active zone        | SubagentRouter      | ILP zone classification based on competitor positions                                          |
+| Set menu                  | Active Subagent     | Zone-appropriate dishes + prices via `save_menu`                                               |
+| Diplomacy                 | DiplomacyAgent      | DeceptionBandit selects arm → PseudoGAN crafts message → `send_message` (phase guard required) |
+| Process incoming messages | GroundTruthFirewall | Log, verify claims, update credibility                                                         |
 
 ### Phase: `closed_bid`
 
-| Action                | Component       | Details                                       |
-| --------------------- | --------------- | --------------------------------------------- |
-| Compute optimal bids  | ILP Solver      | Zone-specific bid allocation via `closed_bid` |
-| Update menu if needed | Active Subagent | Adjust based on pre-bid analysis              |
-| Monitor market        | MarketMonitor   | Check `GET /market/entries` for arbitrage     |
+> ⚠️ **Phase restrictions in closed_bid:**
+>
+> - `closed_bid` tool is **only valid here** — calling it in any other phase will fail.
+> - Multiple submissions are allowed; **only the last submission counts** (per spec). Do not send partial bids expecting to top up later — always send the final complete bid list in one call.
+> - `prepare_dish` and `serve_dish` are NOT available yet.
+
+| Action                | Component       | Details                                                               |
+| --------------------- | --------------- | --------------------------------------------------------------------- |
+| Compute optimal bids  | ILP Solver      | Zone-specific bid allocation via `closed_bid` (send once, final)      |
+| Update menu if needed | Active Subagent | Adjust based on pre-bid analysis via `save_menu` (still allowed here) |
+| Monitor market        | MarketMonitor   | Check `GET /market/entries` for arbitrage                             |
 
 ### Phase: `waiting`
 
-| Action                     | Component         | Details                                                                                 |
-| -------------------------- | ----------------- | --------------------------------------------------------------------------------------- |
-| Evaluate bid results       | GameStateMemory   | `GET /restaurant/17` → check inventory                                                  |
-| Adjust menu to inventory   | Active Subagent   | Remove dishes we can't cook, adjust prices                                              |
-| Market operations          | MarketArbitrageur | Buy missing ingredients, sell surplus via `create_market_entry` / `execute_transaction` |
-| Pre-compute serving lookup | ServingPipeline   | Build order→dish lookup table from current menu                                         |
-| Open restaurant            | MCP               | `update_restaurant_is_open(is_open=true)`                                               |
+> ℹ️ **Inventory note**: After bids resolve, `GET /restaurant/17` returns the **real post-bid inventory**. This is the only accurate inventory figure for planning the current turn's menu. Do NOT use the `stopped`-phase snapshot inventory (it was zeroed at turn end).
+
+| Action                     | Component         | Details                                                                                              |
+| -------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------- |
+| Fetch fresh inventory      | GameStateMemory   | `GET /restaurant/17` → post-bid inventory is now accurate; use this for ILP menu selection           |
+| Adjust menu to inventory   | Active Subagent   | Remove dishes we can't cook, adjust prices via `save_menu` (allowed here, NOT in serving)            |
+| Market operations          | MarketArbitrageur | Buy missing ingredients, sell surplus via `create_market_entry` / `execute_transaction`              |
+| Pre-compute serving lookup | ServingPipeline   | Build order→dish lookup table; initialize shared `aiohttp.ClientSession` for use during serving      |
+| Open restaurant            | MCP               | `update_restaurant_is_open(is_open=true)` — must be done here; opening is NOT allowed during serving |
 
 ### Phase: `serving`
+
+> ⚠️ **Phase restrictions in serving:**
+>
+> - `save_menu` is **NOT allowed** — menu is frozen for the duration of serving. Ensure menu is finalized in `waiting` before serving starts.
+> - `update_restaurant_is_open` allows **close only** (`is_open=false`). Calling `is_open=true` during serving will fail. The restaurant must already be open (set in `waiting`).
+> - `prepare_dish` and `serve_dish` are only available here.
 
 | Action                        | Component           | Details                                                                                             |
 | ----------------------------- | ------------------- | --------------------------------------------------------------------------------------------------- |
 | Handle `client_spawned`       | ServingPipeline     | Parse order → match dish → intolerance check → fetch `client_id` from `GET /meals` → `prepare_dish` |
-| Handle `preparation_complete` | ServingPipeline     | `serve_dish(dish_name, client_id)` to waiting client                                                |
-| Poll `GET /meals`             | ServingPipeline     | Required to obtain `client_id` (not provided by `client_spawned` SSE event)                         |
+| Handle `preparation_complete` | ServingPipeline     | Read `data["dish"]` (SSE field name) → `serve_dish(dish_name, client_id)` to waiting client         |
+| Poll `GET /meals`             | ServingPipeline     | Required to obtain `client_id` (not in `client_spawned`); use shared session, not per-call session  |
 | Priority queue                | ClientPriorityQueue | Astrobaroni first, then Saggi, then Famiglie, then Esploratori (archetype classification needed)    |
+| Emergency close               | MCP                 | `update_restaurant_is_open(is_open=false)` only if overwhelmed — cannot reopen during serving       |
 | Track outcomes                | ClientProfileMemory | Record success/failure per serve for intolerance learning                                           |
 
 ### Phase: `stopped`
 
-| Action                        | Component           | Details                                 |
-| ----------------------------- | ------------------- | --------------------------------------- |
-| End-of-turn snapshot          | DataCollector       | Poll all GET endpoints                  |
-| Update all memories           | Memory Layer        | GameState, Competitor, ClientProfile    |
-| Update behavioral embedding   | CompetitorMemory    | New feature vectors for all restaurants |
-| Update trajectory predictions | TrajectoryPredictor | Velocity + momentum for next turn       |
-| Update intolerance model      | IntoleranceDetector | Bayesian update from serve outcomes     |
-| Persist state                 | EventLog            | Save everything to JSONL                |
-| Log to monitoring             | ContextTracing      | datapizza-ai tracing integration        |
+> ⚠️ **Phase restrictions in stopped:**
+>
+> - **ALL MCP tools are forbidden** — `save_menu`, `send_message`, `create_market_entry`, `closed_bid`, `prepare_dish`, `serve_dish`, and `update_restaurant_is_open` all return errors if called here.
+> - Only `GET` endpoints (`restaurant_info`, `get_meals`) remain available.
+> - **Ingredient expiry**: ALL inventory expires at end of turn — ingredients are NOT carried over. The snapshot inventory recorded here is historical reference only. The ILP for the next turn must start with inventory=0 and compute expected ingredients from the next turn's bids. Fresh actual inventory must be re-fetched at the start of the **next** `waiting` phase after bids resolve.
+> - **Market entries expire**: any `create_market_entry` offers not executed before `stopped` are automatically cancelled. No cleanup needed, but don't count on them surviving.
+
+| Action                        | Component           | Details                                                           |
+| ----------------------------- | ------------------- | ----------------------------------------------------------------- |
+| End-of-turn snapshot          | DataCollector       | Poll all GET endpoints (GET only — no MCP)                        |
+| **Zero out inventory**        | GameStateMemory     | Mark all inventory as expired — do NOT carry into next turn's ILP |
+| Update all memories           | Memory Layer        | GameState, Competitor, ClientProfile                              |
+| Update behavioral embedding   | CompetitorMemory    | New feature vectors for all restaurants                           |
+| Update trajectory predictions | TrajectoryPredictor | Velocity + momentum for next turn                                 |
+| Update intolerance model      | IntoleranceDetector | Bayesian update from serve outcomes                               |
+| Persist state                 | EventLog            | Save everything to JSONL                                          |
+| Log to monitoring             | ContextTracing      | datapizza-ai tracing integration                                  |
+
+### Event: `game_reset`
+
+> `game_reset` is a platform service event (broadcast, empty payload `{}`). When received:
+>
+> - **Clear all turn-scoped state**: turn_id, phase, current menu, inventory, client queue, preparing map
+> - **Preserve cross-turn memory**: CompetitorMemory, ClientProfileMemory, EventLog (keep for debugging)
+> - **Reconnect SSE** if needed (server may drop the connection on reset)
+> - Do NOT call any MCP tools in response to `game_reset` — wait for the next `game_started` event
 
 ---
 
