@@ -507,6 +507,9 @@ class GameOrchestrator:
 
         # 7. Pre-start serving pipeline
         await self.serving.start_serving(turn_id)
+        # Capture inventory snapshot for ingredient accounting
+        if our_state:
+            self.serving.set_inventory_snapshot(inventory)
 
     async def _market_operations(
         self,

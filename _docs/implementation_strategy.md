@@ -2131,221 +2131,250 @@ Reply with just the number."""
 
 ---
 
-## 9. Execution Engine — Serving Pipeline
+## 9. Execution Engine — Serving Pipeline (Hardened)
 
-### Design Principle: Zero-LLM Hot Path
+### Design Principle: Zero-LLM, Zero-Drop Hot Path
 
-During the serving phase, every millisecond counts. The serving pipeline uses NO LLM calls for the common case:
+During the serving phase, every millisecond counts AND every dropped client costs revenue + reputation. The serving pipeline is hardened against **8 critical failure modes** that have been observed to cause other teams to lose income:
+
+| # | Failure Mode | Impact | Our Mitigation |
+|---|---|---|---|
+| 1 | **Duplicate dish key collision** | Second client ordering same dish overwrites first → client lost | FIFO deque per dish name in `self.preparing` |
+| 2 | **Ingredient over-commitment** | N clients order dish, ingredients for 1 → N-1 wasted prepare calls | Real-time ingredient accounting before `prepare_dish` |
+| 3 | **MCP transient failure** | `prepare_dish`/`serve_dish` 429 or timeout → client lost | Exponential backoff retry (3 attempts) |
+| 4 | **MCP `isError: true` ignored** | Server rejects operation, we don't know → silent failure | Parse `isError` + `content[0].text`, distinguish permanent vs transient |
+| 5 | **GET /meals flooding** | 10 clients → 10 HTTP calls → latency + rate limit risk | Cached `/meals` with 2s TTL + resolved-ID dedup |
+| 6 | **Queue re-entrancy** | Concurrent `client_spawned` → two `_process_queue` loops racing | `asyncio.Lock` + `_processing` flag |
+| 7 | **Preparation never completes** | `preparation_complete` SSE never fires → client stuck forever | Background watchdog (prep_time × 2.5 + 5s timeout) |
+| 8 | **Ingredient exhaustion** | Keep accepting clients after running out → all fail | Auto-close restaurant when no cookable dishes remain |
+
+### Architecture Overview
+
+```
+client_spawned (SSE)
+     │
+     ▼
+┌─────────────────────────┐
+│  ClientPriorityQueue    │  ← Astrobarone > Saggi > Famiglie > Esploratore
+│  (heapq, FIFO tiebreak) │
+└────────┬────────────────┘
+         │    async with _queue_lock  (prevents re-entrant draining)
+         ▼
+┌─────────────────────────┐
+│  OrderMatcher           │  ← 4-tier: exact → fuzzy(0.7) → fuzzy(0.55) → token overlap(40%)
+│  (cached, no LLM)       │     + Italian/English prefix+suffix stripping
+└────────┬────────────────┘     + fallback to first menu dish (never drop a client)
+         │
+         ▼
+┌─────────────────────────┐
+│  IntoleranceDetector    │  ← Bayesian safety check
+│  + safe swap            │     Swaps to highest-prestige safe+cookable alternative
+└────────┬────────────────┘
+         │
+         ▼
+┌─────────────────────────┐
+│  Ingredient Accounting  │  ← _can_cook(dish): inventory - committed >= recipe needs
+│  _commit_ingredients()  │     If insufficient: try ANY cookable dish, else close restaurant
+│  _uncommit on failure   │
+└────────┬────────────────┘
+         │
+         ▼
+┌─────────────────────────┐
+│  _resolve_client_id()   │  ← Cached GET /meals with 2s TTL
+│  (3 strategies + retry) │     1. Match by orderText  2. Match by clientName
+│  dedup: _resolved_ids   │     3. First unresolved (last resort)
+└────────┬────────────────┘     Retry with 0.3s + 0.7s delays if no match (server propagation)
+         │
+         ▼
+┌─────────────────────────┐
+│  _mcp_prepare_dish()    │  ← MCP call with 3-attempt exponential backoff
+│  (retry + isError)      │     Checks isError, detects permanent vs transient errors
+│                         │     On permanent failure: uncommit ingredients, remove from queue
+└────────┬────────────────┘
+         │
+         │  ... async wait for server to cook ...
+         │
+         ▼
+preparation_complete (SSE)
+         │
+         ▼
+┌─────────────────────────┐
+│  handle_prep_complete() │  ← FIFO deque.popleft() — correct client for duplicate dishes
+│  → _mcp_serve_dish()    │     MCP retry, isError check, profile tracking
+│  → update metrics       │     Cache successful order→dish for future matching
+└─────────────────────────┘
+
+         ‖ background
+         ▼
+┌─────────────────────────┐
+│  Timeout Watchdog       │  ← Scans every 2s for stale preparations
+│  (asyncio background)   │     Timeout = prep_time × 2.5 + 5s
+│                         │     On timeout: uncommit ingredients, remove pending, log
+└─────────────────────────┘
+```
+
+### Data Structures
 
 ```python
-class ServingPipeline:
-    """
-    Hot path: SSE event → dish match → prepare → serve
-    Total latency target: <100ms before prepare_dish call
-    """
+@dataclass
+class PendingPreparation:
+    """Track a dish currently being prepared for a specific client."""
+    dish_name: str
+    client_id: str
+    client_name: str
+    order_text: str
+    archetype: str
+    started_at: float          # time.time() when prepare_dish was called
+    expected_prep_time: float  # from recipe database (seconds)
 
-    def __init__(self, menu: list, recipes: dict, intolerance_detector: IntoleranceDetector):
-        self.menu = {item["name"].lower(): item for item in menu}
-        self.recipes = recipes
-        self.intolerance_detector = intolerance_detector
-
-        # Pre-compute order→dish lookup table
-        self.order_lookup = self._build_lookup()
-
-        # Preparation queue
-        self.prep_queue: asyncio.Queue = asyncio.Queue()
-        self.preparing: dict[str, str] = {}  # dish_name → client_id
-
-    def _build_lookup(self) -> dict[str, str]:
-        """Pre-compute normalized order text → best menu dish mapping."""
-        lookup = {}
-        for dish_name in self.menu:
-            # Multiple normalization variants
-            normalized = dish_name.lower().strip()
-            lookup[normalized] = dish_name
-            # Without common prefixes
-            for prefix in ["i'd like a ", "i'd like ", "vorrei ", "mi piacerebbe "]:
-                lookup[prefix + normalized] = dish_name
-        return lookup
-
-    async def handle_client(self, client_name: str, order_text: str):
-        """
-        Called on client_spawned SSE event.
-
-        NOTE: client_spawned does NOT provide client_id. We must fetch it
-        from GET /meals to later call serve_dish.
-
-        Flow:
-        1. Normalize order text
-        2. Match to menu dish (lookup, then fuzzy, then LLM fallback)
-        3. Check intolerance safety
-        4. Fetch client_id from GET /meals (match by order text / client name)
-        5. prepare_dish
-        6. On preparation_complete → serve_dish(dish_name, client_id)
-        """
-        # Step 1: Normalize
-        normalized = order_text.lower().strip()
-        for prefix in ["i'd like a ", "i'd like "]:
-            normalized = normalized.replace(prefix, "")
-
-        # Step 2: Match dish
-        dish = self._match_dish(normalized, client_name)
-        if dish is None:
-            return  # no match found, skip this client
-
-        # Step 3: Intolerance check
-        archetype = self._classify_archetype(client_name)  # graceful fallback for unknown clientName values
-        if not self.intolerance_detector.filter_safe_recipes(
-            archetype, [self.recipes[dish]]
-        ):
-            # This dish might trigger intolerance — find alternative
-            dish = self._find_safe_alternative(archetype)
-            if dish is None:
-                return  # no safe dishes available
-
-        # Step 4: Fetch client_id from GET /meals (not available in client_spawned)
-        client_id = await self._resolve_client_id(client_name, order_text)
-        if client_id is None:
-            return  # cannot serve without client_id
-
-        # Step 5: Prepare (only valid in serving phase — caller must guard phase)
-        self.preparing[dish] = client_id
-        await self._mcp_prepare_dish(dish)
-
-    async def handle_preparation_complete(self, raw_event_data: dict):
-        """
-        Called on preparation_complete SSE event.
-
-        IMPORTANT: the SSE payload field is `dish` (not `dish_name`).
-        The caller must pass `data` from the SSE event directly:
-            pipeline.handle_preparation_complete(event_data)  # data["dish"]
-        """
-        dish_name = raw_event_data.get("dish")  # field name per INSTR line 340
-        if not dish_name:
-            return
-        client_id = self.preparing.pop(dish_name, None)
-        if client_id:
-            await self._mcp_serve_dish(dish_name, client_id)
-
-    def _match_dish(self, normalized_order: str, client_name: str) -> str | None:
-        """
-        Three-tier matching:
-        1. Exact lookup (O(1), no LLM) — handles 90%+ of cases
-        2. Fuzzy match (difflib, no LLM) — handles typos/variations
-        3. LLM fallback (only for truly ambiguous orders) — <5% of cases
-        """
-        # Tier 1: Exact lookup
-        if normalized_order in self.order_lookup:
-            return self.order_lookup[normalized_order]
-
-        # Tier 2: Fuzzy match
-        from difflib import get_close_matches
-        matches = get_close_matches(normalized_order, self.menu.keys(), n=1, cutoff=0.7)
-        if matches:
-            return self.menu[matches[0]]["name"]
-
-        # Tier 3: LLM fallback (async, but we accept the latency hit for rare cases)
-        # This is queued and handled asynchronously
-        return None  # or await self._llm_match(normalized_order, client_name)
-
-    def _find_safe_alternative(self, archetype: str) -> str | None:
-        """Find the best safe menu dish for this archetype."""
-        safe_dishes = self.intolerance_detector.filter_safe_recipes(
-            archetype,
-            [self.recipes[d] for d in self.menu]
-        )
-        if safe_dishes:
-            # Pick the one with highest prestige (or fastest prep time for Esploratori)
-            return max(safe_dishes, key=lambda r: r.prestige).name
-        return None
-
-    async def _resolve_client_id(self, client_name: str, order_text: str) -> str | None:
-        """
-        Fetch client_id from GET /meals endpoint.
-
-        client_spawned SSE event does NOT include client_id (confirmed by
-        dialogue_retrieval_report.md). The only documented source for client_id
-        is GET /meals?turn_id=<id>&restaurant_id=17, which returns client
-        requests with their respective IDs plus `executed` boolean.
-
-        We match the returned meal entries against order_text to find the
-        correct client_id for serve_dish.
-
-        NOTE: uses self.session (shared aiohttp.ClientSession) — do NOT create
-        a new session per call; that causes resource exhaustion under load.
-        The session must be injected at __init__ time or created once per
-        serving phase and stored on the pipeline instance.
-        """
-        url = f"{BASE_URL}/meals?turn_id={self.current_turn}&restaurant_id={TEAM_ID}"
-        async with self.session.get(url, headers=HEADERS) as resp:
-            meals = await resp.json()
-
-        # Match by order text (most reliable) — skip already-executed meals
-        for meal in meals:
-            if meal.get("executed"):
-                continue
-            if meal.get("orderText", "").lower() == order_text.lower():
-                return meal.get("client_id") or meal.get("id")
-
-        return None  # could not resolve
-
-    def _classify_archetype(self, client_name: str) -> str:
-        """
-        Map clientName to a known archetype.
-
-        IMPORTANT: No source confirms that clientName values map directly
-        to the 4 archetype names. We must handle unknown values gracefully.
-        """
-        KNOWN_ARCHETYPES = {
-            "Esploratore Galattico", "Astrobarone",
-            "Saggi del Cosmo", "Famiglie Orbitali"
-        }
-        if client_name in KNOWN_ARCHETYPES:
-            return client_name
-        # Fuzzy fallback: check if archetype name is a substring
-        for arch in KNOWN_ARCHETYPES:
-            if arch.lower() in client_name.lower() or client_name.lower() in arch.lower():
-                return arch
-        return "unknown"  # safe default — treated as lowest priority
+@dataclass
+class ServingMetrics:
+    """Per-turn serving statistics for debugging and tuning."""
+    clients_received: int = 0
+    clients_matched: int = 0
+    clients_no_match: int = 0
+    clients_no_id: int = 0
+    clients_no_ingredients: int = 0
+    preparations_started: int = 0
+    preparations_completed: int = 0
+    preparations_timed_out: int = 0
+    serves_successful: int = 0
+    serves_failed: int = 0
+    mcp_retries: int = 0
+    mcp_errors: int = 0
+    intolerance_swaps: int = 0
+    restaurant_closed_overflow: bool = False
 ```
+
+### Key Design Decisions
+
+**Why FIFO deque instead of dict for `self.preparing`?**
+
+If two clients order "Sinfonia Cosmica", the old code did:
+```python
+self.preparing["Sinfonia Cosmica"] = client_A_id  # first client
+self.preparing["Sinfonia Cosmica"] = client_B_id  # OVERWRITES! client_A lost
+```
+
+New code:
+```python
+self.preparing["Sinfonia Cosmica"] = deque([pending_A, pending_B])
+# preparation_complete → deque.popleft() → serves client_A first (FIFO)
+```
+
+**Why ingredient accounting?**
+
+Menu is verified in waiting phase, but ingredient consumption happens during serving.
+If our menu has 3 dishes each needing "Polvere di Crononite" × 2, and we only have 4:
+- Without accounting: all 3 accepted → 2 fail
+- With accounting: 2 accepted → 1 redirected to another dish → 3 served
+
+```python
+def _can_cook(self, dish_name: str) -> bool:
+    recipe = self.recipes.get(dish_name, {})
+    for ing, qty in recipe.get("ingredients", {}).items():
+        available = (
+            self._inventory_snapshot.get(ing, 0)
+            - self._committed_ingredients.get(ing, 0)
+        )
+        if available < qty:
+            return False
+    return True
+```
+
+**Why retry MCP calls?**
+
+The game server may return HTTP 429 (rate limit) or have transient errors. A single failure
+means a client never gets served. Our retry logic:
+
+```python
+async def _mcp_call_with_retry(self, tool_name: str, args: dict) -> bool:
+    for attempt in range(MAX_MCP_RETRIES):  # 3 attempts
+        try:
+            result = await self.mcp_client.call_tool(tool_name, args)
+            if self._is_mcp_error(result):
+                error_text = self._extract_mcp_error_text(result)
+                # Don't retry permanent errors (e.g., "dish not in menu")
+                if is_permanent_error(error_text):
+                    return False
+                # Transient: retry with exponential backoff
+                await asyncio.sleep(0.3 * (2 ** attempt))
+                continue
+            return True  # success
+        except Exception:
+            await asyncio.sleep(0.3 * (2 ** attempt))
+    return False  # all retries exhausted
+```
+
+**Why auto-close on ingredient exhaustion?**
+
+If we can't cook ANY menu dish with remaining uncommitted ingredients, accepting more
+clients just wastes their time and damages reputation. Closing the restaurant protects us:
+- No more clients spawn for us
+- Reputation impact of "closed" is much less than "accepted but failed to serve"
+
+### Order Matcher (4-Tier, Hardened)
+
+```python
+class OrderMatcher:
+    # 60+ Italian/English prefix patterns stripped
+    # Suffix stripping (", please", ", per favore", ", grazie")
+    # Unicode normalization, whitespace collapsing
+
+    def match(self, order_text: str) -> str | None:
+        normalized = self._normalize(order_text)
+
+        # Tier 1: Exact lookup (O(1)) — 90%+ of cases
+        if normalized in self.lookup:
+            return self.lookup[normalized]
+
+        # Tier 2: Fuzzy match (cutoff 0.7, then 0.55)
+        for cutoff in (0.7, 0.55):
+            matches = get_close_matches(normalized, menu_keys, n=1, cutoff=cutoff)
+            if matches:
+                return matches[0]
+
+        # Tier 3a: Substring containment
+        for dish in menu:
+            if dish in normalized or normalized in dish:
+                return dish
+
+        # Tier 3b: Token overlap (≥40% word overlap)
+        order_tokens = tokenize(normalized)
+        best = max(dishes, key=lambda d: token_overlap(order_tokens, d))
+        if overlap >= 0.4:
+            return best
+
+        # Fallback: return FIRST menu dish (missing revenue > missing a client)
+        return first_menu_dish
+```
+
+**Rationale for fallback**: In this game, the cost of not serving a client (reputation hit + lost revenue) is almost always worse than serving the wrong dish. A wrong dish might still satisfy the client partially. An unserved client is pure loss.
 
 ### Serving Strategy Per Archetype
 
-| Archetype                 | Priority   | Strategy                                                        |
-| ------------------------- | ---------- | --------------------------------------------------------------- |
-| **Astrobarone**           | 🔴 Highest | Serve first — highest revenue, least time tolerance             |
-| **Saggi del Cosmo**       | 🟡 High    | Serve quality — they wait, so handle after Astrobaroni          |
-| **Famiglie Orbitali**     | 🟢 Medium  | Serve balanced — good margin, time-tolerant                     |
-| **Esploratore Galattico** | 🔵 Low     | Serve last — lowest revenue, but fast dishes so squeeze them in |
+| Archetype | Priority | Strategy | Fallback |
+|---|---|---|---|
+| **Astrobarone** | 🔴 Highest (0) | Serve first — highest revenue, least patience | Redirect to highest-prestige cookable |
+| **Saggi del Cosmo** | 🟡 High (1) | Serve quality — they wait, so handle after Astrobaroni | Accept slower prep time dishes |
+| **Famiglie Orbitali** | 🟢 Medium (2) | Serve balanced — good margin, time-tolerant | Standard fallback path |
+| **Esploratore Galattico** | 🔵 Low (3) | Serve last — lowest revenue, fast dishes | Accept any cookable dish |
+| **Unknown** | ⚪ Lowest (99) | Best-effort after all known archetypes | Any available dish |
 
-```python
-class ClientPriorityQueue:
-    """Priority queue for incoming clients during serving phase."""
+### Metrics & Observability
 
-    PRIORITY = {
-        "Astrobarone": 0,        # highest priority (lowest number)
-        "Saggi del Cosmo": 1,
-        "Famiglie Orbitali": 2,
-        "Esploratore Galattico": 3,
-        # NOTE: clientName values are not confirmed to match these archetype
-        # names exactly. Unknown values get priority 99 (lowest).
-    }
-
-    def __init__(self):
-        self.queue: list[tuple[int, dict]] = []  # (priority, client_data)
-
-    def add_client(self, client_data: dict):
-        # clientName may not match archetype names — use _classify_archetype
-        archetype = ServingPipeline._classify_archetype(None, client_data["clientName"])
-        priority = self.PRIORITY.get(archetype, 99)
-        heapq.heappush(self.queue, (priority, client_data))
-
-    def next_client(self) -> dict | None:
-        if self.queue:
-            _, client = heapq.heappop(self.queue)
-            return client
-        return None
+Every turn produces a `ServingMetrics` object logged at turn end:
 ```
+Serving ended: received=12 matched=11 prepared=10 served=9
+  failed=1 no_match=1 no_id=0 no_ingredients=2
+  timeouts=0 mcp_retries=2 mcp_errors=1 swaps=1
+```
+
+This data feeds into:
+- **Turn-over-turn trend analysis**: Are we serving more or fewer clients each turn?
+- **Failure mode diagnosis**: Which stage is the bottleneck?
+- **Intolerance learning**: Which archetypes are triggering swaps? Update priors.
+- **Menu optimization**: If `no_ingredients` is high, bid more aggressively next turn.
 
 ---
 
