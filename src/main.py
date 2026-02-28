@@ -818,6 +818,7 @@ class GameOrchestrator:
                 recipes=list(ctx.recipes.values()),
                 competitor_clusters=ctx.intel.get("clusters", {}),
                 competitor_briefings=ctx.intel.get("briefings", {}),
+                all_states=ctx.intel.get("all_states"),
             )
             logger.info(f"Zone selected: {zone}")
             return SkillResult(

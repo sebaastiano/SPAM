@@ -80,6 +80,7 @@ class SubagentRouter:
         recipes: list[dict],
         competitor_clusters: dict,
         competitor_briefings: dict,
+        all_states: dict | None = None,
     ) -> str:
         """
         Select the active zone for this turn using ILP zone classification.
@@ -93,6 +94,7 @@ class SubagentRouter:
             recipes=recipes,
             competitor_clusters=competitor_clusters,
             competitor_briefings=competitor_briefings,
+            all_states=all_states,
         )
         logger.info(f"Active zone: {self.active_zone}")
         return self.active_zone

@@ -196,11 +196,14 @@ class CompetitorStateBuilder:
             items = raw_menu
         else:
             items = []
-        return {
-            item.get("name", ""): item.get("price", 0)
-            for item in items
-            if isinstance(item, dict)
-        }
+        result = {}
+        for item in items:
+            if isinstance(item, dict):
+                result[item.get("name", "")] = item.get("price", 0)
+            elif isinstance(item, str):
+                # Server sometimes returns menu items as plain strings
+                result[item] = 0
+        return result
 
     def _extract_kitchen_count(self, r: dict) -> int:
         k = r.get("kitchen") or []

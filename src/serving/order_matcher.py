@@ -26,12 +26,18 @@ class OrderMatcher:
 
     # Common prefixes to strip from order text (Italian + English)
     STRIP_PREFIXES = [
+        "i'd like to eat a ",
+        "i'd like to eat ",
         "i'd like a ",
         "i'd like ",
+        "i want to eat a ",
+        "i want to eat ",
         "i want a ",
         "i want ",
         "i'll have a ",
         "i'll have ",
+        "i would like to eat a ",
+        "i would like to eat ",
         "i would like a ",
         "i would like ",
         "vorrei ",
@@ -191,10 +197,25 @@ class OrderMatcher:
         return self._fallback_any_dish()
 
     def _normalize(self, text: str) -> str:
-        """Normalize order text: lowercase, strip prefixes/suffixes, clean whitespace."""
+        """Normalize order text: lowercase, strip prefixes/suffixes/intolerance info."""
         text = text.lower().strip()
 
-        # Strip suffixes first
+        # Strip intolerance info FIRST (before any other processing)
+        # Patterns: ". I'm intolerant to X", ". sono intollerante a X"
+        intolerance_patterns = [
+            r"[.!;,]?\s*i[''']?m\s+intolerant\s+to\s+.*$",
+            r"[.!;,]?\s*i\s+am\s+intolerant\s+to\s+.*$",
+            r"[.!;,]?\s*sono\s+intollerante\s+(a|al|alla|ai|alle)\s+.*$",
+            r"[.!;,]?\s*intolerant\s+to\s+.*$",
+            r"[.!;,]?\s*intollerante\s+(a|al|alla|ai|alle)\s+.*$",
+            r"[.!;,]?\s*but\s+i[''']?m\s+intolerant.*$",
+            r"[.!;,]?\s*but\s+i\s+am\s+intolerant.*$",
+            r"[.!;,]?\s*no\s+\w+\s+please.*$",
+        ]
+        for pattern in intolerance_patterns:
+            text = re.sub(pattern, "", text).strip()
+
+        # Strip suffixes
         for suffix in self.STRIP_SUFFIXES:
             if text.endswith(suffix):
                 text = text[: -len(suffix)].strip()

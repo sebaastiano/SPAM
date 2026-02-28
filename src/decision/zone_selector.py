@@ -30,6 +30,7 @@ def select_zone(
     recipes: list[dict],
     competitor_clusters: dict[int, str],
     competitor_briefings: dict[int, dict],
+    all_states: dict | None = None,
 ) -> str:
     """
     Select the optimal zone for this turn.
@@ -44,6 +45,30 @@ def select_zone(
         1 for b in competitor_briefings.values()
         if b.get("is_active", True) and b.get("menu_size", 0) > 0
     )
+
+    # FALLBACK: if briefings show 0 active but we have raw state data,
+    # count competitors directly from all_states as a sanity check.
+    if active_competitors == 0 and all_states:
+        raw_active = 0
+        for rid, rdata in all_states.items():
+            # rdata can be a CompetitorTurnState or a raw dict
+            if hasattr(rdata, "menu"):
+                if rdata.menu:
+                    raw_active += 1
+            elif isinstance(rdata, dict):
+                menu = rdata.get("menu")
+                if isinstance(menu, dict) and menu.get("items"):
+                    raw_active += 1
+                elif isinstance(menu, list) and menu:
+                    raw_active += 1
+                elif rdata.get("isOpen", False):
+                    raw_active += 1
+        if raw_active > 0:
+            logger.warning(
+                f"Briefings show 0 active competitors but all_states shows {raw_active}! "
+                f"Using raw count to avoid monopoly assumption."
+            )
+            active_competitors = raw_active
 
     # MONOPOLY EXPLOITATION: no active competition → premium zone always
     if active_competitors == 0:

@@ -469,13 +469,16 @@ def compute_bid_price(
             predicted_competitor_bids.append(est_bid)
 
     if not predicted_competitor_bids:
-        # NO competition for this ingredient → bid MINIMUM
-        # The lower we bid, the more profit we keep
+        # No specific competitor intel for this ingredient.
+        # Use a reasonable floor — bidding too low loses auctions.
         if active_competitors == 0:
-            return 10  # absolute minimum — monopoly pricing
+            # Even in "monopoly" mode use a sensible floor—
+            # briefings may under-count real competition.
+            high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
+            return 25 if ingredient in high_delta_names else 18
         # Some competitors exist but don't want this specific ingredient
         high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
-        base = 15 if ingredient in high_delta_names else 10
+        base = 30 if ingredient in high_delta_names else 20
         return base
 
     # Competitors want this ingredient — bid just above their predicted bid

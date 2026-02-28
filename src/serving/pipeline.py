@@ -401,20 +401,31 @@ class ServingPipeline:
         Process a single meal from /meals through the serving pipeline.
 
         Flow:
-        1. Match orderText to menu dish
+        1. Match request text to menu dish
         2. Intolerance check (best-effort without archetype)
         3. Verify ingredient availability
         4. Commit ingredients
         5. prepare_dish via MCP
         6. (preparation_complete SSE triggers serve_dish)
         """
-        order_text = meal.get("orderText", "")
-        client_name = meal.get("clientName", "unknown")
+        # /meals uses 'request' for order text (NOT 'orderText' like SSE)
+        order_text = meal.get("request") or meal.get("orderText", "")
+        # /meals nests client name under 'customer.name' (NOT flat 'clientName')
+        customer = meal.get("customer")
+        if isinstance(customer, dict):
+            client_name = customer.get("name", "unknown")
+        else:
+            client_name = meal.get("clientName", "unknown")
 
         # Fallback: use SSE-cached order text if /meals didn't include it
         if not order_text and client_name in self._sse_order_cache:
             order_text = self._sse_order_cache[client_name]
             logger.info(f"Using SSE-cached orderText for {client_name}: '{order_text}'")
+
+        # Step 0.5: Extract declared intolerances from order text
+        declared_intolerances = self._extract_intolerances(order_text)
+        if declared_intolerances:
+            logger.info(f"Client {client_name} declared intolerances: {declared_intolerances}")
 
         # Step 1: Match dish
         if self.order_matcher is None:
@@ -429,12 +440,30 @@ class ServingPipeline:
 
         self.metrics.clients_matched += 1
 
-        # Step 2: Intolerance check (best-effort, no archetype info)
+        # Step 2: Intolerance check — use declared intolerances from order text
         recipe = self.recipes.get(dish, {})
         recipe_ings = list(recipe.get("ingredients", {}).keys())
 
-        if not self.intolerance_detector.is_recipe_safe("unknown", recipe_ings):
-            alt_dish = self._find_any_cookable_dish()
+        # Check declared intolerances against recipe ingredients
+        intolerance_conflict = False
+        if declared_intolerances:
+            for intolerant_ing in declared_intolerances:
+                intolerant_lower = intolerant_ing.lower().strip()
+                for ring in recipe_ings:
+                    if intolerant_lower in ring.lower() or ring.lower() in intolerant_lower:
+                        intolerance_conflict = True
+                        logger.warning(
+                            f"Dish {dish} contains {ring} which client is intolerant to!"
+                        )
+                        break
+                if intolerance_conflict:
+                    break
+
+        # Also check Bayesian intolerance detector as fallback
+        bayesian_unsafe = not self.intolerance_detector.is_recipe_safe("unknown", recipe_ings)
+
+        if intolerance_conflict or bayesian_unsafe:
+            alt_dish = self._find_safe_cookable_dish(declared_intolerances)
             if alt_dish and alt_dish != dish:
                 logger.info(
                     f"Intolerance risk for {dish} → using {alt_dish}"
@@ -529,8 +558,14 @@ class ServingPipeline:
 
     @staticmethod
     def _extract_client_id(meal: dict) -> str | None:
-        """Extract client_id from a /meals response entry."""
-        for field_name in ("client_id", "id", "mealId"):
+        """
+        Extract client_id from a /meals response entry.
+
+        /meals returns: id (meal id), customerId (customer id).
+        serve_dish expects the customer id (customerId), not the meal id.
+        Fall back to id if customerId not present.
+        """
+        for field_name in ("customerId", "client_id", "id", "mealId"):
             val = meal.get(field_name)
             if val is not None:
                 return str(val)
@@ -584,6 +619,64 @@ class ServingPipeline:
                 key=lambda d: self.recipes.get(d, {}).get("prestige", 0),
             )
         return None
+
+    def _find_safe_cookable_dish(self, declared_intolerances: list[str]) -> str | None:
+        """Find a cookable dish that avoids declared intolerances."""
+        cookable = self._cookable_menu_dishes()
+        if not cookable:
+            return None
+
+        safe = []
+        for d in cookable:
+            recipe = self.recipes.get(d, {})
+            ings = list(recipe.get("ingredients", {}).keys())
+            conflict = False
+            for intolerant_ing in declared_intolerances:
+                intolerant_lower = intolerant_ing.lower().strip()
+                for ring in ings:
+                    if intolerant_lower in ring.lower() or ring.lower() in intolerant_lower:
+                        conflict = True
+                        break
+                if conflict:
+                    break
+            if not conflict:
+                safe.append(d)
+
+        if safe:
+            return max(
+                safe,
+                key=lambda d: self.recipes.get(d, {}).get("prestige", 0),
+            )
+        # No safe dish available — return any cookable as last resort
+        return max(
+            cookable,
+            key=lambda d: self.recipes.get(d, {}).get("prestige", 0),
+        )
+
+    @staticmethod
+    def _extract_intolerances(order_text: str) -> list[str]:
+        """Extract declared intolerances from order text.
+        
+        Examples:
+          'I want to eat X. I'm intolerant to Funghi Orbitali' → ['Funghi Orbitali']
+          'Vorrei Y. Sono intollerante ai Cristalli di Sale' → ['Cristalli di Sale']
+        """
+        import re
+        intolerances = []
+        patterns = [
+            r"(?:i[''']?m|i\s+am)\s+intolerant\s+to\s+(.+?)(?:\.|!|$)",
+            r"(?:sono)\s+intollerante\s+(?:a|al|alla|ai|alle|allo|agli)\s+(.+?)(?:\.|!|$)",
+            r"intolerant\s+to\s+(.+?)(?:\.|!|$)",
+            r"intollerante\s+(?:a|al|alla|ai|alle|allo|agli)\s+(.+?)(?:\.|!|$)",
+        ]
+        text_lower = order_text.lower()
+        for pattern in patterns:
+            matches = re.findall(pattern, text_lower, re.IGNORECASE)
+            for m in matches:
+                cleaned = m.strip().rstrip(".,!?; ")
+                if cleaned:
+                    intolerances.append(cleaned)
+        return intolerances
 
     # ══════════════════════════════════════════════════════════════
     #  MCP CALLS (with retry + isError checking)
