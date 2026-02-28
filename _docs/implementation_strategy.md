@@ -475,41 +475,443 @@ class IntoleranceDetector:
 
 ## 6. Competitive Intelligence Pipeline
 
-### Behavioral Embedding (From vectorization_strategy.md — Unchanged)
+### 6.1 Observable Data Inventory — What We Can See
 
-Each turn, for each restaurant, we observe and compute a 14-feature vector:
+The `tracker.py` service polls the game server every 5 seconds and records per-restaurant diffs. Combined with `GET /bid_history` and `GET /market/entries`, we reconstruct a near-complete picture of every competitor **every turn**. Below is the exhaustive mapping of observable fields to strategic uses.
+
+#### Raw fields from `GET /restaurants` (polled every 5s, publicly visible for ALL teams)
+
+| Field              | Type                | What it reveals                                      | Strategic use                                     |
+| ------------------ | ------------------- | ---------------------------------------------------- | ------------------------------------------------- |
+| `balance`          | float               | Exact spending power                                 | Bid ceiling prediction, threat assessment         |
+| `inventory`        | dict[str, int]      | **Exact ingredient holdings** — names and quantities | Recipe inference, bid prediction, menu prediction |
+| `reputation`       | float               | Current prestige score                               | Archetype attractiveness modeling                 |
+| `isOpen`           | bool                | Currently serving?                                   | Competitive density during serving                |
+| `menu` → items     | list[{name, price}] | **Full menu with prices**                            | Price positioning, archetype targeting inference  |
+| `kitchen`          | list/dict           | Dishes currently being cooked (count visible)        | Throughput estimation, serving capacity           |
+| `receivedMessages` | int/list            | Message count (tells us who's talking to whom)       | Diplomacy graph reconstruction                    |
+
+#### Raw fields from `GET /bid_history?turn_id=X` (all teams' bids, post-auction)
+
+| Field           | Type  | What it reveals                |
+| --------------- | ----- | ------------------------------ |
+| `restaurant_id` | int   | Who bid                        |
+| `ingredient`    | str   | What they bid on               |
+| `quantity`      | int   | How much they wanted           |
+| `bid`           | float | How much they offered per unit |
+| `status`        | str   | Won or lost the bid            |
+
+#### Raw fields from `GET /market/entries` (real-time, all teams)
+
+| Field                    | Type     | What it reveals                  |
+| ------------------------ | -------- | -------------------------------- |
+| `side`                   | BUY/SELL | Are they surplus or deficit?     |
+| `ingredient_name`        | str      | Which ingredient they're trading |
+| `quantity`               | int      | How much                         |
+| `price`                  | float    | At what price                    |
+| `seller_id` / `buyer_id` | int      | Who posted it                    |
+| `status`                 | str      | ACTIVE / COMPLETED / CANCELLED   |
+
+#### Tracker diff engine — what changes between polls
+
+The tracker's `diff_dict()` function detects field-level changes every 5s. This means we observe the _exact timestamp_ of:
+
+- Balance drops (they paid for something) or rises (they served a client)
+- Inventory additions (bid won) and depletions (dish cooked)
+- Menu changes (added/removed dishes, price adjustments)
+- Kitchen activity (dishes entering/leaving cooking)
+- Open/close state transitions
+- Reputation changes (successful/failed serves)
+
+This gives us **intra-turn temporal resolution**, not just end-of-turn snapshots.
+
+### 6.2 Per-Competitor State Reconstruction
+
+From the raw observables above, we reconstruct a complete strategic profile per competitor per turn:
 
 ```python
-restaurant_features = {
-    # Auction behavior
-    "bid_aggressiveness":   total_spent / balance,
-    "bid_concentration":    gini_coefficient(bids_by_ingredient),
-    "bid_consistency":      cosine_similarity(this_turn, last_turn),
-    "bid_volume":           num_ingredients_bid_on,
+@dataclass
+class CompetitorTurnState:
+    """Complete reconstructed state of a competitor for one turn."""
+    restaurant_id: int
+    turn_id: int
+    name: str
 
-    # Menu behavior
-    "price_positioning":    avg_menu_price / market_avg_price,
-    "menu_stability":       jaccard_similarity(this_menu, last_menu),
-    "specialization_depth": 1 / num_dishes_on_menu,
+    # Direct observables (from GET /restaurants)
+    balance: float
+    balance_delta: float               # vs. previous turn
+    inventory: dict[str, int]          # exact ingredient holdings
+    menu: dict[str, float]             # dish_name → price
+    reputation: float
+    reputation_delta: float
+    is_open: bool
+    kitchen_load: int                  # number of dishes being cooked
 
-    # Market behavior
-    "market_activity":      trades_executed / total_turns,
-    "buy_sell_ratio":       buys / (sells + 1),
+    # Derived from bid_history
+    bids: list[dict]                   # this turn's bids
+    total_bid_spend: float             # Σ(bid × quantity) for won bids
+    bid_ingredients: set[str]          # which ingredients they targeted
+    bid_win_rate: float                # won / total bids
+    avg_bid_price: float               # average bid per ingredient unit
 
-    # Outcome signals
-    "balance_growth_rate":  delta_balance / turns_elapsed,
-    "client_diversity":     entropy(client_archetype_distribution),
+    # Derived from market/entries
+    market_buys: list[dict]            # BUY entries this turn
+    market_sells: list[dict]           # SELL entries this turn
+    market_net_spend: float            # buys - sells
 
-    # Recipe & prestige signals
-    "prestige_targeting":   avg_prestige_of_served_dishes,
-    "recipe_complexity":    avg_ingredients_per_cooked_recipe,
-    "prestige_consistency": std_dev(prestige_scores_over_turns),
-}
+    # Derived from inventory diffs (intra-turn from tracker)
+    ingredients_consumed: dict[str, int]  # inventory drops during serving
+    ingredients_acquired: dict[str, int]  # inventory gains post-bid
+
+    # Inferred
+    inferred_recipes_cooked: list[str]    # matched against recipe DB
+    inferred_revenue: float               # balance_delta + total_bid_spend + market_net_spend
+    inferred_clients_served: int          # from balance increase pattern + kitchen activity
+    inferred_strategy: str                # cluster assignment
+
+
+class CompetitorStateBuilder:
+    """
+    Builds CompetitorTurnState from tracker observables.
+
+    Data sources:
+     - GET /restaurants (every 5s via tracker polling)
+     - GET /bid_history?turn_id=X (post-auction)
+     - GET /market/entries (real-time)
+     - Tracker diff log (intra-turn changes)
+    """
+
+    def __init__(self, recipe_db: dict[str, dict]):
+        self.recipe_db = recipe_db  # recipe_name → {ingredients: {name: qty}, ...}
+        self.history: dict[int, list[CompetitorTurnState]] = {}  # rid → turns
+
+    def build_turn_state(
+        self,
+        rid: int,
+        turn_id: int,
+        restaurant_data: dict,        # from GET /restaurants
+        bid_data: list[dict],         # from GET /bid_history filtered by rid
+        market_data: list[dict],      # from GET /market/entries filtered by rid
+        prev_state: "CompetitorTurnState | None",
+        diff_log: list[dict],         # from tracker change events for this rid
+    ) -> CompetitorTurnState:
+
+        balance = restaurant_data.get("balance", 0)
+        inventory = restaurant_data.get("inventory", {})
+        reputation = restaurant_data.get("reputation", 100)
+
+        prev_balance = prev_state.balance if prev_state else balance
+        prev_reputation = prev_state.reputation if prev_state else reputation
+        prev_inventory = prev_state.inventory if prev_state else {}
+
+        # Reconstruct inventory movements from diffs
+        ingredients_consumed = {}
+        ingredients_acquired = {}
+        for ing, old_qty in prev_inventory.items():
+            new_qty = inventory.get(ing, 0)
+            if new_qty < old_qty:
+                ingredients_consumed[ing] = old_qty - new_qty
+            elif new_qty > old_qty:
+                ingredients_acquired[ing] = new_qty - old_qty
+        for ing, new_qty in inventory.items():
+            if ing not in prev_inventory and new_qty > 0:
+                ingredients_acquired[ing] = new_qty
+
+        # Infer which recipes were cooked by matching consumed ingredients
+        inferred_recipes = self._match_consumed_to_recipes(ingredients_consumed)
+
+        # Bid analysis
+        team_bids = [b for b in bid_data if b.get("restaurant_id") == rid]
+        won_bids = [b for b in team_bids if b.get("status") == "completed"]
+        total_bid_spend = sum(b["bid"] * b["quantity"] for b in won_bids)
+
+        # Market analysis
+        team_market_buys = [e for e in market_data
+                           if e.get("side") == "BUY" and e.get("buyer_id") == rid]
+        team_market_sells = [e for e in market_data
+                            if e.get("side") == "SELL" and e.get("seller_id") == rid]
+
+        # Revenue inference: balance_delta = revenue - bid_spend - market_net
+        market_net = (sum(e["price"] * e["quantity"] for e in team_market_buys)
+                    - sum(e["price"] * e["quantity"] for e in team_market_sells))
+        inferred_revenue = (balance - prev_balance) + total_bid_spend + market_net
+
+        state = CompetitorTurnState(
+            restaurant_id=rid,
+            turn_id=turn_id,
+            name=restaurant_data.get("name", f"team {rid}"),
+            balance=balance,
+            balance_delta=balance - prev_balance,
+            inventory=inventory,
+            menu=self._extract_menu(restaurant_data),
+            reputation=reputation,
+            reputation_delta=reputation - prev_reputation,
+            is_open=restaurant_data.get("isOpen", False),
+            kitchen_load=self._extract_kitchen_count(restaurant_data),
+            bids=team_bids,
+            total_bid_spend=total_bid_spend,
+            bid_ingredients=set(b["ingredient"] for b in team_bids),
+            bid_win_rate=len(won_bids) / max(len(team_bids), 1),
+            avg_bid_price=total_bid_spend / max(sum(b["quantity"] for b in won_bids), 1),
+            market_buys=team_market_buys,
+            market_sells=team_market_sells,
+            market_net_spend=market_net,
+            ingredients_consumed=ingredients_consumed,
+            ingredients_acquired=ingredients_acquired,
+            inferred_recipes_cooked=inferred_recipes,
+            inferred_revenue=inferred_revenue,
+            inferred_clients_served=max(0, int(inferred_revenue / 100)),  # rough estimate
+            inferred_strategy="unclassified",  # filled by cluster classifier
+        )
+
+        self.history.setdefault(rid, []).append(state)
+        return state
+
+    def _match_consumed_to_recipes(self, consumed: dict[str, int]) -> list[str]:
+        """
+        Given ingredients consumed this turn, find which recipes they could have cooked.
+
+        Uses subset matching: a recipe is a candidate if its ingredient set
+        is a subset of the consumed ingredients (accounting for quantities).
+        """
+        candidates = []
+        remaining = dict(consumed)
+        # Greedy: try most-ingredient recipes first (more constrained = more certain)
+        sorted_recipes = sorted(
+            self.recipe_db.items(),
+            key=lambda r: len(r[1].get("ingredients", {})),
+            reverse=True
+        )
+        for recipe_name, recipe in sorted_recipes:
+            ingredients = recipe.get("ingredients", {})
+            if all(remaining.get(ing, 0) >= qty for ing, qty in ingredients.items()):
+                candidates.append(recipe_name)
+                for ing, qty in ingredients.items():
+                    remaining[ing] = remaining.get(ing, 0) - qty
+        return candidates
+
+    def _extract_menu(self, r: dict) -> dict[str, float]:
+        raw_menu = r.get("menu") or {}
+        if isinstance(raw_menu, dict):
+            items = raw_menu.get("items") or []
+        elif isinstance(raw_menu, list):
+            items = raw_menu
+        else:
+            items = []
+        return {item.get("name"): item.get("price") for item in items if isinstance(item, dict)}
+
+    def _extract_kitchen_count(self, r: dict) -> int:
+        k = r.get("kitchen") or []
+        return len(k) if isinstance(k, (list, dict)) else 0
+```
+
+### 6.3 Strategy Inference Engine
+
+By combining multiple observable signals, we can **infer** which strategy a competitor is following — even though we never see their code or their client orders.
+
+```python
+class StrategyInferrer:
+    """
+    Infer competitor strategy from observable patterns.
+
+    Each inference rule maps observable signals → strategy hypothesis
+    with a confidence score. Multiple rules can fire; the highest-confidence
+    hypothesis wins.
+    """
+
+    def infer(self, state: CompetitorTurnState, history: list[CompetitorTurnState]) -> dict:
+        """Returns {strategy: str, confidence: float, evidence: list[str]}."""
+
+        hypotheses = []
+
+        # ── Premium strategy detection ──
+        if state.menu:
+            avg_price = sum(state.menu.values()) / len(state.menu)
+            menu_size = len(state.menu)
+            if avg_price > 150 and menu_size <= 5:
+                hypotheses.append({
+                    "strategy": "PREMIUM_MONOPOLIST",
+                    "confidence": min(0.9, avg_price / 250),
+                    "evidence": [
+                        f"avg_price={avg_price:.0f} (>150)",
+                        f"menu_size={menu_size} (≤5)",
+                    ]
+                })
+
+        # ── Budget/volume strategy detection ──
+        if state.menu:
+            avg_price = sum(state.menu.values()) / len(state.menu)
+            menu_size = len(state.menu)
+            if avg_price < 100 and menu_size >= 6:
+                hypotheses.append({
+                    "strategy": "BUDGET_OPPORTUNIST",
+                    "confidence": min(0.85, menu_size / 15),
+                    "evidence": [
+                        f"avg_price={avg_price:.0f} (<100)",
+                        f"menu_size={menu_size} (≥6)",
+                    ]
+                })
+
+        # ── Aggressive hoarding detection ──
+        if len(history) >= 2:
+            recent_bid_spend = sum(s.total_bid_spend for s in history[-2:])
+            recent_balance_drop = history[-2].balance - state.balance
+            if recent_bid_spend > state.balance * 0.3:
+                hypotheses.append({
+                    "strategy": "AGGRESSIVE_HOARDER",
+                    "confidence": min(0.8, recent_bid_spend / state.balance),
+                    "evidence": [
+                        f"bid_spend_ratio={recent_bid_spend/max(state.balance,1):.2f}",
+                        f"balance_trend=declining",
+                    ]
+                })
+
+        # ── Market arbitrageur detection ──
+        if len(state.market_buys) + len(state.market_sells) > 3:
+            if len(state.menu) <= 2:
+                hypotheses.append({
+                    "strategy": "MARKET_ARBITRAGEUR",
+                    "confidence": 0.7,
+                    "evidence": [
+                        f"market_entries={len(state.market_buys)+len(state.market_sells)}",
+                        f"menu_size={len(state.menu)} (≤2)",
+                    ]
+                })
+
+        # ── Reactive chaser detection (menu mimics successful competitors) ──
+        if len(history) >= 3:
+            menu_changes = sum(1 for i in range(1, len(history))
+                             if history[i].menu != history[i-1].menu)
+            if menu_changes >= len(history) * 0.6:
+                hypotheses.append({
+                    "strategy": "REACTIVE_CHASER",
+                    "confidence": min(0.75, menu_changes / len(history)),
+                    "evidence": [
+                        f"menu_change_rate={menu_changes/len(history):.2f}",
+                    ]
+                })
+
+        # ── Declining / inactive detection ──
+        if len(history) >= 2:
+            if state.balance_delta < 0 and state.reputation_delta <= 0:
+                consecutive_losses = 0
+                for s in reversed(history):
+                    if s.balance_delta < 0:
+                        consecutive_losses += 1
+                    else:
+                        break
+                if consecutive_losses >= 2:
+                    hypotheses.append({
+                        "strategy": "DECLINING",
+                        "confidence": min(0.9, consecutive_losses * 0.3),
+                        "evidence": [
+                            f"consecutive_losses={consecutive_losses}",
+                            f"balance_delta={state.balance_delta}",
+                            f"reputation_delta={state.reputation_delta}",
+                        ]
+                    })
+
+        # ── Dormant detection (never opened, still at default balance) ──
+        if not state.is_open and len(state.menu) == 0 and state.balance >= 7500:
+            hypotheses.append({
+                "strategy": "DORMANT",
+                "confidence": 0.95,
+                "evidence": ["never_opened", f"balance={state.balance}"]
+            })
+
+        if not hypotheses:
+            return {"strategy": "UNCLASSIFIED", "confidence": 0.0, "evidence": []}
+
+        return max(hypotheses, key=lambda h: h["confidence"])
+```
+
+### 6.4 Behavioral Embedding (Extended from vectorization_strategy.md)
+
+The 14-feature vector is now computed directly from `CompetitorTurnState`, grounding every feature in a concrete observable:
+
+```python
+import numpy as np
+
+def extract_feature_vector(state: CompetitorTurnState, history: list[CompetitorTurnState]) -> np.ndarray:
+    """
+    Compute 14-dim behavioral feature vector from tracker observables.
+
+    Every feature maps to a concrete field from GET /restaurants,
+    GET /bid_history, or GET /market/entries.
+    """
+
+    # ── Auction behavior (from bid_history) ──
+    bid_aggressiveness = state.total_bid_spend / max(state.balance, 1)
+    bid_ingredients_set = state.bid_ingredients
+    bid_concentration = _gini([b["quantity"] for b in state.bids]) if state.bids else 0
+    bid_volume = len(bid_ingredients_set)
+    bid_consistency = 0.0
+    if len(history) >= 2 and history[-1].bid_ingredients:
+        bid_consistency = len(bid_ingredients_set & history[-1].bid_ingredients) / max(
+            len(bid_ingredients_set | history[-1].bid_ingredients), 1
+        )
+
+    # ── Menu behavior (from GET /restaurants → menu) ──
+    avg_price = np.mean(list(state.menu.values())) if state.menu else 0
+    global_avg_price = 120  # updated each turn from all competitors
+    price_positioning = avg_price / max(global_avg_price, 1)
+    menu_stability = 1.0
+    if len(history) >= 1:
+        prev_dishes = set(history[-1].menu.keys())
+        curr_dishes = set(state.menu.keys())
+        union = prev_dishes | curr_dishes
+        menu_stability = len(prev_dishes & curr_dishes) / max(len(union), 1)
+    specialization_depth = 1.0 / max(len(state.menu), 1)
+
+    # ── Market behavior (from GET /market/entries) ──
+    total_turns = max(state.turn_id, 1)
+    market_activity = (len(state.market_buys) + len(state.market_sells)) / total_turns
+    buy_sell_ratio = len(state.market_buys) / max(len(state.market_sells) + 1, 1)
+
+    # ── Outcome signals (from GET /restaurants → balance, reputation) ──
+    balance_growth_rate = state.balance_delta
+    reputation_rate = state.reputation_delta
+
+    # ── Recipe & prestige signals (inferred from consumed ingredients) ──
+    prestige_targeting = 0
+    recipe_complexity = 0
+    if state.inferred_recipes_cooked:
+        # Look up prestige from recipe DB
+        prestiges = []  # filled from recipe_db
+        complexities = []
+        prestige_targeting = np.mean(prestiges) if prestiges else 0
+        recipe_complexity = np.mean(complexities) if complexities else 0
+
+    return np.array([
+        bid_aggressiveness,
+        bid_concentration,
+        bid_consistency,
+        bid_volume,
+        price_positioning,
+        menu_stability,
+        specialization_depth,
+        market_activity,
+        buy_sell_ratio,
+        balance_growth_rate,
+        reputation_rate,
+        prestige_targeting,
+        recipe_complexity,
+        len(state.menu),  # raw menu size as signal
+    ])
+
+def _gini(values: list[float]) -> float:
+    """Gini coefficient — 0=equal, 1=concentrated."""
+    if not values or sum(values) == 0:
+        return 0
+    sorted_v = sorted(values)
+    n = len(sorted_v)
+    numerator = sum((2 * i - n - 1) * v for i, v in enumerate(sorted_v, 1))
+    return numerator / (n * sum(sorted_v))
 ```
 
 After 3–4 turns → matrix `(n_restaurants × 14 × n_turns)` → PCA for visualization, UMAP for clustering.
 
-### Competitor Cluster Classification (From vectorization_strategy.md — Unchanged)
+### 6.5 Competitor Cluster Classification
 
 ```
 CLUSTER                  RELATIONAL STRATEGY        ORCHESTRATION MOVE
@@ -518,54 +920,374 @@ Stable Specialist        Coexist                    Reinforce their niche
 Reactive Chaser          Generous Tit-for-Tat       Feed slightly wrong signals
 Aggressive Hoarder       Targeted Spoiler           Bid-deny their top 2 items
 Weak / Declining         Ignore                     Offer cheap alliance
+Dormant                  Monitor only               No action until they wake
 Unclassified / New       Probe                      1 cooperative message, classify reply
 ```
 
-### Trajectory Prediction (From vectorization_strategy.md — Enhanced)
+### 6.6 Advanced Trajectory Prediction (Tracker-Powered)
+
+The trajectory predictor operates on two levels:
+
+1. **Feature-space trajectory** — momentum-based prediction in 14-dim embedding space (where is this competitor heading in strategic terms?)
+2. **Observable-field trajectory** — direct prediction of concrete fields (what will their balance, inventory, and menu look like next turn?)
+
+The second level is unique to our architecture because the tracker gives us field-level diffs with intra-turn temporal resolution.
 
 ```python
-class TrajectoryPredictor:
-    """Predict where each competitor will be next turn."""
+import numpy as np
+from dataclasses import dataclass
 
-    def __init__(self, momentum_factor: float = 0.7):
+@dataclass
+class CompetitorPrediction:
+    """Predicted state of a competitor for next turn."""
+    restaurant_id: int
+    predicted_balance: float
+    predicted_bid_ingredients: set[str]     # what they'll likely bid on
+    predicted_bid_spend: float              # how much they'll likely spend
+    predicted_menu_changes: list[str]       # dishes likely added/removed
+    predicted_strategy: str                 # inferred strategy continuation
+    predicted_feature_vector: np.ndarray    # 14-dim embedding position
+    threat_level: float                     # 0-1, how much they threaten our zone
+    opportunity_level: float                # 0-1, how exploitable they are
+
+    # Actionable intelligence
+    vulnerable_ingredients: list[str]       # ingredients we could deny them
+    bid_denial_cost: float                 # estimated cost to outbid them
+    menu_overlap: float                     # 0-1, how much their menu overlaps ours
+
+
+class AdvancedTrajectoryPredictor:
+    """
+    Multi-level trajectory prediction powered by tracker observables.
+
+    Level 1: Feature-space trajectory (embedding momentum)
+    Level 2: Observable-field prediction (concrete balance/inventory/bid forecasts)
+    Level 3: Behavioral pattern detection (strategy switches, alliance formation)
+    """
+
+    def __init__(self, recipe_db: dict, momentum_factor: float = 0.7):
         self.momentum_factor = momentum_factor
-        self.history: dict[int, list[np.ndarray]] = {}  # restaurant_id → list of feature vectors
+        self.recipe_db = recipe_db
+        self.feature_history: dict[int, list[np.ndarray]] = {}
+        self.state_history: dict[int, list[CompetitorTurnState]] = {}
 
-    def update(self, restaurant_id: int, features: np.ndarray):
-        if restaurant_id not in self.history:
-            self.history[restaurant_id] = []
-        self.history[restaurant_id].append(features)
+    def update(self, rid: int, state: CompetitorTurnState, features: np.ndarray):
+        self.feature_history.setdefault(rid, []).append(features)
+        self.state_history.setdefault(rid, []).append(state)
 
-    def predict_next(self, restaurant_id: int) -> np.ndarray:
-        history = self.history[restaurant_id]
-        if len(history) < 2:
-            return history[-1]  # no velocity yet
+    def predict(self, rid: int) -> CompetitorPrediction:
+        states = self.state_history.get(rid, [])
+        features = self.feature_history.get(rid, [])
+        if not states:
+            raise ValueError(f"No history for restaurant {rid}")
 
-        velocity = history[-1] - history[-2]
-        # Recency-weighted momentum
-        if len(history) >= 3:
-            prev_velocity = history[-2] - history[-3]
+        current = states[-1]
+
+        # ── Level 1: Feature-space momentum ──
+        predicted_features = self._predict_features(features)
+
+        # ── Level 2: Observable field predictions ──
+        predicted_balance = self._predict_balance(states)
+        predicted_bids = self._predict_bid_targets(states)
+        predicted_bid_spend = self._predict_bid_spend(states)
+        predicted_menu = self._predict_menu_changes(states)
+
+        # ── Level 3: Behavioral pattern detection ──
+        strategy = self._detect_strategy_trend(states)
+        threat = self._compute_threat_level(states, predicted_bids)
+        opportunity = self._compute_opportunity_level(states)
+
+        # ── Actionable intelligence ──
+        vulnerable = self._find_vulnerable_ingredients(states)
+        denial_cost = self._estimate_denial_cost(states, vulnerable)
+        overlap = self._compute_menu_overlap(current)
+
+        return CompetitorPrediction(
+            restaurant_id=rid,
+            predicted_balance=predicted_balance,
+            predicted_bid_ingredients=predicted_bids,
+            predicted_bid_spend=predicted_bid_spend,
+            predicted_menu_changes=predicted_menu,
+            predicted_strategy=strategy,
+            predicted_feature_vector=predicted_features,
+            threat_level=threat,
+            opportunity_level=opportunity,
+            vulnerable_ingredients=vulnerable,
+            bid_denial_cost=denial_cost,
+            menu_overlap=overlap,
+        )
+
+    ### Level 1: Feature-space momentum
+
+    def _predict_features(self, features: list[np.ndarray]) -> np.ndarray:
+        if len(features) < 2:
+            return features[-1]
+        velocity = features[-1] - features[-2]
+        if len(features) >= 3:
+            prev_velocity = features[-2] - features[-3]
             velocity = self.momentum_factor * velocity + (1 - self.momentum_factor) * prev_velocity
+        return features[-1] + velocity
 
-        return history[-1] + velocity
+    ### Level 2: Observable field predictions
 
-    def competitors_approaching_zone(self, zone_center: np.ndarray, threshold: float) -> list[int]:
-        """Which competitors are moving toward a specific zone?"""
+    def _predict_balance(self, states: list[CompetitorTurnState]) -> float:
+        """Predict next-turn balance from delta trend."""
+        if len(states) < 2:
+            return states[-1].balance
+        # Exponentially weighted moving average of deltas
+        deltas = [s.balance_delta for s in states[-5:]]
+        weights = [0.5 ** (len(deltas) - 1 - i) for i in range(len(deltas))]
+        predicted_delta = np.average(deltas, weights=weights)
+        return states[-1].balance + predicted_delta
+
+    def _predict_bid_targets(self, states: list[CompetitorTurnState]) -> set[str]:
+        """
+        Predict which ingredients they'll bid on next turn.
+
+        Logic:
+        1. Ingredients they've bid on 2+ consecutive turns = very likely again
+        2. Ingredients in their current menu recipes but NOT in inventory = must-bid
+        3. New ingredients appearing in their recent menu changes = emerging targets
+        """
+        if not states:
+            return set()
+
+        # Frequency: ingredients bid on in last 3 turns
+        recent_bids: dict[str, int] = {}
+        for s in states[-3:]:
+            for ing in s.bid_ingredients:
+                recent_bids[ing] = recent_bids.get(ing, 0) + 1
+
+        # Consistency: bid on 2+ of last 3 turns = almost certain
+        consistent = {ing for ing, count in recent_bids.items() if count >= 2}
+
+        # Menu-driven: look up ingredients needed for their current menu dishes
+        menu_needed = set()
+        for dish_name in states[-1].menu:
+            recipe = self.recipe_db.get(dish_name, {})
+            for ing in recipe.get("ingredients", {}):
+                if ing not in states[-1].inventory or states[-1].inventory.get(ing, 0) == 0:
+                    menu_needed.add(ing)
+
+        return consistent | menu_needed
+
+    def _predict_bid_spend(self, states: list[CompetitorTurnState]) -> float:
+        """Predict total bid expenditure next turn."""
+        if len(states) < 2:
+            return states[-1].total_bid_spend
+        spends = [s.total_bid_spend for s in states[-3:]]
+        return np.mean(spends) * 1.05  # slight upward bias (competition intensifies)
+
+    def _predict_menu_changes(self, states: list[CompetitorTurnState]) -> list[str]:
+        """Predict which dishes will be added/removed."""
+        if len(states) < 2:
+            return []
+        curr = set(states[-1].menu.keys())
+        prev = set(states[-2].menu.keys())
+        # If they're a Reactive Chaser, they'll likely change again
+        if states[-1].inferred_strategy == "REACTIVE_CHASER":
+            return list(curr - prev)  # new additions likely to churn
+        return []  # stable strategies keep menus
+
+    ### Level 3: Behavioral pattern detection
+
+    def _detect_strategy_trend(self, states: list[CompetitorTurnState]) -> str:
+        """Detect if a competitor is switching strategy."""
+        if len(states) < 3:
+            return states[-1].inferred_strategy
+
+        recent_strategies = [s.inferred_strategy for s in states[-3:]]
+        if len(set(recent_strategies)) == 1:
+            return recent_strategies[0]  # stable
+        # If strategy changed in last turn, flag as transitioning
+        if recent_strategies[-1] != recent_strategies[-2]:
+            return f"TRANSITIONING→{recent_strategies[-1]}"
+        return recent_strategies[-1]
+
+    def _compute_threat_level(self, states: list[CompetitorTurnState],
+                               predicted_bids: set[str]) -> float:
+        """
+        How much does this competitor threaten our current zone?
+
+        Threat = f(menu_overlap, bid_overlap, balance_advantage, reputation)
+        """
+        current = states[-1]
+        threat = 0.0
+
+        # Menu overlap — are they targeting the same archetypes?
+        overlap = self._compute_menu_overlap(current)
+        threat += overlap * 0.4
+
+        # Bid overlap — are they competing for the same ingredients?
+        # (computed against our own bid targets, injected at call time)
+        threat += 0.3 if len(predicted_bids) > 5 else 0.1
+
+        # Balance advantage — can they outbid us?
+        if current.balance > 7000:
+            threat += 0.2
+        elif current.balance > 5000:
+            threat += 0.1
+
+        # Reputation — are they attracting our target clients?
+        if current.reputation > 90:
+            threat += 0.1
+
+        return min(1.0, threat)
+
+    def _compute_opportunity_level(self, states: list[CompetitorTurnState]) -> float:
+        """
+        How exploitable is this competitor?
+
+        Opportunity = f(declining_balance, low_reputation, reactive_behavior, desperation)
+        """
+        current = states[-1]
+        opportunity = 0.0
+
+        # Declining balance = desperate
+        if len(states) >= 2 and states[-1].balance_delta < -200:
+            opportunity += 0.3
+        if current.balance < 4000:
+            opportunity += 0.2
+
+        # Low reputation = losing clients
+        if current.reputation < 80:
+            opportunity += 0.2
+
+        # Reactive behavior = easily manipulated
+        if current.inferred_strategy == "REACTIVE_CHASER":
+            opportunity += 0.3
+
+        return min(1.0, opportunity)
+
+    def _find_vulnerable_ingredients(self, states: list[CompetitorTurnState]) -> list[str]:
+        """
+        Which ingredients could we deny this competitor?
+
+        An ingredient is "vulnerable" if:
+        1. They bid on it consistently (need it for their menu)
+        2. They bid near the minimum (not willing to pay much)
+        3. We could outbid them without hurting ourselves
+        """
+        if not states:
+            return []
+
+        # Ingredients they consistently bid on at low prices
+        ingredient_bids: dict[str, list[float]] = {}
+        for s in states[-3:]:
+            for b in s.bids:
+                ing = b.get("ingredient", "")
+                ingredient_bids.setdefault(ing, []).append(b.get("bid", 0))
+
+        vulnerable = []
+        for ing, prices in ingredient_bids.items():
+            if len(prices) >= 2:  # consistent need
+                avg_price = np.mean(prices)
+                if avg_price < 100:  # low willingness to pay = deniable
+                    vulnerable.append(ing)
+
+        return vulnerable
+
+    def _estimate_denial_cost(self, states: list[CompetitorTurnState],
+                               vulnerable: list[str]) -> float:
+        """How much would it cost us to outbid them on their vulnerable ingredients?"""
+        total_cost = 0
+        for s in states[-1:]:
+            for b in s.bids:
+                if b.get("ingredient") in vulnerable:
+                    total_cost += (b.get("bid", 0) + 1) * b.get("quantity", 1)
+        return total_cost
+
+    def _compute_menu_overlap(self, state: CompetitorTurnState) -> float:
+        """How much does their menu overlap with ours (by dish name)?"""
+        # OUR_MENU is injected at runtime; here we check recipe overlap
+        # via shared ingredients rather than name matching
+        return 0.0  # computed at runtime with access to our current menu
+
+    ### Aggregate methods
+
+    def competitors_approaching_zone(self, zone_center: np.ndarray,
+                                      threshold: float) -> list[int]:
+        """Which competitors are moving toward a specific zone in embedding space?"""
         approaching = []
-        for rid, history in self.history.items():
-            if rid == OUR_ID:
+        for rid, features in self.feature_history.items():
+            if len(features) < 2:
                 continue
-            predicted = self.predict_next(rid)
-            current_dist = np.linalg.norm(history[-1] - zone_center)
+            predicted = self._predict_features(features)
+            current_dist = np.linalg.norm(features[-1] - zone_center)
             predicted_dist = np.linalg.norm(predicted - zone_center)
             if predicted_dist < current_dist and predicted_dist < threshold:
                 approaching.append(rid)
         return approaching
+
+    def get_ingredient_demand_forecast(self) -> dict[str, float]:
+        """
+        Predict aggregate demand for each ingredient next turn.
+
+        Sum of all competitors' predicted bid quantities = expected competition.
+        High-demand ingredients need aggressive bids or should be avoided.
+        """
+        demand: dict[str, float] = {}
+        for rid in self.state_history:
+            predicted_bids = self._predict_bid_targets(self.state_history[rid])
+            for ing in predicted_bids:
+                # Weight by competitor's typical bid quantity
+                recent_qty = 0
+                for s in self.state_history[rid][-2:]:
+                    for b in s.bids:
+                        if b.get("ingredient") == ing:
+                            recent_qty = max(recent_qty, b.get("quantity", 1))
+                demand[ing] = demand.get(ing, 0) + max(recent_qty, 1)
+        return demand
+
+    def generate_per_competitor_briefing(self) -> dict[int, dict]:
+        """
+        Generate a tactical briefing for each competitor.
+        Used by the DeceptionBandit to craft targeted messages
+        and by the ILP Solver to set bid priorities.
+        """
+        briefings = {}
+        for rid in self.state_history:
+            prediction = self.predict(rid)
+            states = self.state_history[rid]
+            current = states[-1]
+
+            briefings[rid] = {
+                "name": current.name,
+                "strategy": prediction.predicted_strategy,
+                "threat_level": prediction.threat_level,
+                "opportunity_level": prediction.opportunity_level,
+                "balance": current.balance,
+                "balance_trend": "rising" if current.balance_delta > 0 else "falling",
+                "top_bid_ingredients": list(prediction.predicted_bid_ingredients)[:5],
+                "predicted_bid_spend": prediction.predicted_bid_spend,
+                "vulnerable_ingredients": prediction.vulnerable_ingredients,
+                "bid_denial_cost": prediction.bid_denial_cost,
+                "menu_price_avg": (np.mean(list(current.menu.values()))
+                                   if current.menu else 0),
+                "menu_size": len(current.menu),
+                "reputation": current.reputation,
+                "recommended_action": self._recommend_action(prediction, current),
+            }
+        return briefings
+
+    def _recommend_action(self, prediction: CompetitorPrediction,
+                           state: CompetitorTurnState) -> str:
+        """Recommend a tactical action for this competitor."""
+        if prediction.threat_level > 0.7:
+            if prediction.bid_denial_cost < 200:
+                return f"BID_DENY: outbid on {prediction.vulnerable_ingredients[:2]} (cost≈{prediction.bid_denial_cost:.0f})"
+            return "ZONE_AVOID: too expensive to deny, consider zone switch"
+        if prediction.opportunity_level > 0.6:
+            if state.inferred_strategy == "REACTIVE_CHASER":
+                return "DECEIVE: send misleading menu/ingredient signal"
+            if state.inferred_strategy == "DECLINING":
+                return "ALLIANCE: offer cheap ingredient trade"
+        return "MONITOR: no immediate action needed"
 ```
 
-### Intelligence Pipeline as DagPipeline
+### 6.7 Intelligence Pipeline as DagPipeline
 
-Using datapizza-ai's `DagPipeline` to wire the intelligence flow:
+Using datapizza-ai's `DagPipeline` to wire the complete intelligence flow, now including the strategy inferrer and advanced trajectory predictor:
 
 ```python
 from datapizza.pipeline import DagPipeline
@@ -573,27 +1295,256 @@ from datapizza.pipeline import DagPipeline
 intel_pipeline = DagPipeline()
 
 # Modules
-intel_pipeline.add_module("data_collector", DataCollectorModule())    # GET /restaurants, /bid_history, /market/entries
-intel_pipeline.add_module("feature_extractor", FeatureExtractorModule())  # per-restaurant 14-feature vector
-intel_pipeline.add_module("embedding", EmbeddingModule())             # PCA/UMAP projection
-intel_pipeline.add_module("trajectory", TrajectoryModule())           # velocity + prediction
-intel_pipeline.add_module("cluster", ClusterClassifierModule())       # 5-type classification
-intel_pipeline.add_module("zone_selector", ZoneSelectorModule())      # ILP zone classification
+intel_pipeline.add_module("data_collector", DataCollectorModule())          # GET /restaurants, /bid_history, /market/entries
+intel_pipeline.add_module("state_builder", CompetitorStateBuilderModule())  # raw data → CompetitorTurnState per restaurant
+intel_pipeline.add_module("feature_extractor", FeatureExtractorModule())    # CompetitorTurnState → 14-dim vector
+intel_pipeline.add_module("strategy_inferrer", StrategyInferrerModule())    # observable patterns → strategy hypothesis
+intel_pipeline.add_module("embedding", EmbeddingModule())                   # PCA/UMAP projection
+intel_pipeline.add_module("trajectory", AdvancedTrajectoryModule())         # multi-level prediction
+intel_pipeline.add_module("cluster", ClusterClassifierModule())             # 5-type classification
+intel_pipeline.add_module("briefing_generator", BriefingGeneratorModule())  # per-competitor tactical briefings
+intel_pipeline.add_module("zone_selector", ZoneSelectorModule())            # ILP zone classification
 
 # Connections
-intel_pipeline.connect("data_collector", "feature_extractor")
+intel_pipeline.connect("data_collector", "state_builder")
+intel_pipeline.connect("state_builder", "feature_extractor")
+intel_pipeline.connect("state_builder", "strategy_inferrer")
 intel_pipeline.connect("feature_extractor", "embedding")
 intel_pipeline.connect("feature_extractor", "trajectory")
+intel_pipeline.connect("strategy_inferrer", "trajectory")
 intel_pipeline.connect("embedding", "cluster")
+intel_pipeline.connect("trajectory", "briefing_generator")
+intel_pipeline.connect("cluster", "briefing_generator")
 intel_pipeline.connect("trajectory", "zone_selector")
 intel_pipeline.connect("cluster", "zone_selector")
+intel_pipeline.connect("briefing_generator", "zone_selector")
 
 # Run at the start of each turn
 result = intel_pipeline.run({
     "data_collector": {"turn_id": current_turn}
 })
 active_zone = result["zone_selector"]
+competitor_briefings = result["briefing_generator"]  # → feeds DeceptionBandit + ILP Solver
 ```
+
+### 6.8 TrackerBridge — Live Data Connector
+
+The `TrackerBridge` is the concrete interface between `tracker.py` (running as a sidecar on `localhost:5555`) and the intelligence pipeline. It replaces raw HTTP polling in the agent with structured queries to the tracker's pre-computed diffs and change logs.
+
+**Why a bridge instead of direct polling?**
+
+- tracker.py already polls `GET /restaurants` every 5 seconds — duplicating this in the agent wastes rate-limit budget
+- tracker.py computes field-level diffs (via `diff_dict()`) — the agent gets change history for free
+- tracker.py aggregates bid history, market entries, and meals in one place — single source of truth
+- The agent only needs to query the tracker at decision points (start of turn), not continuously
+
+**Architecture:**
+
+```
+tracker.py (port 5555)                   Agent (main.py)
+┌─────────────────────────┐              ┌─────────────────────────────┐
+│  _poll_restaurants()    │              │                             │
+│  every 5s: GET /rest... │              │  TrackerBridge              │
+│  → diff_dict()          │──────────────│    .fetch_all_states()      │
+│  → change_log[]         │  HTTP GET    │    .fetch_change_log(rid)   │
+│                         │  localhost   │    .fetch_bid_history()     │
+│  _poll_bid_history()    │  :5555       │    .fetch_market_entries()  │
+│  _poll_market()         │──────────────│    .snapshot()              │
+│  _poll_meals()          │              │         │                   │
+│                         │              │         ▼                   │
+│  /api/restaurant/<rid>  │              │  CompetitorStateBuilder     │
+│  /api/all_restaurants   │              │         │                   │
+│  /api/bid_history       │              │         ▼                   │
+│  /api/market            │              │  StrategyInferrer           │
+│  /stream (SSE relay)    │              │  AdvancedTrajectoryPredictor│
+└─────────────────────────┘              │  BriefingGenerator          │
+                                         └─────────────────────────────┘
+```
+
+**Implementation:**
+
+```python
+import httpx
+from dataclasses import dataclass
+from typing import Optional
+
+TRACKER_BASE = "http://localhost:5555"
+
+@dataclass
+class TrackerSnapshot:
+    """Complete snapshot from tracker at a single point in time."""
+    restaurants: dict[int, dict]       # rid → flattened restaurant data
+    change_logs: dict[int, list]       # rid → list of {field, old, new, timestamp}
+    bid_history: list[dict]            # all bids across all teams
+    market_entries: list[dict]         # all market BUY/SELL entries
+    own_meals: list[dict]              # our completed meals (GET /meals, own team only)
+    timestamp: float                   # when snapshot was taken
+
+class TrackerBridge:
+    """
+    Bridge between tracker.py sidecar and the agent's intelligence pipeline.
+
+    tracker.py runs independently, polling the game server every 5s.
+    This bridge queries tracker's local API at decision points to get
+    pre-computed diffs and aggregated data.
+    """
+
+    def __init__(self, base_url: str = TRACKER_BASE, own_id: int = 17):
+        self.base_url = base_url
+        self.own_id = own_id
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=5.0)
+        self._last_snapshot: Optional[TrackerSnapshot] = None
+
+    async def snapshot(self) -> TrackerSnapshot:
+        """
+        Pull a complete snapshot from tracker.
+        Called once at the start of each decision cycle (turn start / phase change).
+        """
+        # Parallel fetch from all tracker endpoints
+        import asyncio
+        restaurants_task = self._fetch_all_restaurants()
+        bids_task = self._fetch_bid_history()
+        market_task = self._fetch_market_entries()
+        meals_task = self._fetch_own_meals()
+
+        restaurants, bids, market, meals = await asyncio.gather(
+            restaurants_task, bids_task, market_task, meals_task
+        )
+
+        # Fetch change logs for all known restaurants
+        change_logs = {}
+        if restaurants:
+            log_tasks = {
+                rid: self._fetch_change_log(rid)
+                for rid in restaurants.keys()
+            }
+            results = await asyncio.gather(*log_tasks.values())
+            for rid, log in zip(log_tasks.keys(), results):
+                change_logs[rid] = log
+
+        import time
+        snap = TrackerSnapshot(
+            restaurants=restaurants,
+            change_logs=change_logs,
+            bid_history=bids,
+            market_entries=market,
+            own_meals=meals,
+            timestamp=time.time()
+        )
+        self._last_snapshot = snap
+        return snap
+
+    async def _fetch_all_restaurants(self) -> dict[int, dict]:
+        """Fetch current state of all restaurants from tracker."""
+        try:
+            resp = await self._client.get("/api/all_restaurants")
+            resp.raise_for_status()
+            data = resp.json()
+            return {r["id"]: r for r in data} if isinstance(data, list) else data
+        except Exception:
+            return {}
+
+    async def _fetch_change_log(self, rid: int) -> list[dict]:
+        """Fetch diff history for a specific restaurant."""
+        try:
+            resp = await self._client.get(f"/api/restaurant/{rid}")
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("change_log", [])
+        except Exception:
+            return []
+
+    async def _fetch_bid_history(self) -> list[dict]:
+        """Fetch all bid history from tracker."""
+        try:
+            resp = await self._client.get("/api/bid_history")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return []
+
+    async def _fetch_market_entries(self) -> list[dict]:
+        """Fetch all market entries from tracker."""
+        try:
+            resp = await self._client.get("/api/market")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return []
+
+    async def _fetch_own_meals(self) -> list[dict]:
+        """Fetch our completed meals from tracker."""
+        try:
+            resp = await self._client.get("/api/meals")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return []
+
+    def delta_since_last(self, rid: int) -> dict:
+        """
+        Compare current snapshot vs previous for a specific restaurant.
+        Returns field-level deltas useful for real-time strategy adjustment.
+        """
+        if not self._last_snapshot or rid not in self._last_snapshot.change_logs:
+            return {}
+        return {
+            entry["field"]: {"old": entry["old"], "new": entry["new"]}
+            for entry in self._last_snapshot.change_logs[rid]
+        }
+
+    async def close(self):
+        await self._client.aclose()
+```
+
+**Integration with DataCollectorModule:**
+
+The `DataCollectorModule` in the DagPipeline uses `TrackerBridge` instead of making its own HTTP calls:
+
+```python
+class DataCollectorModule(Module):
+    """Collects game data via TrackerBridge instead of direct API polling."""
+
+    def __init__(self, bridge: TrackerBridge):
+        self.bridge = bridge
+
+    async def process(self, input_data: dict) -> dict:
+        snapshot = await self.bridge.snapshot()
+
+        return {
+            "all_restaurants": snapshot.restaurants,
+            "bids": snapshot.bid_history,
+            "market_entries": snapshot.market_entries,
+            "own_meals": snapshot.own_meals,
+            "change_logs": snapshot.change_logs,
+            "snapshot_time": snapshot.timestamp
+        }
+```
+
+**Startup wiring in main.py:**
+
+```python
+# Start tracker.py as a subprocess (or assume it's already running)
+tracker_bridge = TrackerBridge(base_url="http://localhost:5555", own_id=17)
+
+# Inject into intelligence pipeline
+intel_pipeline = DagPipeline()
+intel_pipeline.add_module("data_collector", DataCollectorModule(bridge=tracker_bridge))
+# ... rest of pipeline modules as in 6.7
+```
+
+**Tracker API endpoints consumed** (from tracker.py Flask routes):
+
+| Tracker Route               | Agent Use                                 | Frequency                              |
+| --------------------------- | ----------------------------------------- | -------------------------------------- |
+| `GET /api/all_restaurants`  | Full state snapshot of all competitors    | Once per decision cycle                |
+| `GET /api/restaurant/<rid>` | Per-competitor change log + current state | Once per decision cycle per competitor |
+| `GET /api/bid_history`      | Historical bid patterns for all teams     | Once per decision cycle                |
+| `GET /api/market`           | Market buy/sell activity                  | Once per decision cycle                |
+| `GET /api/meals`            | Our own completed meals (success/fail)    | Once per decision cycle                |
+| `GET /stream`               | Real-time SSE relay for phase changes     | Continuous (event bus)                 |
+
+**Fallback:** If tracker.py is unreachable, `DataCollectorModule` falls back to direct `GET /restaurants` polling against the game server, but without diff history.
 
 ---
 
@@ -675,39 +1626,51 @@ def solve_zone_ilp(zone: str, game_state: GameState, competitor_map: CompetitorM
     )
 ```
 
-### Bid Price Computation
+### Bid Price Computation (Tracker-Powered)
 
-For each ingredient, we predict the competitor's maximum bid and bid just above:
+For each ingredient, we use the `AdvancedTrajectoryPredictor`'s per-competitor briefings to predict the maximum competing bid:
 
 ```python
-def compute_bid_price(ingredient: str, competitor_map: CompetitorMap, turn: int) -> float:
+def compute_bid_price(
+    ingredient: str,
+    competitor_briefings: dict[int, dict],  # from trajectory predictor
+    demand_forecast: dict[str, float],       # from get_ingredient_demand_forecast()
+    turn: int
+) -> float:
     """
     Bid = max(predicted_competitor_bids) + epsilon
 
-    predicted_competitor_bids come from:
-    - Historical bid data (GET /bid_history)
-    - Weighted average with recency bias
-    - Adjusted for trajectory (if competitor is becoming more aggressive on this ingredient)
+    Now powered by:
+    - Per-competitor bid predictions (from AdvancedTrajectoryPredictor)
+    - Aggregate demand forecast (sum of all predicted bid targets)
+    - Strategy-aware adjustments (Reactive Chasers get extra margin)
     """
-    historical_bids = get_bid_history(ingredient, turn)
+    # Collect per-competitor predicted bids for this ingredient
+    predicted_competitor_bids = []
+    for rid, brief in competitor_briefings.items():
+        if ingredient in brief["top_bid_ingredients"]:
+            # This competitor is predicted to bid on this ingredient
+            # Estimate their bid price from their spend pattern
+            est_bid = brief["predicted_bid_spend"] / max(len(brief["top_bid_ingredients"]), 1)
+            # Adjust for strategy type
+            if brief["strategy"] == "AGGRESSIVE_HOARDER":
+                est_bid *= 1.3  # they overpay
+            elif brief["strategy"] == "REACTIVE_CHASER":
+                est_bid *= 1.15  # they chase
+            elif brief["strategy"] == "DECLINING":
+                est_bid *= 0.7  # they're cautious
+            predicted_competitor_bids.append(est_bid)
 
-    if not historical_bids:
-        return BASE_BID_PRICE[ingredient]  # first turn: use recipe importance heuristic
+    if not predicted_competitor_bids:
+        return BASE_BID_PRICE.get(ingredient, 20)  # no competition expected
 
-    # Recency-weighted average of competitor bids
-    weights = [0.5 ** (turn - t) for t in range(len(historical_bids))]
-    predicted_max = np.average(
-        [max(bids.values()) for bids in historical_bids],
-        weights=weights
-    )
+    predicted_max = max(predicted_competitor_bids)
 
-    # Adjust for trajectory — if a Reactive Chaser is moving toward our ingredients
-    trajectory_adjustment = 1.0
-    for rid in competitor_map.reactive_chasers:
-        if is_moving_toward_ingredient(rid, ingredient, competitor_map):
-            trajectory_adjustment *= 1.15  # bid 15% higher
+    # Demand pressure: high aggregate demand → bid more aggressively
+    demand = demand_forecast.get(ingredient, 0)
+    demand_multiplier = 1.0 + min(demand / 20, 0.5)  # up to +50% for very contested
 
-    return predicted_max * trajectory_adjustment + 1  # +1 epsilon
+    return int(predicted_max * demand_multiplier) + 1  # +1 epsilon
 ```
 
 ### Menu Pricing
@@ -812,11 +1775,41 @@ class GroundTruthFirewall:
             "trust_level": self.TrustLevel.UNTRUSTED,
             "sender_credibility": self.get_credibility(sender_id),
         }
+
+    def verify_claim_against_tracker(self, sender_id: int, claim_text: str,
+                                      competitor_state: "CompetitorTurnState") -> float:
+        """
+        Cross-reference a message claim against tracker observations.
+
+        Because we have exact balance, inventory, menu, and bid data for every
+        competitor (from GET /restaurants + /bid_history), we can verify most
+        claims automatically.
+
+        Returns credibility adjustment: +1 (verified true), -1 (proven false), 0 (unverifiable)
+        """
+        claim_lower = claim_text.lower()
+
+        # "I have lots of X" → check their inventory
+        for ingredient, qty in competitor_state.inventory.items():
+            if ingredient.lower() in claim_lower:
+                if "lot" in claim_lower or "much" in claim_lower or "surplus" in claim_lower:
+                    return 1.0 if qty >= 3 else -1.0
+
+        # "I'm not interested in X" → check their bid history
+        for bid_ing in competitor_state.bid_ingredients:
+            if bid_ing.lower() in claim_lower and ("not interested" in claim_lower or "don't need" in claim_lower):
+                return -1.0  # they literally bid on it, they're lying
+
+        # "My balance is low" → we can see their exact balance
+        if "low" in claim_lower and "balance" in claim_lower:
+            return 1.0 if competitor_state.balance < 4000 else -1.0
+
+        return 0.0  # unverifiable
 ```
 
-### DeceptionBandit (Offense — Thompson Sampling)
+### DeceptionBandit (Offense — Tracker-Informed Thompson Sampling)
 
-We model deception strategies as arms of a multi-armed bandit:
+The DeceptionBandit now selects strategies **per competitor** using the tactical briefings generated by the AdvancedTrajectoryPredictor. Each competitor gets a personalized deception strategy based on their observed behavior and vulnerabilities.
 
 ```python
 from scipy.stats import beta as beta_dist
@@ -826,59 +1819,216 @@ class DeceptionBandit:
     """
     Thompson Sampling bandit for selecting deception strategies.
 
+    Key difference from a generic bandit: each ARM is parameterized
+    by the target competitor's tactical briefing. The same arm
+    ("inflated_intel") produces very different messages depending on
+    whether the target is a Reactive Chaser vs. a Declining team.
+
     Arms represent different manipulation approaches.
-    Reward = observable competitor behavior change in the desired direction.
+    Reward = observable competitor behavior change in the desired direction
+    (measurable via tracker: did their bid pattern change? did they add/remove
+    a menu item? did their balance drop?).
     """
 
     ARMS = {
         "truthful_warning":     (1.0, 1.0),  # "heads up, X is bidding on Y"
         "inflated_intel":       (1.0, 1.0),  # "Recipe X has been amazing for us" (true but framed)
         "manufactured_scarcity":(1.0, 1.0),  # "We're stockpiling ingredient Z" (may be false)
+        "ingredient_misdirect": (1.0, 1.0),  # "We're pivoting away from X" (when we're doubling down)
         "alliance_offer":      (1.0, 1.0),  # "Want to split the premium market?"
+        "price_anchoring":     (1.0, 1.0),  # "We're raising prices to 200+" (anchor their pricing)
         "silence":             (1.0, 1.0),  # Say nothing (baseline)
     }
 
     def __init__(self):
-        self.arms = {name: list(prior) for name, prior in self.ARMS.items()}
+        # Per-competitor arm priors: {rid: {arm_name: [alpha, beta]}}
+        self.per_competitor_arms: dict[int, dict[str, list[float]]] = {}
 
-    def select_arm(self) -> str:
-        """Sample from posterior and pick the arm with highest sample."""
+    def _get_arms(self, rid: int) -> dict[str, list[float]]:
+        if rid not in self.per_competitor_arms:
+            self.per_competitor_arms[rid] = {
+                name: list(prior) for name, prior in self.ARMS.items()
+            }
+        return self.per_competitor_arms[rid]
+
+    def select_arm(self, rid: int) -> str:
+        """Sample from posterior and pick the arm with highest sample, per-competitor."""
+        arms = self._get_arms(rid)
         samples = {
             name: beta_dist.rvs(a, b)
-            for name, (a, b) in self.arms.items()
+            for name, (a, b) in arms.items()
         }
         return max(samples, key=samples.get)
 
-    def update(self, arm: str, reward: float):
+    def update(self, rid: int, arm: str, reward: float):
         """
-        reward = 1 if the target competitor changed behavior as intended
-        reward = 0 if no observable effect
-        reward = -1 if competitor did the opposite (they're onto us)
+        reward is measured by OBSERVABLE behavior change (via tracker):
+        - +1: they changed bids/menu in the desired direction (verified by tracker diff)
+        - 0: no observable effect
+        - -1: they did the opposite (they're onto us)
         """
-        a, b = self.arms[arm]
+        arms = self._get_arms(rid)
+        a, b = arms[arm]
         if reward > 0:
-            self.arms[arm] = [a + 1, b]
+            arms[arm] = [a + 1, b]
         else:
-            self.arms[arm] = [a, b + 1]
+            arms[arm] = [a, b + 1]
 
-    def select_target(self, competitor_map: CompetitorMap) -> int:
+    def measure_deception_reward(
+        self,
+        rid: int,
+        arm: str,
+        pre_state: "CompetitorTurnState",
+        post_state: "CompetitorTurnState",
+        desired_effect: str,
+    ) -> float:
         """
-        Target selection based on competitor cluster:
-        - Reactive Chasers: best targets (they respond to signals)
-        - Aggressive Hoarders: worth trying to redirect
-        - Stable Specialists: low-value targets (won't change)
-        - Weak/Declining: don't waste messages
+        Measure whether a deception message had the desired effect
+        by comparing pre/post tracker observations.
+
+        This is the key integration with tracker.py: we sent a message,
+        now we check if their observable behavior changed.
         """
-        target_priority = (
-            competitor_map.reactive_chasers +
-            competitor_map.aggressive_hoarders
-        )
-        return target_priority[0] if target_priority else None
+        if desired_effect == "bid_away_from_ingredient":
+            # Check if they stopped bidding on a target ingredient
+            old_bids = pre_state.bid_ingredients
+            new_bids = post_state.bid_ingredients
+            # If target ingredient disappeared from their bids → success
+            return 1.0 if len(old_bids - new_bids) > 0 else 0.0
+
+        elif desired_effect == "raise_prices":
+            # Check if their menu prices went up
+            old_avg = np.mean(list(pre_state.menu.values())) if pre_state.menu else 0
+            new_avg = np.mean(list(post_state.menu.values())) if post_state.menu else 0
+            return 1.0 if new_avg > old_avg * 1.05 else 0.0
+
+        elif desired_effect == "overbid_on_ingredient":
+            # Check if they started bidding more on a useless ingredient
+            return 1.0 if post_state.total_bid_spend > pre_state.total_bid_spend * 1.15 else 0.0
+
+        elif desired_effect == "alliance_cooperation":
+            # Check if they sent us a message back (receivedMessages count)
+            return 1.0 if post_state.market_sells else 0.0  # did they create a SELL for us?
+
+        return 0.0
+
+    def select_target_and_strategy(
+        self,
+        competitor_briefings: dict[int, dict],
+    ) -> list[dict]:
+        """
+        Using the per-competitor tactical briefings from the trajectory predictor,
+        select target(s) and deception strategy for this turn.
+
+        Returns list of {target_rid, arm, desired_effect, message_context}
+        """
+        actions = []
+
+        for rid, brief in competitor_briefings.items():
+            # Skip dormant teams and ourselves
+            if brief["strategy"] == "DORMANT":
+                continue
+
+            # High-opportunity targets get active deception
+            if brief["opportunity_level"] > 0.5:
+                arm = self.select_arm(rid)
+                context = self._build_deception_context(rid, brief, arm)
+                if context:
+                    actions.append(context)
+
+            # High-threat targets get defensive misdirection
+            elif brief["threat_level"] > 0.6:
+                context = self._build_threat_response(rid, brief)
+                if context:
+                    actions.append(context)
+
+        # Sort by opportunity/threat and limit to top 3 messages per turn
+        actions.sort(key=lambda a: a.get("priority", 0), reverse=True)
+        return actions[:3]
+
+    def _build_deception_context(self, rid: int, brief: dict, arm: str) -> dict | None:
+        """Build a deception action using the competitor's briefing data."""
+
+        if arm == "silence":
+            return None
+
+        context = {
+            "target_rid": rid,
+            "arm": arm,
+            "target_name": brief["name"],
+            "target_strategy": brief["strategy"],
+            "priority": brief["opportunity_level"],
+        }
+
+        if arm == "ingredient_misdirect" and brief["top_bid_ingredients"]:
+            # Tell them we're abandoning an ingredient we actually want
+            context["desired_effect"] = "bid_away_from_ingredient"
+            context["message_hint"] = (
+                f"Pivot away from {brief['top_bid_ingredients'][0]} — "
+                f"make them think that ingredient is no longer valuable"
+            )
+
+        elif arm == "manufactured_scarcity" and brief["vulnerable_ingredients"]:
+            # Tell them we're hoarding their critical ingredient
+            context["desired_effect"] = "overbid_on_ingredient"
+            context["message_hint"] = (
+                f"Claim we're stockpiling {brief['vulnerable_ingredients'][0]} — "
+                f"force them to overbid or pivot"
+            )
+
+        elif arm == "price_anchoring":
+            context["desired_effect"] = "raise_prices"
+            context["message_hint"] = (
+                f"Signal premium positioning — anchor their prices upward "
+                f"(their avg: {brief['menu_price_avg']:.0f})"
+            )
+
+        elif arm == "alliance_offer" and brief["balance_trend"] == "falling":
+            context["desired_effect"] = "alliance_cooperation"
+            context["message_hint"] = (
+                f"Offer ingredient trade alliance — they're declining "
+                f"(balance={brief['balance']:.0f})"
+            )
+
+        elif arm == "truthful_warning":
+            # Share real intel about a THIRD competitor to build credibility
+            context["desired_effect"] = "build_credibility"
+            context["message_hint"] = "Share verifiable info about another team"
+
+        elif arm == "inflated_intel":
+            context["desired_effect"] = "bid_away_from_ingredient"
+            context["message_hint"] = (
+                f"Recommend a recipe we DON'T use as 'amazing' — "
+                f"redirect their ingredient demand"
+            )
+
+        else:
+            return None
+
+        return context
+
+    def _build_threat_response(self, rid: int, brief: dict) -> dict | None:
+        """Build a defensive response to a high-threat competitor."""
+        if not brief["top_bid_ingredients"]:
+            return None
+
+        return {
+            "target_rid": rid,
+            "arm": "manufactured_scarcity",
+            "target_name": brief["name"],
+            "target_strategy": brief["strategy"],
+            "priority": brief["threat_level"],
+            "desired_effect": "overbid_on_ingredient",
+            "message_hint": (
+                f"Signal that we're hoarding {brief['top_bid_ingredients'][0]} — "
+                f"force them to overspend or switch strategy"
+            ),
+        }
 ```
 
-### PseudoGAN (Message Quality Optimization)
+### PseudoGAN (Message Quality Optimization — Briefing-Informed)
 
-A two-LLM setup where one generates deceptive messages and the other scores them:
+A two-LLM setup where one generates deceptive messages and the other scores them. Now parameterized with the **per-competitor tactical briefing** from the intelligence pipeline, so the generator knows the target's exact balance, strategy, bid patterns, and vulnerabilities.
 
 ```python
 class PseudoGAN:
@@ -888,6 +2038,10 @@ class PseudoGAN:
     believed by a rival LLM agent
 
     NOT a real GAN. No gradient-based training. Just iterative refinement.
+
+    Key enhancement: the generator prompt includes concrete competitor
+    intel from the tracker, making messages grounded in reality
+    (hard to distinguish from genuine cooperation).
     """
 
     def __init__(self, generator_client, discriminator_client):
@@ -896,32 +2050,58 @@ class PseudoGAN:
 
     async def craft_message(
         self,
-        target_cluster: str,
-        desired_effect: str,
-        context: str,
+        deception_action: dict,  # from DeceptionBandit.select_target_and_strategy()
+        competitor_briefing: dict,  # from trajectory predictor
         max_iterations: int = 3
     ) -> str:
+        target_name = deception_action["target_name"]
+        target_strategy = deception_action["target_strategy"]
+        arm = deception_action["arm"]
+        desired_effect = deception_action["desired_effect"]
+        message_hint = deception_action.get("message_hint", "")
+
+        # Build rich context from tracker observations
+        tracker_context = (
+            f"Target: {target_name} (strategy: {target_strategy})\n"
+            f"Their balance: {competitor_briefing['balance']:.0f} ({competitor_briefing['balance_trend']})\n"
+            f"Their avg menu price: {competitor_briefing['menu_price_avg']:.0f}\n"
+            f"Their top bid ingredients: {', '.join(competitor_briefing['top_bid_ingredients'][:3])}\n"
+            f"Their reputation: {competitor_briefing['reputation']}\n"
+            f"Recommended approach: {competitor_briefing['recommended_action']}"
+        )
+
         best_message = None
         best_score = 0.0
 
         for i in range(max_iterations):
-            # Generate candidate
             gen_prompt = f"""You are a restaurant manager in a competitive cooking game.
-Craft a message to a {target_cluster} competitor to achieve: {desired_effect}
-Context: {context}
+You want to send a message to "{target_name}" to achieve: {desired_effect}
+Deception approach: {arm}
+Hint: {message_hint}
+
+What you know about them (from your intelligence):
+{tracker_context}
+
 {"Previous attempt scored " + str(best_score) + "/1.0. Make it more convincing." if best_message else ""}
-Keep it under 200 characters. Be natural, not obviously manipulative."""
+Keep it under 200 characters. Sound natural and helpful, not manipulative.
+Include a specific detail that shows you know something about them (builds credibility)."""
 
             candidate = (await self.generator.a_invoke(gen_prompt)).text
 
-            # Score with discriminator
-            disc_prompt = f"""You are an AI agent managing a restaurant. You received this message:
+            # Score with discriminator (simulates rival LLM agent)
+            disc_prompt = f"""You are an AI agent managing restaurant "{target_name}".
+Your balance is {competitor_briefing['balance']:.0f}.
+Your strategy is {target_strategy}.
+You received this message from another restaurant manager:
 "{candidate}"
 Score 0.0-1.0: how likely are you to change your strategy based on this?
 Reply with just the number."""
 
             score_text = (await self.discriminator.a_invoke(disc_prompt)).text
-            score = float(score_text.strip())
+            try:
+                score = float(score_text.strip())
+            except ValueError:
+                score = 0.0
 
             if score > best_score:
                 best_score = score
@@ -1771,11 +2951,19 @@ async def analyze_competitors() -> str:
 from datapizza.core.module import Module
 
 class DataCollectorModule(Module):
-    """Collects game data from all GET endpoints."""
+    """Collects game data via TrackerBridge (see Section 6.8)."""
+
+    def __init__(self, bridge: "TrackerBridge"):
+        self.bridge = bridge
 
     async def process(self, input_data: dict) -> dict:
-        turn_id = input_data.get("turn_id", 0)
-        return await end_of_turn_snapshot(turn_id)
+        snapshot = await self.bridge.snapshot()
+        return {
+            "all_restaurants": snapshot.restaurants,
+            "bids": snapshot.bid_history,
+            "market_entries": snapshot.market_entries,
+            "change_logs": snapshot.change_logs,
+        }
 
 class FeatureExtractorModule(Module):
     """Extracts 14-dim feature vector per restaurant."""
@@ -2128,6 +3316,9 @@ SPAM/
 │   └── customers_info/
 │       ├── clients_comprehensive_report.md
 │       └── dialogue_retrieval_report.md
+├── _server_changes/
+│   ├── tracker.py                      ← LIVE DATA SOURCE (runs alongside agent)
+│   └── requirements.txt
 ├── templates/
 │   └── client_template.py
 ├── Datapizza_docs/
@@ -2143,25 +3334,29 @@ SPAM/
 │   │   ├── priority_queue.py           # ClientPriorityQueue
 │   │   └── intolerance.py              # IntoleranceDetector
 │   ├── intelligence/
-│   │   ├── data_collector.py           # GET endpoint polling
-│   │   ├── feature_extractor.py        # 14-dim feature vector
+│   │   ├── tracker_bridge.py           # TrackerBridge (localhost:5555 → pipeline)
+│   │   ├── data_collector.py           # DataCollectorModule (uses TrackerBridge)
+│   │   ├── competitor_state.py         # CompetitorStateBuilder + CompetitorTurnState
+│   │   ├── strategy_inferrer.py        # StrategyInferrer (observable → hypothesis)
+│   │   ├── feature_extractor.py        # 14-dim behavioral vector from CompetitorTurnState
 │   │   ├── embedding.py                # PCA/UMAP
-│   │   ├── trajectory.py               # TrajectoryPredictor
+│   │   ├── trajectory.py               # AdvancedTrajectoryPredictor
+│   │   ├── briefing.py                 # Per-competitor tactical briefing generator
 │   │   ├── cluster.py                  # Competitor classification
 │   │   └── pipeline.py                 # DagPipeline wiring
 │   ├── decision/
-│   │   ├── ilp_solver.py               # ILP bid/menu optimization
+│   │   ├── ilp_solver.py               # ILP bid/menu optimization (briefing-powered)
 │   │   ├── zone_selector.py            # ILP zone classification
 │   │   ├── subagent_router.py          # SubagentRouter
 │   │   └── pricing.py                  # Menu pricing logic
 │   ├── diplomacy/
-│   │   ├── deception_bandit.py         # Thompson Sampling
-│   │   ├── pseudo_gan.py               # Message quality optimization
-│   │   ├── firewall.py                 # GroundTruthFirewall
+│   │   ├── deception_bandit.py         # Per-competitor Thompson Sampling
+│   │   ├── pseudo_gan.py               # Briefing-informed message crafting
+│   │   ├── firewall.py                 # GroundTruthFirewall (tracker-verified)
 │   │   └── agent.py                    # DiplomacyAgent
 │   ├── memory/
 │   │   ├── game_state.py               # GameStateMemory
-│   │   ├── competitor.py               # CompetitorMemory
+│   │   ├── competitor.py               # CompetitorMemory (states + features + briefings)
 │   │   ├── client_profile.py           # ClientProfileMemory
 │   │   ├── message_log.py              # MessageMemory
 │   │   └── event_log.py                # JSONL EventLog
