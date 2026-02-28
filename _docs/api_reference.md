@@ -286,7 +286,7 @@ curl -N -H "x-api-key: dTpZhKpZ02-4ac2be8821b52df78bf06070" \
 | `execute_transaction` | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `delete_market_entry` | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `send_message` | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `update_restaurant_is_open` | ✅ | ✅ | ✅ | close only | ❌ |
+| `update_restaurant_is_open` | ✅ | ✅ | ✅ | ✅ (close only) | ❌ |
 | `restaurant_info` (GET) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `get_meals` (GET) | ✅ | ✅ | ✅ | ✅ | ✅ |
 
