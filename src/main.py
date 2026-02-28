@@ -1194,8 +1194,20 @@ class GameOrchestrator:
 
         if menu_items and not self.serving.menu:
             # Server has a menu but our pipeline doesn't — sync it
-            self.serving.set_menu(menu_items)
-            logger.info(f"Synced {len(menu_items)} menu items from server")
+            # Server may return menu as list of strings (dish names) rather
+            # than list of dicts. Normalize to [{"name": ..., "price": ...}].
+            normalised = []
+            for item in menu_items:
+                if isinstance(item, str):
+                    recipe = self.recipe_db.get(item, {})
+                    price = recipe.get("price", recipe.get("prestige", 15))
+                    normalised.append({"name": item, "price": int(price)})
+                elif isinstance(item, dict):
+                    normalised.append(item)
+                else:
+                    logger.warning(f"Unexpected menu item type: {type(item)} — skipping")
+            self.serving.set_menu(normalised)
+            logger.info(f"Synced {len(normalised)} menu items from server")
 
         return SkillResult(
             skill_name="serving_readiness_check", success=True,

@@ -139,17 +139,28 @@ class ServingPipeline:
         self._is_open = True
         self._serving_active = False
 
-    def set_menu(self, menu_items: list[dict]):
+    def set_menu(self, menu_items: list[dict | str]):
         """
         Set the current menu and rebuild the order matcher.
         Called during waiting phase before serving starts.
+
+        Accepts both list[dict] (normal) and list[str] (server shorthand).
         """
-        self.menu = {item["name"]: item for item in menu_items}
+        normalised = []
+        for item in menu_items:
+            if isinstance(item, str):
+                # Server sometimes returns bare dish names
+                recipe = self.recipes.get(item, {})
+                price = recipe.get("price", recipe.get("prestige", 15))
+                normalised.append({"name": item, "price": int(price)})
+            elif isinstance(item, dict):
+                normalised.append(item)
+        self.menu = {item["name"]: item for item in normalised}
         self.order_matcher = OrderMatcher(
-            menu_items,
+            normalised,
             order_cache=self.client_library.order_to_dish_cache,
         )
-        logger.info(f"Menu set with {len(menu_items)} items")
+        logger.info(f"Menu set with {len(normalised)} items")
 
     def set_inventory_snapshot(self, inventory: dict[str, int]):
         """
