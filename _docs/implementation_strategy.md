@@ -306,13 +306,18 @@ Key principle: Serve many clients fast. Throughput is revenue."""
 
 ### The Problem
 
-The game gives us minimal client information upfront:
+The `client_spawned` SSE event gives us only two fields (confirmed by INSTR, API, and TEMPLATE):
 
-- `clientName` — archetype string
-- `orderText` — natural language order
-- `client_id` — unique identifier (for serve_dish)
+- `clientName` — string (assumed to map to archetype names, but **not confirmed** by any source)
+- `orderText` — string (natural language order)
 
-But across turns we can **observe patterns** and build profiles:
+**Critical:** `client_id` (required by `serve_dish`) is **NOT** included in `client_spawned`. It must be retrieved via `GET /meals?turn_id=<id>&restaurant_id=17`, which returns client requests with their respective IDs plus an `executed` boolean. This means we must poll `/meals` during the serving phase to obtain `client_id` before we can call `serve_dish`.
+
+> **Source discrepancy:** The API reference labels `client_id` as `"CLIENT_ID_FROM_SSE"` in its `serve_dish` example, but the official SSE event table lists only `clientName` and `orderText` under `client_spawned`. Where exactly `client_id` appears at runtime is not confirmed — `/meals` is the only documented source.
+
+Additionally, no source confirms that `clientName` values map directly to the 4 archetype names (Esploratore Galattico, Astrobarone, Saggi del Cosmo, Famiglie Orbitali). We must handle unknown/unexpected `clientName` values gracefully.
+
+Across turns we can **observe patterns** and build profiles:
 
 ### Observable Client Signals
 
@@ -960,16 +965,20 @@ class ServingPipeline:
                 lookup[prefix + normalized] = dish_name
         return lookup
 
-    async def handle_client(self, client_name: str, order_text: str, client_id: str):
+    async def handle_client(self, client_name: str, order_text: str):
         """
         Called on client_spawned SSE event.
+
+        NOTE: client_spawned does NOT provide client_id. We must fetch it
+        from GET /meals to later call serve_dish.
 
         Flow:
         1. Normalize order text
         2. Match to menu dish (lookup, then fuzzy, then LLM fallback)
         3. Check intolerance safety
-        4. prepare_dish
-        5. On preparation_complete → serve_dish
+        4. Fetch client_id from GET /meals (match by order text / client name)
+        5. prepare_dish
+        6. On preparation_complete → serve_dish(dish_name, client_id)
         """
         # Step 1: Normalize
         normalized = order_text.lower().strip()
@@ -982,7 +991,7 @@ class ServingPipeline:
             return  # no match found, skip this client
 
         # Step 3: Intolerance check
-        archetype = client_name
+        archetype = self._classify_archetype(client_name)  # graceful fallback for unknown clientName values
         if not self.intolerance_detector.filter_safe_recipes(
             archetype, [self.recipes[dish]]
         ):
@@ -991,7 +1000,12 @@ class ServingPipeline:
             if dish is None:
                 return  # no safe dishes available
 
-        # Step 4: Prepare
+        # Step 4: Fetch client_id from GET /meals (not available in client_spawned)
+        client_id = await self._resolve_client_id(client_name, order_text)
+        if client_id is None:
+            return  # cannot serve without client_id
+
+        # Step 5: Prepare
         self.preparing[dish] = client_id
         await self._mcp_prepare_dish(dish)
 
@@ -1032,6 +1046,53 @@ class ServingPipeline:
             # Pick the one with highest prestige (or fastest prep time for Esploratori)
             return max(safe_dishes, key=lambda r: r.prestige).name
         return None
+
+    async def _resolve_client_id(self, client_name: str, order_text: str) -> str | None:
+        """
+        Fetch client_id from GET /meals endpoint.
+
+        client_spawned SSE event does NOT include client_id (confirmed by
+        dialogue_retrieval_report.md). The only documented source for client_id
+        is GET /meals?turn_id=<id>&restaurant_id=17, which returns client
+        requests with their respective IDs.
+
+        We match the returned meal entries against client_name/order_text
+        to find the correct client_id for serve_dish.
+        """
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            url = f"{BASE_URL}/meals?turn_id={self.current_turn}&restaurant_id={TEAM_ID}"
+            async with session.get(url, headers=HEADERS) as resp:
+                meals = await resp.json()
+
+        # Match by order text (most reliable) — skip already-executed meals
+        for meal in meals:
+            if meal.get("executed"):
+                continue
+            # Match heuristic: compare order text or client name
+            if meal.get("orderText", "").lower() == order_text.lower():
+                return meal.get("client_id") or meal.get("id")
+
+        return None  # could not resolve
+
+    def _classify_archetype(self, client_name: str) -> str:
+        """
+        Map clientName to a known archetype.
+
+        IMPORTANT: No source confirms that clientName values map directly
+        to the 4 archetype names. We must handle unknown values gracefully.
+        """
+        KNOWN_ARCHETYPES = {
+            "Esploratore Galattico", "Astrobarone",
+            "Saggi del Cosmo", "Famiglie Orbitali"
+        }
+        if client_name in KNOWN_ARCHETYPES:
+            return client_name
+        # Fuzzy fallback: check if archetype name is a substring
+        for arch in KNOWN_ARCHETYPES:
+            if arch.lower() in client_name.lower() or client_name.lower() in arch.lower():
+                return arch
+        return "unknown"  # safe default — treated as lowest priority
 ```
 
 ### Serving Strategy Per Archetype
@@ -1052,13 +1113,17 @@ class ClientPriorityQueue:
         "Saggi del Cosmo": 1,
         "Famiglie Orbitali": 2,
         "Esploratore Galattico": 3,
+        # NOTE: clientName values are not confirmed to match these archetype
+        # names exactly. Unknown values get priority 99 (lowest).
     }
 
     def __init__(self):
         self.queue: list[tuple[int, dict]] = []  # (priority, client_data)
 
     def add_client(self, client_data: dict):
-        priority = self.PRIORITY.get(client_data["clientName"], 99)
+        # clientName may not match archetype names — use _classify_archetype
+        archetype = ServingPipeline._classify_archetype(None, client_data["clientName"])
+        priority = self.PRIORITY.get(archetype, 99)
         heapq.heappush(self.queue, (priority, client_data))
 
     def next_client(self) -> dict | None:
@@ -1734,12 +1799,13 @@ pipeline.connect("features", "clusters")
 
 ### Phase: `serving`
 
-| Action                        | Component           | Details                                                        |
-| ----------------------------- | ------------------- | -------------------------------------------------------------- |
-| Handle `client_spawned`       | ServingPipeline     | Parse order → match dish → intolerance check → `prepare_dish`  |
-| Handle `preparation_complete` | ServingPipeline     | `serve_dish` to waiting client                                 |
-| Priority queue                | ClientPriorityQueue | Astrobaroni first, then Saggi, then Famiglie, then Esploratori |
-| Track outcomes                | ClientProfileMemory | Record success/failure per serve for intolerance learning      |
+| Action                        | Component           | Details                                                                                             |
+| ----------------------------- | ------------------- | --------------------------------------------------------------------------------------------------- |
+| Handle `client_spawned`       | ServingPipeline     | Parse order → match dish → intolerance check → fetch `client_id` from `GET /meals` → `prepare_dish` |
+| Handle `preparation_complete` | ServingPipeline     | `serve_dish(dish_name, client_id)` to waiting client                                                |
+| Poll `GET /meals`             | ServingPipeline     | Required to obtain `client_id` (not provided by `client_spawned` SSE event)                         |
+| Priority queue                | ClientPriorityQueue | Astrobaroni first, then Saggi, then Famiglie, then Esploratori (archetype classification needed)    |
+| Track outcomes                | ClientProfileMemory | Record success/failure per serve for intolerance learning                                           |
 
 ### Phase: `stopped`
 
