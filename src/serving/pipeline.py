@@ -124,6 +124,10 @@ class ServingPipeline:
         # Track which meal IDs we've already started processing
         self._processed_meal_ids: set[str] = set()
 
+        # SSE order text cache: clientName → orderText
+        # /meals may not include orderText, but SSE client_spawned does
+        self._sse_order_cache: dict[str, str] = {}
+
         # Concurrency control for polling
         self._poll_event = asyncio.Event()  # set by client_spawned to trigger immediate poll
         self._poll_task: asyncio.Task | None = None
@@ -180,6 +184,7 @@ class ServingPipeline:
         self.served_this_turn.clear()
         self._committed_ingredients.clear()
         self._processed_meal_ids.clear()
+        self._sse_order_cache.clear()
         self._poll_event.clear()
         self.metrics = ServingMetrics()
         self._is_open = True
@@ -254,6 +259,10 @@ class ServingPipeline:
         client_name = data.get("clientName", "unknown")
         order_text = data.get("orderText", "")
         logger.info(f"Client spawned: {client_name} — '{order_text}'")
+
+        # Cache order text — /meals may not include it
+        if order_text and client_name != "unknown":
+            self._sse_order_cache[client_name] = order_text
 
         # Trigger immediate poll (with small delay for server propagation)
         await asyncio.sleep(POLL_TRIGGER_DELAY)
@@ -401,6 +410,11 @@ class ServingPipeline:
         """
         order_text = meal.get("orderText", "")
         client_name = meal.get("clientName", "unknown")
+
+        # Fallback: use SSE-cached order text if /meals didn't include it
+        if not order_text and client_name in self._sse_order_cache:
+            order_text = self._sse_order_cache[client_name]
+            logger.info(f"Using SSE-cached orderText for {client_name}: '{order_text}'")
 
         # Step 1: Match dish
         if self.order_matcher is None:

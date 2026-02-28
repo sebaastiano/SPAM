@@ -129,13 +129,13 @@ class OrderMatcher:
         """
         if not order_text or not order_text.strip():
             logger.warning("Empty order text — cannot match")
-            return self._fallback_any_dish()
+            return None
 
         normalized = self._normalize(order_text)
 
         if not normalized:
             logger.warning(f"Order text normalized to empty: '{order_text}'")
-            return self._fallback_any_dish()
+            return None
 
         # Tier 1: Exact lookup
         if normalized in self.lookup:
