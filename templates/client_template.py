@@ -8,6 +8,7 @@
 # ///
 
 #RUNNATE QUESTO PRIMA: curl -LsSf https://astral.sh/uv/install.sh | sh
+# poi questo: uv run templates/client_template.py
 
 import asyncio
 import json
