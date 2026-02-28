@@ -117,22 +117,46 @@ class DeceptionBandit:
         """
         actions = []
 
+        candidates = []  # (score, rid, brief) for fallback
+
         for rid, brief in competitor_briefings.items():
             if brief.get("strategy") == "DORMANT":
                 continue
 
             opportunity = brief.get("opportunity_level", 0)
             threat = brief.get("threat_level", 0)
+            score = opportunity + threat * 0.7
+            candidates.append((score, rid, brief))
 
-            if opportunity > 0.5:
+            # Threshold: opportunity > 0.3 (was 0.5 — first turns have low scores)
+            if opportunity > 0.3:
                 arm = self.select_arm(rid)
                 context = self._build_deception_context(rid, brief, arm)
                 if context:
                     actions.append(context)
-            elif threat > 0.6:
+            elif threat > 0.5:
                 context = self._build_threat_response(rid, brief)
                 if context:
                     actions.append(context)
+
+        # Fallback: if no high-scoring targets, always send at least one
+        # price_anchoring message to establish presence and nudge competitors
+        if not actions and candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            _, rid, brief = candidates[0]
+            context = {
+                "target_rid": rid,
+                "arm": "price_anchoring",
+                "target_name": brief.get("name", f"Team {rid}"),
+                "target_strategy": brief.get("strategy", "UNKNOWN"),
+                "priority": 0.2,
+                "desired_effect": "raise_prices",
+                "message_hint": (
+                    f"Signal premium positioning to anchor their prices upward "
+                    f"(their avg: {brief.get('menu_price_avg', 0):.0f})"
+                ),
+            }
+            actions.append(context)
 
         actions.sort(key=lambda a: a.get("priority", 0), reverse=True)
         return actions[:3]

@@ -65,10 +65,10 @@ class DiplomacyAgent:
             b for b in competitor_briefings.values()
             if b.get("strategy") != "DORMANT"
         ]
-        if len(active) <= 1:
+        if len(active) == 0:
             logger.info(
-                f"Low competition ({len(active)} active competitors) — "
-                f"skipping diplomacy, focusing on serving"
+                f"No active competitors (all DORMANT or none tracked) — "
+                f"skipping diplomacy"
             )
             return []
 
