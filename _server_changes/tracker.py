@@ -410,6 +410,512 @@ def _poll_bid_history():
 # Flask routes
 # ──────────────────────────────────────────────
 
+WAITING_MARKET_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🍕 Market & Menus — Waiting Phase</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel: #12121a;
+    --border: #1e1e30;
+    --accent: #e85d04;
+    --accent2: #ff9f1c;
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --yellow: #f39c12;
+    --blue: #3d9eff;
+    --purple: #a855f7;
+    --pink: #ec4899;
+    --cyan: #06b6d4;
+    --text: #e0e0e0;
+    --muted: #666;
+    --font: 'Segoe UI', system-ui, sans-serif;
+    --mono: 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { min-height: 100vh; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+
+  /* ── Header ── */
+  header {
+    height: 52px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 14px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  header .logo { font-size: 18px; color: var(--accent); font-weight: 700; letter-spacing: 1px; text-decoration: none; }
+  header .logo span { color: var(--accent2); }
+  .badge {
+    padding: 3px 10px; border-radius: 20px; font-size: 11px;
+    font-weight: 600; letter-spacing: .5px; border: 1px solid;
+  }
+  #phase-badge { border-color: var(--yellow); color: var(--yellow); background: rgba(243,156,18,.1); }
+  #turn-badge  { border-color: var(--blue);   color: var(--blue);   background: rgba(61,158,255,.1); }
+  #conn-badge  { border-color: var(--green);  color: var(--green);  background: rgba(46,204,113,.1); }
+  #conn-badge.off { border-color: var(--red); color: var(--red); background: rgba(231,76,60,.1); }
+  .spacer { flex: 1; }
+  .nav-link {
+    padding: 4px 12px; border-radius: 6px; border: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; text-decoration: none;
+    transition: border-color .15s, color .15s;
+  }
+  .nav-link:hover { border-color: var(--accent); color: var(--accent); }
+  #refresh-btn {
+    padding: 4px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); font-size: 12px; cursor: pointer;
+    font-family: var(--font); transition: border-color .15s, color .15s;
+  }
+  #refresh-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+  /* ── Page layout ── */
+  .page { padding: 20px; display: flex; flex-direction: column; gap: 24px; max-width: 1600px; margin: 0 auto; }
+
+  /* ── Section header ── */
+  .section-title {
+    font-size: 13px; font-weight: 700; letter-spacing: 1.5px;
+    color: var(--muted); text-transform: uppercase; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .section-title .cnt {
+    background: var(--accent); color: #fff; border-radius: 20px;
+    padding: 1px 8px; font-size: 10px; font-weight: 600;
+  }
+
+  /* ── Tabs ── */
+  .tab-bar {
+    display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .tab-btn {
+    padding: 5px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); font-size: 12px; cursor: pointer;
+    font-family: var(--font); transition: all .15s;
+  }
+  .tab-btn.on { border-color: var(--accent); color: var(--accent); background: rgba(232,93,4,.1); }
+
+  /* ── Card grid (menus) ── */
+  .cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .menu-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+    transition: border-color .2s;
+  }
+  .menu-card.our-team { border-color: var(--purple); }
+  .menu-card.is-open  { border-color: var(--green);  }
+  .menu-card-head {
+    padding: 12px 14px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card-avatar {
+    width: 36px; height: 36px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 15px; color: #fff; flex-shrink: 0;
+  }
+  .card-name { font-weight: 600; font-size: 13px; flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card-meta { font-size: 11px; color: var(--muted); display: flex; gap: 6px; margin-top: 2px; }
+  .card-meta .val { color: var(--text); font-family: var(--mono); }
+  .open-dot {
+    width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+  }
+  .open-dot.open { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .open-dot.closed { background: #333; }
+  .menu-body { padding: 10px 14px; }
+  .menu-empty { color: var(--muted); font-size: 12px; padding: 4px 0; }
+  .menu-item {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 4px 0; border-bottom: 1px solid #1a1a24; font-size: 12px;
+  }
+  .menu-item:last-child { border-bottom: none; }
+  .menu-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu-item-price { font-family: var(--mono); color: var(--green); font-size: 12px; flex-shrink: 0; margin-left: 8px; }
+
+  /* ── Market table ── */
+  .tbl-wrap {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    padding: 8px 12px; text-align: left; font-size: 10px; letter-spacing: 1px;
+    color: var(--muted); background: #0d0d16; border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 7px 12px; border-bottom: 1px solid #16161f; font-size: 12px;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: #16161f; }
+  .sell-side { color: var(--red); font-weight: 600; }
+  .buy-side  { color: var(--green); font-weight: 600; }
+  .st-open   { color: var(--green); }
+  .st-closed { color: var(--muted); }
+  .st-cancelled { color: var(--red); }
+  .num { text-align: right; font-family: var(--mono); }
+  .our-row td:first-child { color: var(--purple); font-weight: 700; }
+
+  /* ── Seller breakdown ── */
+  .seller-block {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden; margin-bottom: 12px;
+  }
+  .seller-head {
+    padding: 10px 14px; background: #0d0d16; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .seller-name { font-weight: 600; font-size: 13px; }
+  .seller-cnt  { font-size: 11px; color: var(--muted); }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
+
+  /* ── Empty ── */
+  .empty { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+
+  /* ── Loading spinner ── */
+  .loading { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <a class="logo" href="/">🍕 SPAM!<span>TRACKER</span></a>
+  <div id="phase-badge" class="badge">—</div>
+  <div id="turn-badge" class="badge">Turn —</div>
+  <div class="spacer"></div>
+  <button id="refresh-btn" onclick="loadData()">⟳ Refresh</button>
+  <a class="nav-link" href="/social">📡 Social</a>
+  <div id="conn-badge" class="badge off">● LOADING</div>
+</header>
+
+<div class="page">
+
+  <!-- ══════ MENUS SECTION ══════ -->
+  <div id="menus-section">
+    <div class="section-title">🍽️ Restaurant Menus <span class="cnt" id="menu-cnt">0</span></div>
+    <div class="tab-bar" id="menu-tab-bar">
+      <button class="tab-btn on" data-tab="all" onclick="setMenuFilter('all')">All</button>
+      <button class="tab-btn" data-tab="open" onclick="setMenuFilter('open')">🟢 Open only</button>
+    </div>
+    <div class="cards-grid" id="menus-grid">
+      <div class="loading">Loading menus…</div>
+    </div>
+  </div>
+
+  <!-- ══════ MARKET SECTION ══════ -->
+  <div id="market-section">
+    <div class="section-title">📈 Market Entries <span class="cnt" id="mkt-cnt">0</span></div>
+    <div class="tab-bar" id="mkt-tab-bar">
+      <button class="tab-btn on" data-tab="all"    onclick="setMktFilter('all')">All</button>
+      <button class="tab-btn"   data-tab="sell"   onclick="setMktFilter('sell')">SELL listings</button>
+      <button class="tab-btn"   data-tab="buy"    onclick="setMktFilter('buy')">BUY requests</button>
+      <button class="tab-btn"   data-tab="closed" onclick="setMktFilter('closed')">✅ Completed</button>
+      <button class="tab-btn"   data-tab="by-seller" onclick="setMktFilter('by-seller')">By Seller</button>
+    </div>
+    <div id="mkt-content">
+      <div class="loading">Loading market…</div>
+    </div>
+  </div>
+
+</div><!-- /page -->
+
+<script>
+const TEAM_ID = 17;
+const COLORS = [
+  '#e85d04','#ff9f1c','#2ecc71','#3d9eff','#a855f7',
+  '#ec4899','#06b6d4','#84cc16','#f59e0b','#8b5cf6',
+  '#10b981','#ef4444','#6366f1','#14b8a6','#f97316',
+];
+function avatarColor(id) { return COLORS[Math.abs(parseInt(id)||0) % COLORS.length]; }
+function avatarLetter(name) { return (name||'?')[0].toUpperCase(); }
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+let menuFilter = 'all';
+let mktFilter  = 'all';
+let allMenus   = {};
+let allMktEntries = [];
+
+// ── Data load ──────────────────────────────────
+async function loadData() {
+  const badge = document.getElementById('conn-badge');
+  badge.textContent = '● LOADING';
+  badge.className = 'badge off';
+  try {
+    const [mktRes, gsRes] = await Promise.all([
+      fetch('/api/waiting_market'),
+      fetch('/api/game_state'),
+    ]);
+    if (!mktRes.ok) throw new Error('HTTP ' + mktRes.status);
+    const mktData = await mktRes.json();
+    allMktEntries = mktData.market_entries || [];
+    allMenus = mktData.menus || {};
+
+    if (gsRes.ok) {
+      const gs = await gsRes.json();
+      updateHeader(gs.phase, gs.turn_id);
+    }
+
+    renderMenus();
+    renderMarket();
+
+    badge.textContent = '● LIVE';
+    badge.className = 'badge';
+    badge.style.cssText = 'border-color:var(--green);color:var(--green);background:rgba(46,204,113,.1)';
+  } catch(e) {
+    badge.textContent = '● ERROR';
+    console.error('loadData error:', e);
+  }
+}
+
+// ── Live refresh via SSE from tracker ──────────
+let es;
+function connectSSE() {
+  es = new EventSource('/stream');
+  es.onmessage = ev => {
+    let evt; try { evt = JSON.parse(ev.data); } catch { return; }
+    const { type, data: d } = evt;
+    if (type === 'sse_event') {
+      const p = d.payload || {};
+      if (d.event === 'game_phase_changed') updateHeader(p.phase, null);
+      else if (d.event === 'game_started')  updateHeader('speaking', p.turn_id);
+      else if (d.event === 'game_reset')    updateHeader('reset', null);
+    } else if (
+      type === 'market_new_entry' || type === 'market_changed' ||
+      type === 'market_removed'   || type === 'restaurant_changed' ||
+      type === 'restaurant_snapshot'
+    ) {
+      // Debounce: refresh data at most once per second
+      clearTimeout(window._refreshTimer);
+      window._refreshTimer = setTimeout(loadData, 800);
+    }
+  };
+}
+
+// ── Header ─────────────────────────────────────
+const PHASE_COLORS = {
+  speaking:'#f39c12', closed_bid:'#e85d04', waiting:'#3d9eff',
+  serving:'#2ecc71', stopped:'#e74c3c', reset:'#9b59b6'
+};
+function updateHeader(phase, turnId) {
+  if (phase) {
+    const pb = document.getElementById('phase-badge');
+    pb.textContent = phase.toUpperCase();
+    const c = PHASE_COLORS[phase] || '#aaa';
+    pb.style.cssText = `border-color:${c};color:${c};background:${c}19`;
+  }
+  if (turnId) document.getElementById('turn-badge').textContent = 'Turn ' + turnId;
+}
+
+// ══════════════════════════════════════════════
+// MENUS
+// ══════════════════════════════════════════════
+function setMenuFilter(f) {
+  menuFilter = f;
+  document.querySelectorAll('#menu-tab-bar .tab-btn').forEach(b =>
+    b.classList.toggle('on', b.dataset.tab === f));
+  renderMenus();
+}
+
+function renderMenus() {
+  const grid = document.getElementById('menus-grid');
+  let entries = Object.entries(allMenus); // [rid, {name, is_open, items, balance}]
+  if (menuFilter === 'open') entries = entries.filter(([,m]) => m.is_open);
+
+  // Sort: our team first, then by name
+  entries.sort(([aId, a], [bId, b]) => {
+    if (String(aId) === String(TEAM_ID)) return -1;
+    if (String(bId) === String(TEAM_ID)) return 1;
+    return (a.name||'').localeCompare(b.name||'');
+  });
+
+  document.getElementById('menu-cnt').textContent = entries.length;
+
+  if (entries.length === 0) {
+    grid.innerHTML = '<div class="empty">No menu data yet.</div>';
+    return;
+  }
+
+  grid.innerHTML = entries.map(([rid, m]) => {
+    const isUs   = String(rid) === String(TEAM_ID);
+    const isOpen = m.is_open;
+    const c      = avatarColor(rid);
+    const letter = avatarLetter(m.name);
+    const items  = m.items || [];
+    const bal    = m.balance != null ? '€' + Math.round(m.balance).toLocaleString() : '—';
+
+    const itemsHtml = items.length === 0
+      ? `<div class="menu-empty">No items on menu</div>`
+      : items.map(item => {
+          const nm = item.name || item.Name || JSON.stringify(item);
+          const pr = item.price ?? item.Price ?? '—';
+          return `<div class="menu-item">
+            <span class="menu-item-name">${escHtml(String(nm))}</span>
+            <span class="menu-item-price">${pr}</span>
+          </div>`;
+        }).join('');
+
+    const classes = ['menu-card', isUs ? 'our-team' : '', isOpen && !isUs ? 'is-open' : ''].filter(Boolean).join(' ');
+    return `<div class="${classes}">
+      <div class="menu-card-head">
+        <div class="card-avatar" style="background:${c}">${letter}</div>
+        <div>
+          <div class="card-name">${escHtml(m.name)}</div>
+          <div class="card-meta">
+            <span>Bal <span class="val">${bal}</span></span>
+            <span>${items.length} item${items.length!==1?'s':''}</span>
+          </div>
+        </div>
+        <div class="open-dot ${isOpen ? 'open' : 'closed'}" title="${isOpen?'Open':'Closed'}"></div>
+      </div>
+      <div class="menu-body">${itemsHtml}</div>
+    </div>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════
+// MARKET
+// ══════════════════════════════════════════════
+function setMktFilter(f) {
+  mktFilter = f;
+  document.querySelectorAll('#mkt-tab-bar .tab-btn').forEach(b =>
+    b.classList.toggle('on', b.dataset.tab === f));
+  renderMarket();
+}
+
+function renderMarket() {
+  const cnt  = document.getElementById('mkt-cnt');
+  const cont = document.getElementById('mkt-content');
+  let entries = allMktEntries;
+
+  // filter
+  if (mktFilter === 'sell')   entries = entries.filter(e => e.side === 'SELL');
+  else if (mktFilter === 'buy')    entries = entries.filter(e => e.side === 'BUY');
+  else if (mktFilter === 'closed') entries = entries.filter(e => e.status === 'closed' || e.buyer_id != null);
+  // 'by-seller' and 'all' show all entries (by-seller changes rendering)
+
+  cnt.textContent = entries.length;
+
+  if (entries.length === 0) {
+    cont.innerHTML = '<div class="tbl-wrap"><div class="empty">No market entries match this filter.</div></div>';
+    return;
+  }
+
+  if (mktFilter === 'by-seller') {
+    renderBySeller(entries, cont);
+    return;
+  }
+  renderTable(entries, cont);
+}
+
+function sideCell(side) {
+  return side === 'SELL'
+    ? `<span class="sell-side">SELL</span>`
+    : `<span class="buy-side">BUY</span>`;
+}
+function statusCell(status, buyerId) {
+  if (status === 'closed' || buyerId != null) return `<span class="st-closed">✅ closed</span>`;
+  if (status === 'cancelled') return `<span class="st-cancelled">✗ cancelled</span>`;
+  return `<span class="st-open">● open</span>`;
+}
+
+function renderTable(entries, cont) {
+  const rows = entries.map(e => {
+    const isUs = String(e.seller_id) === String(TEAM_ID) || String(e.buyer_id) === String(TEAM_ID);
+    const rc   = isUs ? ' class="our-row"' : '';
+    return `<tr${rc}>
+      <td>${escHtml(e.seller_name||'—')}</td>
+      <td>${sideCell(e.side)}</td>
+      <td>${escHtml(e.ingredient_name||'')}</td>
+      <td class="num">${e.quantity??'—'}</td>
+      <td class="num">${e.price??'—'}</td>
+      <td>${statusCell(e.status, e.buyer_id)}</td>
+      <td>${escHtml(e.buyer_name||'—')}</td>
+    </tr>`;
+  }).join('');
+
+  cont.innerHTML = `<div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>SELLER</th><th>SIDE</th><th>INGREDIENT</th>
+        <th class="num">QTY</th><th class="num">PRICE</th>
+        <th>STATUS</th><th>BUYER</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderBySeller(entries, cont) {
+  // group by seller_name
+  const groups = {};
+  entries.forEach(e => {
+    const key = e.seller_name || '—';
+    if (!groups[key]) groups[key] = { id: e.seller_id, entries: [] };
+    groups[key].entries.push(e);
+  });
+
+  const html = Object.entries(groups).sort(([a],[b]) => {
+    // Our team first
+    const aId = groups[a].id, bId = groups[b].id;
+    if (String(aId)===String(TEAM_ID)) return -1;
+    if (String(bId)===String(TEAM_ID)) return 1;
+    return a.localeCompare(b);
+  }).map(([sellerName, grp]) => {
+    const c = avatarColor(grp.id);
+    const letter = avatarLetter(sellerName);
+    const isUs = String(grp.id) === String(TEAM_ID);
+    const rows = grp.entries.map(e => `<tr>
+      <td>${sideCell(e.side)}</td>
+      <td>${escHtml(e.ingredient_name||'')}</td>
+      <td class="num">${e.quantity??'—'}</td>
+      <td class="num">${e.price??'—'}</td>
+      <td>${statusCell(e.status, e.buyer_id)}</td>
+      <td>${escHtml(e.buyer_name||'—')}</td>
+    </tr>`).join('');
+
+    return `<div class="seller-block">
+      <div class="seller-head">
+        <div class="card-avatar" style="background:${c};width:30px;height:30px;font-size:13px">${letter}</div>
+        <span class="seller-name" style="${isUs?'color:var(--purple)':''}">${escHtml(sellerName)}</span>
+        <span class="seller-cnt">${grp.entries.length} listing${grp.entries.length!==1?'s':''}</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th>SIDE</th><th>INGREDIENT</th>
+          <th class="num">QTY</th><th class="num">PRICE</th>
+          <th>STATUS</th><th>BUYER</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  }).join('');
+
+  cont.innerHTML = html;
+}
+
+// ── Boot ───────────────────────────────────────
+loadData();
+connectSSE();
+// Periodic refresh every 10 s
+setInterval(loadData, 10000);
+</script>
+</body>
+</html>
+"""  # end WAITING_MARKET_TEMPLATE
+
+
 SOCIAL_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -1248,7 +1754,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <h1>🍕 SPAM! TRACKER</h1>
   <div id="phase-badge">PHASE: —</div>
   <div id="turn-badge">TURN: —</div>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+  <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+    <a href="/waiting" style="color:var(--blue);font-size:11px;text-decoration:none;border:1px solid var(--blue);padding:3px 9px;border-radius:4px;" title="Market & Menus view">📈 Market & Menus</a>
+    <a href="/social"  style="color:var(--purple);font-size:11px;text-decoration:none;border:1px solid var(--purple);padding:3px 9px;border-radius:4px;" title="Social feed">📡 Social</a>
     <span id="conn-label">disconnected</span>
     <div id="conn-dot"></div>
   </div>
@@ -1884,6 +2392,54 @@ def api_restaurant_detail(rid):
         "change_log": change_log,
         "turn_id": turn_id,
     })
+
+
+@app.route("/api/waiting_market")
+def api_waiting_market():
+    """Return market entries enriched with restaurant names, plus all menus."""
+    with state_lock:
+        names = dict(state["restaurants_names"])
+        raw_entries = list(state["market"].values())
+        raw_restaurants = {rid: dict(r) for rid, r in state["restaurants_raw"].items()}
+        turn_id = state.get("turn_id")
+
+    # Enrich market entries with restaurant names
+    enriched = []
+    for e in raw_entries:
+        entry = dict(e)
+        sid = entry.get("seller_id")
+        bid = entry.get("buyer_id")
+        entry["seller_name"] = names.get(sid, f"Team {sid}") if sid is not None else "—"
+        entry["buyer_name"] = names.get(bid, f"Team {bid}") if bid is not None else "—"
+        enriched.append(entry)
+
+    # Build per-restaurant menu snapshot
+    menus = {}
+    for rid, r in raw_restaurants.items():
+        raw_menu = r.get("menu") or {}
+        if isinstance(raw_menu, dict):
+            items = raw_menu.get("items") or []
+        elif isinstance(raw_menu, list):
+            items = raw_menu
+        else:
+            items = []
+        menus[rid] = {
+            "name": names.get(rid, f"Team {rid}"),
+            "is_open": r.get("isOpen", False),
+            "balance": r.get("balance"),
+            "items": items,
+        }
+
+    return jsonify({
+        "market_entries": enriched,
+        "menus": menus,
+        "turn_id": turn_id,
+    })
+
+
+@app.route("/waiting")
+def waiting_market():
+    return render_template_string(WAITING_MARKET_TEMPLATE)
 
 
 @app.route("/social")
