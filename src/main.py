@@ -269,7 +269,7 @@ class GameOrchestrator:
             name="intelligence_scan",
             description="Run full intelligence pipeline (tracker, competitor clustering)",
             valid_phases={"speaking"},
-            priority=10,
+            priority=5,
             execute_fn=self._skill_intelligence_scan,
         ))
 
@@ -279,7 +279,7 @@ class GameOrchestrator:
             description="Lightweight intelligence: fetch restaurant states only",
             # Valid in all phases where we can still act
             valid_phases={"speaking", "closed_bid", "waiting", "serving"},
-            priority=10,
+            priority=3,
             mid_turn_applicable=True,
             execute_fn=self._skill_quick_intelligence,
         ))
@@ -289,7 +289,7 @@ class GameOrchestrator:
             name="zone_selection",
             description="Select strategic zone via subagent router",
             valid_phases={"speaking", "closed_bid", "waiting"},
-            priority=20,
+            priority=8,
             execute_fn=self._skill_zone_selection,
         ))
 
@@ -328,6 +328,7 @@ class GameOrchestrator:
             description="Compute optimal bids via ILP",
             valid_phases={"closed_bid"},
             priority=10,
+            requires_skills=["zone_selection"],
             execute_fn=self._skill_bid_compute,
         ))
         so.register(Skill(
@@ -465,6 +466,15 @@ class GameOrchestrator:
 
         # Check if restaurant is open
         restaurant_open = our_state.get("is_open", False)
+
+        logger.info(
+            f"Context built: turn={turn_id}, phase={phase}, "
+            f"balance={balance}, reputation={reputation}, "
+            f"inventory={len(inventory)} types/"
+            f"{sum(inventory.values()) if inventory else 0} units, "
+            f"menu={len(menu_items)} items, open={restaurant_open}, "
+            f"mid_turn={is_mid}"
+        )
 
         return SkillContext(
             turn_id=turn_id,
@@ -759,6 +769,12 @@ class GameOrchestrator:
         try:
             zone = self.subagent_router.active_zone
             spending = 0.0 if ctx.phase in ("waiting", "serving") else 0.4
+            logger.info(
+                f"Menu planning: zone={zone}, phase={ctx.phase}, "
+                f"spending={spending}, balance={ctx.balance}, "
+                f"inventory_items={len(ctx.inventory)}, "
+                f"inventory_total={sum(ctx.inventory.values()) if ctx.inventory else 0}"
+            )
             decision = solve_zone_ilp(
                 zone=zone,
                 balance=ctx.balance,
@@ -769,16 +785,53 @@ class GameOrchestrator:
                 reputation=ctx.reputation,
                 spending_fraction=spending,
             )
+
+            # ── Zone fallback: if primary zone yields empty menu in
+            #    waiting phase (can't bid anymore), try broader zones ──
+            if not decision.menu and ctx.phase == "waiting" and ctx.inventory:
+                fallback_zones = [
+                    z for z in ["SPEED_CONTENDER", "BUDGET_OPPORTUNIST",
+                                "NICHE_SPECIALIST", "MARKET_ARBITRAGEUR"]
+                    if z != zone
+                ]
+                for fz in fallback_zones:
+                    logger.info(f"Menu empty for {zone} — trying fallback zone {fz}")
+                    decision = solve_zone_ilp(
+                        zone=fz,
+                        balance=ctx.balance,
+                        inventory=ctx.inventory,
+                        recipes=list(ctx.recipes.values()),
+                        demand_forecast=ctx.intel.get("demand_forecast", {}),
+                        competitor_briefings=ctx.intel.get("briefings", {}),
+                        reputation=ctx.reputation,
+                        spending_fraction=0.0,
+                    )
+                    if decision.menu:
+                        logger.info(
+                            f"Fallback zone {fz} produced {len(decision.menu)} items"
+                        )
+                        self.subagent_router.active_zone = fz
+                        break
+
             # Store for downstream skills
             self._latest_decision = decision
-            logger.info(f"Menu planned: {len(decision.menu)} items")
+            if decision.menu:
+                logger.info(
+                    f"Menu planned: {len(decision.menu)} items — "
+                    f"{[m['name'][:40] for m in decision.menu]}"
+                )
+            else:
+                logger.warning(
+                    f"Menu planning produced EMPTY menu for zone={zone}. "
+                    f"This means no eligible recipes can be cooked from current inventory."
+                )
             return SkillResult(
                 skill_name="menu_planning",
                 success=True,
                 data={"menu_size": len(decision.menu), "menu": decision.menu},
             )
         except Exception as e:
-            logger.error(f"Menu planning failed: {e}")
+            logger.error(f"Menu planning failed: {e}", exc_info=True)
             return SkillResult(
                 skill_name="menu_planning", success=False, error=str(e)
             )
@@ -795,6 +848,18 @@ class GameOrchestrator:
             menu = decision.menu
 
         if not menu:
+            # Last resort: check if bid_compute produced a menu (during closed_bid)
+            bid_result = self.skill_orchestrator.get_result("bid_compute")
+            if bid_result and bid_result.success:
+                bid_decision = getattr(self, "_latest_decision", None)
+                if bid_decision and hasattr(bid_decision, "menu") and bid_decision.menu:
+                    menu = bid_decision.menu
+                    logger.info(
+                        f"Using menu from bid_compute decision: {len(menu)} items"
+                    )
+
+        if not menu:
+            logger.warning("No menu to save — planning failed or produced empty menu")
             return SkillResult(
                 skill_name="menu_save", success=False,
                 error="No menu to save (planning failed or empty)"
@@ -837,6 +902,11 @@ class GameOrchestrator:
         """Compute optimal bids via ILP."""
         try:
             zone = self.subagent_router.active_zone
+            logger.info(
+                f"Bid compute: zone={zone}, balance={ctx.balance}, "
+                f"inventory={len(ctx.inventory)} types, "
+                f"recipes={len(ctx.recipes)}"
+            )
             decision = solve_zone_ilp(
                 zone=zone,
                 balance=ctx.balance,
@@ -868,10 +938,17 @@ class GameOrchestrator:
             bids = bid_result.data.get("bids", [])
 
         if not bids:
-            logger.warning("No bids to submit — skipping")
+            logger.warning("No bids to submit — bid_compute produced no bids")
             return SkillResult(
                 skill_name="bid_submit", success=True,
                 data={"submitted": 0},
+            )
+
+        # Log each bid for debugging
+        for bid in bids:
+            logger.info(
+                f"  Bid: {bid.get('quantity')}x {bid.get('ingredient')} "
+                f"@ {bid.get('bid')} each"
             )
 
         try:
@@ -894,25 +971,53 @@ class GameOrchestrator:
     async def _skill_inventory_verify(self, ctx: SkillContext) -> SkillResult:
         """Verify menu items can be cooked with actual post-bid inventory."""
         current_menu = list(self.serving.menu.values())
+
+        # Log inventory state for debugging
+        logger.info(
+            f"Inventory verify: {len(ctx.inventory)} ingredient types, "
+            f"{sum(ctx.inventory.values()) if ctx.inventory else 0} total units"
+        )
+        if ctx.inventory:
+            for ing, qty in sorted(ctx.inventory.items()):
+                logger.debug(f"  inventory: {qty}x {ing}")
+
+        logger.info(f"Current menu has {len(current_menu)} items to verify")
+
         verified = []
 
         for item in current_menu:
             recipe = self.recipe_db.get(item["name"])
             if recipe:
-                can_cook = all(
-                    ctx.inventory.get(ing, 0) >= qty
-                    for ing, qty in recipe.get("ingredients", {}).items()
-                )
-                if can_cook:
+                missing = []
+                for ing, qty in recipe.get("ingredients", {}).items():
+                    have = ctx.inventory.get(ing, 0)
+                    if have < qty:
+                        missing.append(f"{ing} (need={qty}, have={have})")
+                if not missing:
                     verified.append(item)
                 else:
-                    logger.info(f"Removing {item['name']} — insufficient ingredients")
+                    logger.info(
+                        f"Removing {item['name']} — insufficient ingredients: "
+                        f"{', '.join(missing[:3])}{'...' if len(missing) > 3 else ''}"
+                    )
 
         # If menu shrunk too much, flag for replanning
         if len(verified) < 2 and self.recipe_db:
-            logger.info("Menu too small after verify — will be replanned by menu_planning skill")
+            logger.warning(
+                "Menu too small after verify — forcing menu replan. "
+                f"Original={len(current_menu)}, verified={len(verified)}"
+            )
             # Clear current menu so menu_planning picks up
             self.serving.set_menu([])
+            # CRITICAL: Allow menu_planning + menu_save to re-execute
+            # They may have run in a prior phase (closed_bid) but the
+            # menu they produced is no longer valid.
+            self.skill_orchestrator.executed_this_turn.discard("menu_planning")
+            self.skill_orchestrator.executed_this_turn.discard("menu_save")
+            self.skill_orchestrator.results_this_turn.pop("menu_planning", None)
+            self.skill_orchestrator.results_this_turn.pop("menu_save", None)
+            self._latest_decision = None  # clear stale decision
+            logger.info("Cleared menu_planning/menu_save from executed — will rerun this phase")
             return SkillResult(
                 skill_name="inventory_verify", success=True,
                 data={"verified_count": 0, "needs_replan": True},
@@ -931,6 +1036,15 @@ class GameOrchestrator:
         """Buy missing / sell surplus ingredients."""
         try:
             current_menu = list(self.serving.menu.values())
+            if not current_menu:
+                logger.warning(
+                    "Market ops: No menu set — skipping market operations. "
+                    "Selling without a menu would dump all inventory as surplus."
+                )
+                return SkillResult(
+                    skill_name="market_ops", success=True,
+                    data={"action": "skipped_no_menu"},
+                )
             await self._market_operations(
                 inventory=ctx.inventory,
                 verified_menu=current_menu,
@@ -967,11 +1081,21 @@ class GameOrchestrator:
 
     async def _skill_serving_prep(self, ctx: SkillContext) -> SkillResult:
         """Pre-start serving pipeline with inventory snapshot."""
+        # Guard: don't start serving pipeline if there's no menu
+        if not self.serving.menu:
+            logger.warning("Serving prep skipped — no menu set")
+            return SkillResult(
+                skill_name="serving_prep", success=False,
+                error="No menu to serve — serving pipeline not started",
+            )
         try:
             await self.serving.start_serving(ctx.turn_id)
             if ctx.inventory:
                 self.serving.set_inventory_snapshot(ctx.inventory)
-            logger.info("Serving pipeline ready")
+            logger.info(
+                f"Serving pipeline ready: menu={len(self.serving.menu)} items, "
+                f"inventory={sum(ctx.inventory.values()) if ctx.inventory else 0} units"
+            )
             return SkillResult(skill_name="serving_prep", success=True)
         except Exception as e:
             logger.error(f"Serving prep failed: {e}")

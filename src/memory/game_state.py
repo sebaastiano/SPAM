@@ -56,13 +56,15 @@ class GameStateMemory:
             self.current = state
         self.history.append(copy.deepcopy(self.current))
 
-    def end_turn(self):
+    def end_turn(self, turn_id: int | None = None):
         """
         End-of-turn processing.
         
         CRITICAL: ALL inventory expires at end of turn.
         Record snapshot then zero out inventory.
         """
+        if turn_id is not None:
+            self.current.turn_id = turn_id
         self.snapshot()
         self.current.inventory = {}
         self.current.clients_served = 0
