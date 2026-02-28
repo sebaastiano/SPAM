@@ -34,10 +34,25 @@ def select_zone(
     """
     Select the optimal zone for this turn.
 
-    Score each zone by:
-      revenue_potential × 0.4 + inventory_fit × 0.3
-      − competitor_penalty × 0.2 + reputation_bonus × 0.1
+    INTELLIGENCE-DRIVEN ZONE SELECTION:
+    - When no active competitors: ALWAYS pick PREMIUM_MONOPOLIST
+      (highest revenue per customer, no undercutting risk)
+    - When competitors exist: score zones by revenue, fit, competition, reputation
     """
+    # Count active competitors (with menu and/or bids)
+    active_competitors = sum(
+        1 for b in competitor_briefings.values()
+        if b.get("is_active", True) and b.get("menu_size", 0) > 0
+    )
+
+    # MONOPOLY EXPLOITATION: no active competition → premium zone always
+    if active_competitors == 0:
+        logger.info(
+            f"No active competitors detected — selecting PREMIUM_MONOPOLIST "
+            f"for maximum revenue per customer (monopoly exploitation)"
+        )
+        return "PREMIUM_MONOPOLIST"
+
     zone_scores: dict[str, float] = {}
 
     for zone in ZONES:
@@ -47,7 +62,7 @@ def select_zone(
         # 2. Inventory fit
         inventory_fit = _calculate_inventory_alignment(zone, inventory, recipes)
 
-        # 3. Competitor penalty
+        # 3. Competitor penalty (scaled by actual active count)
         competitor_penalty = _count_competitors_in_zone(
             zone, competitor_clusters, competitor_briefings
         )
@@ -55,23 +70,34 @@ def select_zone(
         # 4. Reputation bonus
         reputation_bonus = _reputation_alignment(zone, reputation)
 
+        # 5. Monopoly bonus: fewer competitors = bigger bonus for premium zones
+        monopoly_bonus = 0.0
+        if active_competitors <= 2:
+            if zone == "PREMIUM_MONOPOLIST":
+                monopoly_bonus = 0.3 * (1 - active_competitors / 5)
+            elif zone == "NICHE_SPECIALIST":
+                monopoly_bonus = 0.15 * (1 - active_competitors / 5)
+
         score = (
             revenue_potential * 0.4
             + inventory_fit * 0.3
             - competitor_penalty * 0.2
             + reputation_bonus * 0.1
+            + monopoly_bonus
         )
 
         zone_scores[zone] = score
         logger.debug(
             f"Zone {zone}: rev={revenue_potential:.2f} inv={inventory_fit:.2f} "
-            f"comp={competitor_penalty:.2f} rep={reputation_bonus:.2f} → {score:.2f}"
+            f"comp={competitor_penalty:.2f} rep={reputation_bonus:.2f} "
+            f"mono={monopoly_bonus:.2f} → {score:.2f}"
         )
 
     best_zone = max(zone_scores, key=zone_scores.get)
     logger.info(
         f"Selected zone: {best_zone} "
-        f"(score={zone_scores[best_zone]:.2f})"
+        f"(score={zone_scores[best_zone]:.2f}, "
+        f"active_competitors={active_competitors})"
     )
 
     return best_zone

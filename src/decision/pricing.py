@@ -1,7 +1,7 @@
 """
 SPAM! — Pricing Module
 ========================
-Menu pricing logic based on zone, archetype, and reputation.
+Menu pricing logic based on zone, intelligence data, and competition levels.
 """
 
 import logging
@@ -20,11 +20,13 @@ def compute_menu_prices(
     zone: str,
     reputation: float,
     competitor_avg_price: float = 120.0,
+    competitor_briefings: dict[int, dict] | None = None,
 ) -> list[dict]:
     """
     Compute optimized prices for all menu items.
 
-    Returns menu items with updated prices.
+    INTELLIGENCE-DRIVEN: uses competitor data when available.
+    When no competition: prices at archetype ceiling for max profit.
     """
     target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
     if target_archetypes:
@@ -33,8 +35,21 @@ def compute_menu_prices(
         primary_archetype = "Famiglie Orbitali"
 
     base_ceiling = ARCHETYPE_CEILINGS.get(primary_archetype, 120)
-    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.7)
     rep_mult = 1.0 + (reputation - 50) / 200
+
+    # Assess competition from intelligence
+    active_competitors = 0
+    if competitor_briefings:
+        active_competitors = sum(
+            1 for b in competitor_briefings.values()
+            if b.get("is_active", True) and b.get("menu_size", 0) > 0
+        )
+
+    # When no competition, don't apply zone discount factor — price at ceiling
+    if active_competitors == 0:
+        zone_factor = 1.0  # monopoly: full ceiling price
+    else:
+        zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.7)
 
     priced = []
     for item in menu_items:
@@ -44,7 +59,7 @@ def compute_menu_prices(
         price = int(base_ceiling * rep_mult * zone_factor * prestige_mult)
 
         # Ensure price is within reasonable bounds
-        price = max(10, min(price, int(base_ceiling * 1.2)))
+        price = max(10, min(price, int(base_ceiling * 1.3)))
 
         priced.append({
             "name": item["name"],
@@ -58,13 +73,27 @@ def adjust_prices_competitive(
     menu_items: list[dict],
     competitor_prices: list[float],
     zone: str,
+    competitor_briefings: dict[int, dict] | None = None,
 ) -> list[dict]:
     """
-    Adjust prices based on competitor pricing.
+    Adjust prices based on competitor pricing and intelligence data.
 
-    For premium zones: stay near ceiling (don't undercut)
-    For budget zones: undercut competitors by 10-20%
+    When no active competitors: maintain ceiling prices (monopoly profit).
+    When competitors active: strategy-specific adjustment.
     """
+    # Check if there are actually active competitors
+    active_competitors = 0
+    if competitor_briefings:
+        active_competitors = sum(
+            1 for b in competitor_briefings.values()
+            if b.get("is_active", True) and b.get("menu_size", 0) > 0
+        )
+
+    if active_competitors == 0:
+        # Monopoly — keep prices high, no undercutting needed
+        logger.info("No active competitors — maintaining ceiling prices")
+        return menu_items
+
     if not competitor_prices:
         return menu_items
 

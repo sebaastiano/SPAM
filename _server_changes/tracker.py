@@ -1064,6 +1064,56 @@ def index():
 
 from flask import jsonify, request as flask_request
 
+
+@app.route("/api/all_restaurants")
+def api_all_restaurants():
+    """Return all tracked restaurants (flattened + raw) indexed by id."""
+    with state_lock:
+        result = {}
+        for rid, raw in state["restaurants_raw"].items():
+            entry = dict(raw)
+            entry["_flat"] = state["restaurants"].get(rid, {})
+            entry["id"] = rid
+            result[rid] = entry
+    return jsonify(result)
+
+
+@app.route("/api/bid_history")
+def api_bid_history():
+    """Return bid history, optionally filtered by turn_id."""
+    turn_filter = flask_request.args.get("turn_id", type=int)
+    with state_lock:
+        bids = []
+        for (turn_id, _bid_id), bid in state["bid_history"].items():
+            if turn_filter is None or turn_id == turn_filter:
+                bids.append(bid)
+    return jsonify(bids)
+
+
+@app.route("/api/market")
+def api_market():
+    """Return all currently tracked market entries."""
+    with state_lock:
+        entries = list(state["market"].values())
+    return jsonify(entries)
+
+
+@app.route("/api/meals")
+def api_meals():
+    """Return tracked meals, optionally filtered by turn_id and restaurant_id."""
+    turn_filter = flask_request.args.get("turn_id", type=int)
+    rid_filter = flask_request.args.get("restaurant_id", type=int)
+    with state_lock:
+        meals = []
+        for (turn_id, r_id, _meal_id), meal in state["meals"].items():
+            if turn_filter is not None and turn_id != turn_filter:
+                continue
+            if rid_filter is not None and r_id != rid_filter:
+                continue
+            meals.append(meal)
+    return jsonify(meals)
+
+
 @app.route("/api/restaurant/<rid>")
 def api_restaurant_detail(rid):
     """Return full live detail for a restaurant (raw + change log + meals)."""

@@ -452,6 +452,12 @@ class GameOrchestrator:
             our_state = await load_our_restaurant() or {}
 
         turn_id = data.get("turn_id", self.phase_router.current_turn)
+        # CRITICAL: Never use turn_id=0 — it causes /meals?turn_id=0 → 400
+        if not turn_id or turn_id <= 0:
+            turn_id = self.phase_router.current_turn
+        if not turn_id or turn_id <= 0:
+            turn_id = 1  # absolute fallback
+            logger.warning(f"turn_id was 0, using fallback turn_id={turn_id}")
         phase = data.get("phase", self.phase_router.current_phase or "speaking")
         is_mid = data.get("is_mid_turn_entry", False)
         skipped = data.get("skipped_phases", [])
@@ -1319,6 +1325,11 @@ class GameOrchestrator:
         Market buy/sell operations:
         - BUY: ingredients we need for the menu but don't have enough of
         - SELL: ingredients we have surplus of (not needed by any menu recipe)
+
+        Prices are INTELLIGENCE-DRIVEN:
+        - Use competitor briefings to gauge demand
+        - When no competition is detected, use minimum prices (exploit monopoly)
+        - Never use wallet-based pricing
         """
         # Compute what the menu needs
         needed: dict[str, int] = {}
@@ -1327,12 +1338,39 @@ class GameOrchestrator:
             for ing, qty in recipe.get("ingredients", {}).items():
                 needed[ing] = needed.get(ing, 0) + qty
 
+        # Assess competition level from intelligence
+        intel = self._latest_intel
+        briefings = intel.get("briefings", {})
+        active_competitors = sum(
+            1 for b in briefings.values()
+            if b.get("is_active", True) and b.get("menu_size", 0) > 0
+        )
+        competition_level = min(1.0, active_competitors / 5.0)  # 0.0 = monopoly
+
         # BUY: ingredients where inventory < needed
         for ing, need_qty in needed.items():
             have = inventory.get(ing, 0)
             deficit = need_qty - have
             if deficit > 0:
-                buy_price = max(10, int(balance * 0.02))
+                # Intelligence-driven buy price:
+                # - Base: 10 (minimum viable bid)
+                # - If competitors exist and want this ingredient, bid higher
+                # - If no competition: bid MINIMUM to maximize profit
+                base_price = 10
+                if briefings:
+                    from src.decision.ilp_solver import compute_bid_price
+                    intel_price = compute_bid_price(
+                        ing,
+                        briefings,
+                        intel.get("demand_forecast", {}),
+                    )
+                    # Scale by competition: no competition = use base, competition = use intel
+                    buy_price = int(base_price + (intel_price - base_price) * competition_level)
+                else:
+                    buy_price = base_price
+
+                buy_price = max(10, min(buy_price, 100))  # hard cap at 100
+
                 try:
                     await self.mcp_client.call_tool(
                         "create_market_entry",
@@ -1351,7 +1389,8 @@ class GameOrchestrator:
         needed_ings = set(needed.keys())
         for ing, qty in inventory.items():
             if ing not in needed_ings and qty > 0:
-                sell_price = max(5, int(balance * 0.01))
+                # Sell at a premium — let others pay more
+                sell_price = max(15, int(30 * (1 + competition_level)))
                 try:
                     await self.mcp_client.call_tool(
                         "create_market_entry",

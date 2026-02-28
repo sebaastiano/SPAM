@@ -151,6 +151,7 @@ MID_TURN_CATCHUP_SKILLS: dict[str, list[str]] = {
         "zone_selection",
         "menu_planning",
         "menu_save",
+        "market_ops",
         "diplomacy_send",
     ],
     "closed_bid": [
@@ -161,6 +162,7 @@ MID_TURN_CATCHUP_SKILLS: dict[str, list[str]] = {
         "menu_save",
         "bid_compute",
         "bid_submit",
+        "market_ops",           # buy missing ingredients via market too
     ],
     "waiting": [
         # Missed speaking + bidding: work with whatever we have

@@ -101,7 +101,11 @@ class PhaseRouter:
         data format: {"phase": "serving", "turn_id": 3, ...}
         """
         new_phase = data.get("phase", "").lower()
-        turn_id = data.get("turn_id", self.current_turn)
+        raw_turn = data.get("turn_id", 0)
+        # CRITICAL: Never let turn_id regress to 0 from SSE events that
+        # don't carry a valid turn_id.  game_started sets it correctly;
+        # game_phase_changed often sends turn_id=0 which would corrupt state.
+        turn_id = raw_turn if raw_turn and raw_turn > 0 else self.current_turn
 
         if new_phase not in self.VALID_PHASES:
             logger.warning(f"Unknown phase received: {new_phase}")
@@ -181,6 +185,10 @@ class PhaseRouter:
     async def handle_game_started(self, data: dict):
         """Called on game_started SSE event."""
         turn_id = data.get("turn_id", 0)
+        if turn_id <= 0:
+            # Fallback: keep existing turn or start at 1
+            turn_id = max(self.current_turn + 1, 1)
+            logger.warning(f"game_started had turn_id=0, using {turn_id}")
         self.current_phase = None
         self.current_turn = turn_id  # preserve the real turn_id from the server
         self._first_phase_received = False

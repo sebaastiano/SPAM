@@ -55,6 +55,23 @@ class DiplomacyAgent:
 
         Returns list of sent message records.
         """
+        # Quick-exit: if no briefings at all, nothing to do
+        if not competitor_briefings:
+            logger.info("No competitor briefings available — skipping diplomacy")
+            return []
+
+        # In monopoly / low-competition, skip diplomacy entirely to save time
+        active = [
+            b for b in competitor_briefings.values()
+            if b.get("strategy") != "DORMANT"
+        ]
+        if len(active) <= 1:
+            logger.info(
+                f"Low competition ({len(active)} active competitors) — "
+                f"skipping diplomacy, focusing on serving"
+            )
+            return []
+
         # 1. Select targets and strategies
         actions = self.bandit.select_target_and_strategy(competitor_briefings)
         if not actions:

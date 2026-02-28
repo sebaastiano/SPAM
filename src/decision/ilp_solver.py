@@ -105,7 +105,7 @@ def solve_zone_ilp(
 
     # ── Per-recipe revenue (price estimate) ──
     revenues = np.array(
-        [compute_menu_price(r, zone, reputation) for r in eligible_recipes],
+        [compute_menu_price(r, zone, reputation, competitor_briefings) for r in eligible_recipes],
         dtype=float,
     )
 
@@ -258,7 +258,7 @@ def _greedy_fallback(
 
     for entry in selected:
         recipe = entry["recipe"]
-        price = compute_menu_price(recipe, zone, reputation)
+        price = compute_menu_price(recipe, zone, reputation, competitor_briefings)
         decision.menu.append({"name": recipe["name"], "price": int(price)})
 
     needed_ingredients: dict[str, int] = {}
@@ -368,12 +368,16 @@ def _score_recipes(
 
 
 def compute_menu_price(
-    recipe: dict, zone: str, reputation: float
+    recipe: dict, zone: str, reputation: float,
+    competitor_briefings: dict[int, dict] | None = None,
 ) -> float:
     """
     Compute menu price for a dish.
 
-    Price = archetype_ceiling × reputation_multiplier × zone_factor
+    INTELLIGENCE-DRIVEN PRICING:
+    - When no competitors active: price at ceiling (no undercutting needed)
+    - When competitors exist: adjust relative to their pricing
+    - Always maximize revenue by pricing as high as customers will pay
     """
     target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
     if target_archetypes:
@@ -393,7 +397,38 @@ def compute_menu_price(
     prestige = recipe.get("prestige", 50)
     prestige_mult = 1.0 + (prestige - 50) / 200
 
-    return max(10, int(base_price * rep_mult * zone_factor * prestige_mult))
+    price = int(base_price * rep_mult * zone_factor * prestige_mult)
+
+    # INTELLIGENCE ADJUSTMENT: if we have competitor data, adjust
+    if competitor_briefings:
+        active_competitors = sum(
+            1 for b in competitor_briefings.values()
+            if b.get("is_active", True) and b.get("menu_size", 0) > 0
+        )
+        if active_competitors == 0:
+            # NO competition — price at ceiling for maximum profit
+            price = int(base_price * rep_mult * prestige_mult)
+            # Don't apply zone_factor discount when we're a monopoly!
+        else:
+            # Competition exists — use competitor-aware pricing
+            competitor_prices = [
+                b.get("menu_price_avg", 100)
+                for b in competitor_briefings.values()
+                if b.get("menu_price_avg", 0) > 0
+            ]
+            if competitor_prices:
+                avg_comp_price = sum(competitor_prices) / len(competitor_prices)
+                if zone == "PREMIUM_MONOPOLIST":
+                    # Stay premium, match or exceed competitors
+                    price = max(price, int(avg_comp_price * 1.05))
+                elif zone == "BUDGET_OPPORTUNIST":
+                    # Undercut slightly
+                    price = min(price, int(avg_comp_price * 0.9))
+
+    # Ensure price is within reasonable bounds
+    price = max(10, min(price, int(base_price * 1.3)))
+
+    return price
 
 
 def compute_bid_price(
@@ -404,11 +439,22 @@ def compute_bid_price(
     """
     Compute bid price for an ingredient.
 
-    bid = max(predicted_competitor_bids) + epsilon
+    STRATEGY: Bid as LOW as possible to maximize profit margin.
+    Only bid higher when competitors are actively competing for the same ingredient.
+
+    When no competition: bid MINIMUM (10) — monopoly exploitation.
     """
+    # Count active competitors (those with menu/bids)
+    active_competitors = sum(
+        1 for b in competitor_briefings.values()
+        if b.get("is_active", True) and b.get("menu_size", 0) > 0
+    )
+
     predicted_competitor_bids = []
 
     for rid, brief in competitor_briefings.items():
+        if not brief.get("is_active", True) or brief.get("menu_size", 0) == 0:
+            continue
         if ingredient in brief.get("top_bid_ingredients", []):
             est_bid = brief.get("predicted_bid_spend", 100) / max(
                 len(brief.get("top_bid_ingredients", [1])), 1
@@ -423,15 +469,20 @@ def compute_bid_price(
             predicted_competitor_bids.append(est_bid)
 
     if not predicted_competitor_bids:
-        # Check if it's a high-delta ingredient
+        # NO competition for this ingredient → bid MINIMUM
+        # The lower we bid, the more profit we keep
+        if active_competitors == 0:
+            return 10  # absolute minimum — monopoly pricing
+        # Some competitors exist but don't want this specific ingredient
         high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
-        base = 40 if ingredient in high_delta_names else 20
+        base = 15 if ingredient in high_delta_names else 10
         return base
 
+    # Competitors want this ingredient — bid just above their predicted bid
     predicted_max = max(predicted_competitor_bids)
 
-    # Demand pressure
+    # Demand pressure (only if competition exists)
     demand = demand_forecast.get(ingredient, 0)
-    demand_multiplier = 1.0 + min(demand / 20, 0.5)
+    demand_multiplier = 1.0 + min(demand / 20, 0.3)
 
     return int(predicted_max * demand_multiplier) + 1
