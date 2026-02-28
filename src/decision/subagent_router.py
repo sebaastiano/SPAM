@@ -8,7 +8,7 @@ Each zone has its own Agent with tailored system prompt.
 import logging
 
 from datapizza.agents import Agent
-from datapizza.clients.openai.openai_client import OpenAIClient
+from datapizza.clients.openai_like import OpenAILikeClient
 from datapizza.tools.mcp_client import MCPClient
 
 from src.config import (
@@ -53,7 +53,7 @@ class SubagentRouter:
 
         for zone in ZONES:
             prompt = ZONE_SYSTEM_PROMPTS.get(zone, "")
-            client = OpenAIClient(
+            client = OpenAILikeClient(
                 api_key=REGOLO_API_KEY,
                 model=PRIMARY_MODEL,
                 base_url=REGOLO_BASE_URL,

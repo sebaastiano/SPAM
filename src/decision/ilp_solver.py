@@ -375,8 +375,10 @@ def compute_menu_price(
     Compute menu price for a dish.
 
     INTELLIGENCE-DRIVEN PRICING:
-    - When no competitors active: price at ceiling (no undercutting needed)
-    - When competitors exist: adjust relative to their pricing
+    - Uses CONNECTION STATUS (is_connected) to detect active competitors,
+      NOT menu_size (which is 0 during speaking/closed_bid phases).
+    - When no competitors connected: price at ceiling (monopoly)
+    - When competitors connected: adjust relative to their pricing
     - Always maximize revenue by pricing as high as customers will pay
     """
     target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
@@ -399,11 +401,14 @@ def compute_menu_price(
 
     price = int(base_price * rep_mult * zone_factor * prestige_mult)
 
-    # INTELLIGENCE ADJUSTMENT: if we have competitor data, adjust
+    # INTELLIGENCE ADJUSTMENT: if we have competitor data, adjust.
+    # Use is_connected (presence in /restaurants API) to detect active
+    # competitors — this works during ALL phases including speaking,
+    # unlike menu_size which is 0 before menus are set.
     if competitor_briefings:
         active_competitors = sum(
             1 for b in competitor_briefings.values()
-            if b.get("is_active", True) and b.get("menu_size", 0) > 0
+            if b.get("is_connected", False)
         )
         if active_competitors == 0:
             # NO competition — price at ceiling for maximum profit
@@ -439,21 +444,36 @@ def compute_bid_price(
     """
     Compute bid price for an ingredient.
 
-    STRATEGY: Bid as LOW as possible to maximize profit margin.
-    Only bid higher when competitors are actively competing for the same ingredient.
+    STRATEGY: Scale bids proportionally to detected competition.
+    Uses CONNECTION STATUS (is_connected) to detect active competitors
+    instead of menu_size (which is 0 during speaking phase).
 
-    When no competition: bid MINIMUM (10) — monopoly exploitation.
+    Bid scaling:
+    - 0 connected competitors: minimum bids (true monopoly)
+    - 1-3 competitors: moderate bids
+    - 4+ competitors: aggressive bids scaled with competition
+    - Always stay within revenue-optimising bounds
     """
-    # Count active competitors (those with menu/bids)
+    # Count active competitors by CONNECTION STATUS — if a restaurant
+    # appears in /restaurants, it's connected and likely bidding.
+    # This works correctly during speaking & closed_bid phases,
+    # unlike menu_size which is 0 before menus are set.
     active_competitors = sum(
         1 for b in competitor_briefings.values()
-        if b.get("is_active", True) and b.get("menu_size", 0) > 0
+        if b.get("is_connected", False)
     )
+
+    # Competition intensity factor: scales from 0.0 (no competition)
+    # to 1.0 (saturated at 8 competitors)
+    competition_factor = min(active_competitors / 8.0, 1.0)
+
+    high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
+    is_high_delta = ingredient in high_delta_names
 
     predicted_competitor_bids = []
 
     for rid, brief in competitor_briefings.items():
-        if not brief.get("is_active", True) or brief.get("menu_size", 0) == 0:
+        if not brief.get("is_connected", False):
             continue
         if ingredient in brief.get("top_bid_ingredients", []):
             est_bid = brief.get("predicted_bid_spend", 100) / max(
@@ -470,22 +490,30 @@ def compute_bid_price(
 
     if not predicted_competitor_bids:
         # No specific competitor intel for this ingredient.
-        # Use a reasonable floor — bidding too low loses auctions.
+        # Scale base bid proportionally to competition level.
         if active_competitors == 0:
-            # Even in "monopoly" mode use a sensible floor—
-            # briefings may under-count real competition.
-            high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
-            return 25 if ingredient in high_delta_names else 18
-        # Some competitors exist but don't want this specific ingredient
-        high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
-        base = 30 if ingredient in high_delta_names else 20
+            # True monopoly — bid at floor
+            return 25 if is_high_delta else 18
+
+        # Proportional scaling: more connected competitors → higher bids
+        # High-delta ingredients: 25 (low comp) → 40 (high comp)
+        # Normal ingredients:     18 (low comp) → 30 (high comp)
+        if is_high_delta:
+            base = int(25 + competition_factor * 15)
+        else:
+            base = int(18 + competition_factor * 12)
         return base
 
-    # Competitors want this ingredient — bid just above their predicted bid
+    # Competitors want this ingredient — bid above their predicted bid,
+    # scaled by competition intensity.
     predicted_max = max(predicted_competitor_bids)
 
-    # Demand pressure (only if competition exists)
+    # Demand pressure
     demand = demand_forecast.get(ingredient, 0)
     demand_multiplier = 1.0 + min(demand / 20, 0.3)
 
-    return int(predicted_max * demand_multiplier) + 1
+    # Competition scaling: more active bidders → bid more aggressively
+    # to ensure we win. Scale from 1.0x to 1.4x.
+    competition_scale = 1.0 + 0.05 * min(active_competitors, 8)
+
+    return int(predicted_max * demand_multiplier * competition_scale) + 1

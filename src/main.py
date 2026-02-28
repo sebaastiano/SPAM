@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from datapizza.clients.openai.openai_client import OpenAIClient
+from datapizza.clients.openai_like import OpenAILikeClient
 from datapizza.tools.mcp_client import MCPClient
 
 from src.config import (
@@ -104,7 +104,9 @@ class GameOrchestrator:
 
     def __init__(self):
         # ── LLM Clients ──
-        self.primary_client = OpenAIClient(
+        # Use OpenAILikeClient (chat completions API), NOT OpenAIClient
+        # (responses API) — Regolo.ai returns 403 on /v1/responses.
+        self.primary_client = OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=PRIMARY_MODEL,
             base_url=REGOLO_BASE_URL,
@@ -113,7 +115,7 @@ class GameOrchestrator:
                 "Make optimal decisions for bidding, menu, and serving."
             ),
         )
-        self.fast_client = OpenAIClient(
+        self.fast_client = OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=FAST_MODEL,
             base_url=REGOLO_BASE_URL,
@@ -744,8 +746,16 @@ class GameOrchestrator:
         try:
             intel = await self.intelligence.run(ctx.turn_id)
             self._latest_intel = intel
+
+            # Log connection-based competition awareness
+            briefings = intel.get("briefings", {})
+            connected_count = sum(
+                1 for b in briefings.values()
+                if b.get("is_connected", False)
+            )
             logger.info(
-                f"Intelligence: {len(intel.get('briefings', {}))} briefings, "
+                f"Intelligence: {len(briefings)} briefings, "
+                f"{connected_count} connected competitors, "
                 f"{len(intel.get('clusters', {}))} clusters"
             )
             return SkillResult(
@@ -786,15 +796,47 @@ class GameOrchestrator:
                 if rid and rid != TEAM_ID:
                     all_states[rid] = r
 
+            # Build minimal connection-based briefings so bid/price
+            # logic can detect active (connected) competitors.
+            # Any restaurant visible in /restaurants is connected.
+            minimal_briefings = {}
+            for rid, rdata in all_states.items():
+                menu_raw = rdata.get("menu") or {}
+                menu_items = (
+                    menu_raw.get("items", [])
+                    if isinstance(menu_raw, dict)
+                    else (menu_raw if isinstance(menu_raw, list) else [])
+                )
+                menu_prices = [
+                    it.get("price", 0) for it in menu_items
+                    if isinstance(it, dict)
+                ]
+                minimal_briefings[rid] = {
+                    "name": rdata.get("name", f"team {rid}"),
+                    "is_connected": True,  # present → connected
+                    "menu_size": len(menu_items),
+                    "menu_price_avg": (
+                        sum(menu_prices) / len(menu_prices)
+                        if menu_prices else 0
+                    ),
+                    "strategy": "UNCLASSIFIED",
+                    "top_bid_ingredients": [],
+                    "predicted_bid_spend": 0,
+                    "balance": rdata.get("balance", 0),
+                    "reputation": rdata.get("reputation", 100),
+                    "threat_level": 0.5,
+                }
+
             self._latest_intel = {
-                "briefings": {},
+                "briefings": minimal_briefings,
                 "clusters": {},
                 "all_states": all_states,
                 "demand_forecast": {},
                 "features": {},
             }
             logger.info(
-                f"Quick intelligence: {len(all_states)} competitor states fetched"
+                f"Quick intelligence: {len(all_states)} competitor states fetched, "
+                f"{len(minimal_briefings)} connection-based briefings generated"
             )
             return SkillResult(
                 skill_name="quick_intelligence",

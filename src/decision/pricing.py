@@ -37,12 +37,13 @@ def compute_menu_prices(
     base_ceiling = ARCHETYPE_CEILINGS.get(primary_archetype, 120)
     rep_mult = 1.0 + (reputation - 50) / 200
 
-    # Assess competition from intelligence
+    # Assess competition from intelligence — use CONNECTION STATUS
+    # (is_connected) instead of menu_size, which is 0 during speaking phase.
     active_competitors = 0
     if competitor_briefings:
         active_competitors = sum(
             1 for b in competitor_briefings.values()
-            if b.get("is_active", True) and b.get("menu_size", 0) > 0
+            if b.get("is_connected", False)
         )
 
     # When no competition, don't apply zone discount factor — price at ceiling
@@ -81,12 +82,13 @@ def adjust_prices_competitive(
     When no active competitors: maintain ceiling prices (monopoly profit).
     When competitors active: strategy-specific adjustment.
     """
-    # Check if there are actually active competitors
+    # Check if there are actually active competitors — use CONNECTION
+    # STATUS, not menu_size (which is 0 during speaking phase).
     active_competitors = 0
     if competitor_briefings:
         active_competitors = sum(
             1 for b in competitor_briefings.values()
-            if b.get("is_active", True) and b.get("menu_size", 0) > 0
+            if b.get("is_connected", False)
         )
 
     if active_competitors == 0:

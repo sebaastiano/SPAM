@@ -8,7 +8,7 @@ Parameterized with per-competitor tactical briefings.
 
 import logging
 
-from datapizza.clients.openai.openai_client import OpenAIClient
+from datapizza.clients.openai_like import OpenAILikeClient
 
 from src.config import (
     REGOLO_API_KEY,
@@ -34,16 +34,18 @@ class PseudoGAN:
 
     def __init__(
         self,
-        generator_client: OpenAIClient | None = None,
-        discriminator_client: OpenAIClient | None = None,
+        generator_client: OpenAILikeClient | None = None,
+        discriminator_client: OpenAILikeClient | None = None,
     ):
-        self.generator = generator_client or OpenAIClient(
+        # Use OpenAILikeClient (chat completions API), NOT OpenAIClient
+        # (responses API) — Regolo.ai returns 403 on /v1/responses.
+        self.generator = generator_client or OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=PRIMARY_MODEL,
             base_url=REGOLO_BASE_URL,
             system_prompt="You are a diplomatic message crafter for a competitive cooking game.",
         )
-        self.discriminator = discriminator_client or OpenAIClient(
+        self.discriminator = discriminator_client or OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=FAST_MODEL,
             base_url=REGOLO_BASE_URL,

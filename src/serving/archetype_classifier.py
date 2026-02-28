@@ -1,7 +1,7 @@
 """
 SPAM! — Archetype Classifier
 ===============================
-Uses Regolo.ai (gpt-oss-120b) via datapizza OpenAIClient to infer the
+Uses Regolo.ai (gpt-oss-120b) via datapizza OpenAILikeClient to infer the
 client archetype from the natural-language order text.
 
 Why this exists:
@@ -36,7 +36,7 @@ import json
 import logging
 from functools import lru_cache
 
-from datapizza.clients.openai.openai_client import OpenAIClient
+from datapizza.clients.openai_like import OpenAILikeClient
 
 from src.config import REGOLO_API_KEY, REGOLO_BASE_URL, PRIMARY_MODEL
 
@@ -96,20 +96,20 @@ class ArchetypeClassifier:
     """
     Infer client archetype from order text via Regolo.ai LLM call.
 
-    Uses gpt-oss-120b through datapizza's OpenAIClient pointed at
-    Regolo's /v1 endpoint, as mandated by the hackathon guidelines.
+    Uses gpt-oss-120b through datapizza's OpenAILikeClient pointed at
+    Regolo's /v1/chat/completions endpoint, as mandated by the hackathon guidelines.
 
     The call is async and non-blocking; the serving pipeline can
     fire-and-forget or await the result depending on latency budget.
     """
 
-    def __init__(self, client: OpenAIClient | None = None):
+    def __init__(self, client: OpenAILikeClient | None = None):
         """
         Args:
-            client: Pre-configured datapizza OpenAIClient.
+            client: Pre-configured datapizza OpenAILikeClient.
                     If None, a dedicated client is created.
         """
-        self._client = client or OpenAIClient(
+        self._client = client or OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=PRIMARY_MODEL,
             base_url=REGOLO_BASE_URL,

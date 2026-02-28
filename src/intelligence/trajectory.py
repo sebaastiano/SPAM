@@ -287,6 +287,10 @@ class AdvancedTrajectoryPredictor:
                 "menu_size": len(current.menu),
                 "reputation": current.reputation,
                 "recommended_action": self._recommend_action(prediction, current),
+                # Connection-based activity: if present in /restaurants, they're
+                # connected to the server and likely competing.  This is MORE
+                # reliable than menu_size (which is 0 during speaking phase).
+                "is_connected": True,
             }
         return briefings
 

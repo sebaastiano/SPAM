@@ -114,10 +114,9 @@ class DiplomacyAgent:
                 })
 
                 # Record in message log
-                self.message_log.record_sent(
-                    target_id=rid,
+                self.message_log.log_sent(
+                    receiver_id=rid,
                     text=message_text,
-                    turn=turn_id,
                 )
 
                 logger.info(
