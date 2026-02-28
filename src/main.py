@@ -13,7 +13,7 @@ import logging
 import signal
 import sys
 
-from datapizza.clients.openai_like import OpenAILikeClient
+from datapizza.clients.openai.openai_client import OpenAIClient
 from datapizza.tools.mcp_client import MCPClient
 
 from src.config import (
@@ -85,7 +85,7 @@ class GameOrchestrator:
 
     def __init__(self):
         # ── LLM Clients ──
-        self.primary_client = OpenAILikeClient(
+        self.primary_client = OpenAIClient(
             api_key=REGOLO_API_KEY,
             model=PRIMARY_MODEL,
             base_url=REGOLO_BASE_URL,
@@ -94,7 +94,7 @@ class GameOrchestrator:
                 "Make optimal decisions for bidding, menu, and serving."
             ),
         )
-        self.fast_client = OpenAILikeClient(
+        self.fast_client = OpenAIClient(
             api_key=REGOLO_API_KEY,
             model=FAST_MODEL,
             base_url=REGOLO_BASE_URL,
