@@ -7,15 +7,20 @@
 # ]
 # ///
 
+#RUNNATE QUESTO PRIMA: curl -LsSf https://astral.sh/uv/install.sh | sh
+
 import asyncio
 import json
 from datetime import datetime
 from typing import Any, Awaitable, Callable
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 import aiohttp
 
-TEAM_ID = 0  # your team id
-TEAM_API_KEY = "your_team_api_key"
+TEAM_ID = 17  # your team id
+TEAM_API_KEY = os.getenv("TEAM_API_KEY")
 
 BASE_URL = "https://hackapizza.datapizza.tech"
 
