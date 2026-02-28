@@ -1,8 +1,9 @@
 """
 SPAM! — Main Entry Point
 ==========================
-Wires SSE → EventBus → PhaseRouter → all subsystems.
-Implements the complete game agent loop.
+Wires SSE → EventBus → PhaseRouter → SkillOrchestrator → all subsystems.
+Implements the complete game agent loop with mid-turn entry robustness
+and phase countdown logging.
 
 Usage:
     python -m src.main
@@ -12,6 +13,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 
 from datapizza.clients.openai.openai_client import OpenAIClient
 from datapizza.tools.mcp_client import MCPClient
@@ -60,6 +62,15 @@ from src.decision.pricing import compute_menu_prices, adjust_prices_competitive
 from src.diplomacy.agent import DiplomacyAgent
 from src.diplomacy.firewall import GroundTruthFirewall
 
+# Skills
+from src.skills import (
+    Skill,
+    SkillContext,
+    SkillResult,
+    SkillOrchestrator,
+    compute_skipped_phases,
+)
+
 # ── Logging ──
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +82,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("spam.main")
 
+# ── Countdown config ──
+COUNTDOWN_LOG_INTERVAL = 15.0  # seconds between countdown log lines
+
 
 class GameOrchestrator:
     """
@@ -80,7 +94,9 @@ class GameOrchestrator:
       1. Initialise datapizza clients & MCP
       2. Connect SSE via ReactiveEventBus
       3. Route events to phase-specific handlers
-      4. Each phase handler coordinates subsystems
+      4. Each phase handler coordinates subsystems via SkillOrchestrator
+      5. Mid-turn entry: detect skipped phases, run catch-up skills
+      6. Background countdown timer logs time remaining in each phase
     """
 
     def __init__(self):
@@ -147,10 +163,15 @@ class GameOrchestrator:
         self.bus = ReactiveEventBus()
         self.phase_router = PhaseRouter()
 
+        # ── Skill Orchestrator ──
+        self.skill_orchestrator = SkillOrchestrator()
+        self._register_skills()
+
         # ── State ──
         self.recipe_db: dict[str, dict] = {}
         self._latest_intel: dict = {}
         self._running = False
+        self._countdown_task: asyncio.Task | None = None
 
     async def start(self):
         """Initialise and start the game agent."""
@@ -196,6 +217,9 @@ class GameOrchestrator:
         # Wire event bus
         self._wire_events()
 
+        # Start countdown timer background task
+        self._countdown_task = asyncio.create_task(self._countdown_timer())
+
         # Connect SSE (runs forever)
         self._running = True
         logger.info("Connecting to SSE stream...")
@@ -219,7 +243,7 @@ class GameOrchestrator:
         # Message events
         self.bus.on("new_message", self._handle_new_message, priority=1)
 
-        # Register phase handlers
+        # Register phase handlers (all go through unified dispatcher)
         self.phase_router.register("speaking", self._phase_speaking)
         self.phase_router.register("closed_bid", self._phase_closed_bid)
         self.phase_router.register("waiting", self._phase_waiting)
@@ -229,13 +253,241 @@ class GameOrchestrator:
         # Turn change callback
         self.phase_router.on_turn_change(self._on_turn_change)
 
-    # ── Game Events ──
+    # ══════════════════════════════════════════════════════════════
+    #  SKILL REGISTRATION
+    # ══════════════════════════════════════════════════════════════
+
+    def _register_skills(self):
+        """Register all skills with the orchestrator."""
+        so = self.skill_orchestrator
+
+        # ── Intelligence (full) ──
+        so.register(Skill(
+            name="intelligence_scan",
+            description="Run full intelligence pipeline (tracker, competitor clustering)",
+            valid_phases={"speaking"},
+            priority=10,
+            execute_fn=self._skill_intelligence_scan,
+        ))
+
+        # ── Intelligence (quick — for mid-turn catch-up) ──
+        so.register(Skill(
+            name="quick_intelligence",
+            description="Lightweight intelligence: fetch restaurant states only",
+            # Valid in all phases where we can still act
+            valid_phases={"speaking", "closed_bid", "waiting", "serving"},
+            priority=10,
+            mid_turn_applicable=True,
+            execute_fn=self._skill_quick_intelligence,
+        ))
+
+        # ── Zone Selection ──
+        so.register(Skill(
+            name="zone_selection",
+            description="Select strategic zone via subagent router",
+            valid_phases={"speaking", "closed_bid", "waiting"},
+            priority=20,
+            execute_fn=self._skill_zone_selection,
+        ))
+
+        # ── Menu Planning ──
+        so.register(Skill(
+            name="menu_planning",
+            description="Compute menu via ILP solver",
+            valid_phases={"speaking", "closed_bid", "waiting"},
+            priority=30,
+            requires_skills=["zone_selection"],
+            execute_fn=self._skill_menu_planning,
+        ))
+
+        # ── Menu Save ──
+        so.register(Skill(
+            name="menu_save",
+            description="Save menu to server via MCP",
+            valid_phases={"speaking", "closed_bid", "waiting"},
+            priority=35,
+            requires_skills=["menu_planning"],
+            execute_fn=self._skill_menu_save,
+        ))
+
+        # ── Diplomacy ──
+        so.register(Skill(
+            name="diplomacy_send",
+            description="Run diplomacy turn (messages, deception)",
+            valid_phases={"speaking", "closed_bid", "waiting", "serving"},
+            priority=50,
+            execute_fn=self._skill_diplomacy_send,
+        ))
+
+        # ── Bid Compute + Submit ──
+        so.register(Skill(
+            name="bid_compute",
+            description="Compute optimal bids via ILP",
+            valid_phases={"closed_bid"},
+            priority=10,
+            execute_fn=self._skill_bid_compute,
+        ))
+        so.register(Skill(
+            name="bid_submit",
+            description="Submit bids via MCP",
+            valid_phases={"closed_bid"},
+            priority=15,
+            requires_skills=["bid_compute"],
+            execute_fn=self._skill_bid_submit,
+        ))
+
+        # ── Inventory Verify (waiting phase) ──
+        so.register(Skill(
+            name="inventory_verify",
+            description="Verify menu against actual post-bid inventory",
+            valid_phases={"waiting"},
+            priority=25,
+            execute_fn=self._skill_inventory_verify,
+        ))
+
+        # ── Market Operations ──
+        so.register(Skill(
+            name="market_ops",
+            description="Buy missing / sell surplus ingredients on market",
+            valid_phases={"speaking", "closed_bid", "waiting", "serving"},
+            priority=40,
+            execute_fn=self._skill_market_ops,
+        ))
+
+        # ── Restaurant Open ──
+        so.register(Skill(
+            name="restaurant_open",
+            description="Open restaurant for serving",
+            valid_phases={"speaking", "closed_bid", "waiting"},
+            priority=45,
+            execute_fn=self._skill_restaurant_open,
+        ))
+
+        # ── Serving Prep ──
+        so.register(Skill(
+            name="serving_prep",
+            description="Pre-start serving pipeline with inventory snapshot",
+            valid_phases={"waiting", "serving"},
+            priority=48,
+            execute_fn=self._skill_serving_prep,
+        ))
+
+        # ── Serving Readiness Check (mid-turn serving entry) ──
+        so.register(Skill(
+            name="serving_readiness_check",
+            description="Check if we can serve: do we have a menu + inventory?",
+            valid_phases={"serving"},
+            priority=5,
+            mid_turn_applicable=True,
+            execute_fn=self._skill_serving_readiness_check,
+        ))
+
+        # ── Emergency Menu (mid-turn serving entry) ──
+        so.register(Skill(
+            name="emergency_menu",
+            description="Set minimal menu from available inventory (emergency)",
+            valid_phases={"serving"},
+            priority=8,
+            mid_turn_applicable=True,
+            execute_fn=self._skill_emergency_menu,
+        ))
+
+        # ── Serving Monitor ──
+        so.register(Skill(
+            name="serving_monitor",
+            description="Log serving phase start",
+            valid_phases={"serving"},
+            priority=50,
+            execute_fn=self._skill_serving_monitor,
+        ))
+
+        # ── Close Decision ──
+        so.register(Skill(
+            name="close_decision",
+            description="Decide whether to close restaurant (no ingredients/menu)",
+            valid_phases={"serving"},
+            priority=55,
+            execute_fn=self._skill_close_decision,
+        ))
+
+        # ── End-of-Turn Snapshot ──
+        so.register(Skill(
+            name="end_turn_snapshot",
+            description="Capture end-of-turn state and update memories",
+            valid_phases={"stopped"},
+            priority=10,
+            execute_fn=self._skill_end_turn_snapshot,
+        ))
+
+        # ── Info Gather ──
+        so.register(Skill(
+            name="info_gather",
+            description="Gather observable info (restaurants, market) for next turn",
+            valid_phases={"stopped"},
+            priority=20,
+            execute_fn=self._skill_info_gather,
+        ))
+
+        logger.info(f"Registered {len(so.skills)} skills")
+
+    # ══════════════════════════════════════════════════════════════
+    #  SKILL CONTEXT BUILDER
+    # ══════════════════════════════════════════════════════════════
+
+    async def _build_skill_context(
+        self,
+        data: dict,
+        our_state: dict | None = None,
+    ) -> SkillContext:
+        """
+        Build a SkillContext from current game state.
+
+        Fetches restaurant state if not provided.
+        """
+        if our_state is None:
+            our_state = await load_our_restaurant() or {}
+
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        phase = data.get("phase", self.phase_router.current_phase or "speaking")
+        is_mid = data.get("is_mid_turn_entry", False)
+        skipped = data.get("skipped_phases", [])
+
+        balance = our_state.get("balance", 10000)
+        inventory = our_state.get("inventory", {})
+        reputation = our_state.get("reputation", 50)
+
+        # Check if restaurant has a menu set
+        menu_items = our_state.get("menu", [])
+        menu_set = len(menu_items) > 0
+
+        # Check if restaurant is open
+        restaurant_open = our_state.get("is_open", False)
+
+        return SkillContext(
+            turn_id=turn_id,
+            phase=phase,
+            balance=balance,
+            inventory=inventory,
+            reputation=reputation,
+            recipes=self.recipe_db,
+            intel=self._latest_intel,
+            is_mid_turn_entry=is_mid,
+            skipped_phases=skipped,
+            time_remaining_estimate=self.phase_router.estimated_remaining,
+            our_state=our_state,
+            menu_set=menu_set,
+            restaurant_open=restaurant_open,
+        )
+
+    # ══════════════════════════════════════════════════════════════
+    #  GAME EVENTS
+    # ══════════════════════════════════════════════════════════════
 
     async def _handle_game_started(self, data: dict):
         """Handle game_started SSE event."""
         logger.info("Game started event received")
-        self.phase_router.current_phase = None
-        self.phase_router.current_turn = 0
+        await self.phase_router.handle_game_started(data)
+        self.skill_orchestrator.new_turn()
 
         # Reload recipes in case they changed
         self.recipe_db = await load_recipes()
@@ -246,14 +498,15 @@ class GameOrchestrator:
         logger.info("Game reset — clearing turn state")
         self.game_state.reset()
         self.serving.set_menu([])
-        self.phase_router.current_phase = None
-        self.phase_router.current_turn = 0
+        await self.phase_router.handle_game_reset(data)
+        self.skill_orchestrator.new_turn()
         # Keep: competitor_memory, client_library, event_log, message_log
 
     async def _on_turn_change(self, turn_id: int):
         """Called when a new turn starts (stopped → speaking)."""
         logger.info(f"Turn change: {turn_id}")
         self.game_state.new_turn(turn_id)
+        self.skill_orchestrator.new_turn()
 
     # ── Client / Serving Events ──
 
@@ -279,237 +532,627 @@ class GameOrchestrator:
             f"(credibility={processed.get('sender_credibility', 0):.2f})"
         )
 
-    # ── Phase Handlers ──
+    # ══════════════════════════════════════════════════════════════
+    #  PHASE HANDLERS (delegate to SkillOrchestrator)
+    # ══════════════════════════════════════════════════════════════
 
     async def _phase_speaking(self, data: dict):
         """
-        Speaking phase:
-        1. Run intelligence pipeline
-        2. Set tentative menu (pre-bid)
-        3. Run diplomacy
+        Speaking phase handler.
 
-        Zone selection is deferred to waiting phase (after bids resolve,
-        when we know our actual inventory).
+        Normal flow: intelligence → zone → menu → diplomacy
+        Mid-turn: same (speaking is the earliest phase, no catch-up needed)
         """
         turn_id = data.get("turn_id", self.phase_router.current_turn)
-        logger.info(f"[SPEAKING] Turn {turn_id}")
+        is_mid = data.get("is_mid_turn_entry", False)
+        tag = "[SPEAKING/MID-TURN]" if is_mid else "[SPEAKING]"
+        logger.info(f"{tag} Turn {turn_id}")
 
-        # 1. Run intelligence pipeline
+        ctx = await self._build_skill_context(data)
+        results = await self.skill_orchestrator.execute_for_phase(ctx)
+        self._log_skill_results(results)
+
+    async def _phase_closed_bid(self, data: dict):
+        """
+        Closed bid phase handler.
+
+        Normal flow: compute + submit bids
+        Mid-turn: quick intel → zone → menu → bids (catch-up)
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        is_mid = data.get("is_mid_turn_entry", False)
+        tag = "[CLOSED_BID/MID-TURN]" if is_mid else "[CLOSED_BID]"
+        logger.info(f"{tag} Turn {turn_id}")
+
+        ctx = await self._build_skill_context(data)
+        results = await self.skill_orchestrator.execute_for_phase(ctx)
+        self._log_skill_results(results)
+
+    async def _phase_waiting(self, data: dict):
+        """
+        Waiting phase handler.
+
+        Normal flow: verify inventory → finalize menu → market → open → prep
+        Mid-turn: quick intel → zone → verify → menu → market → open → prep
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        is_mid = data.get("is_mid_turn_entry", False)
+        tag = "[WAITING/MID-TURN]" if is_mid else "[WAITING]"
+        logger.info(f"{tag} Turn {turn_id}")
+
+        ctx = await self._build_skill_context(data)
+        results = await self.skill_orchestrator.execute_for_phase(ctx)
+        self._log_skill_results(results)
+
+    async def _phase_serving(self, data: dict):
+        """
+        Serving phase handler.
+
+        Normal flow: log serving start, clients handled by SSE events
+        Mid-turn: check readiness → emergency menu → open → start serving
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        is_mid = data.get("is_mid_turn_entry", False)
+        tag = "[SERVING/MID-TURN]" if is_mid else "[SERVING]"
+        logger.info(f"{tag} Turn {turn_id}")
+
+        ctx = await self._build_skill_context(data)
+        results = await self.skill_orchestrator.execute_for_phase(ctx)
+        self._log_skill_results(results)
+
+    async def _phase_stopped(self, data: dict):
+        """
+        Stopped phase handler.
+
+        Always: stop serving → snapshot → update memories → info gathering
+        """
+        turn_id = data.get("turn_id", self.phase_router.current_turn)
+        is_mid = data.get("is_mid_turn_entry", False)
+        tag = "[STOPPED/MID-TURN]" if is_mid else "[STOPPED]"
+        logger.info(f"{tag} Turn {turn_id}")
+
+        # Always stop serving pipeline first
+        await self.serving.stop_serving()
+
+        ctx = await self._build_skill_context(data)
+        results = await self.skill_orchestrator.execute_for_phase(ctx)
+        self._log_skill_results(results)
+
+    def _log_skill_results(self, results: list[SkillResult]):
+        """Log a compact summary of skill execution results."""
+        if not results:
+            return
+        ok = sum(1 for r in results if r.success)
+        fail = len(results) - ok
+        names = [r.skill_name for r in results]
+        logger.info(
+            f"Skills executed: {ok}/{len(results)} OK "
+            f"({', '.join(names)})"
+        )
+        for r in results:
+            if not r.success:
+                logger.warning(f"  FAILED: {r.skill_name} — {r.error}")
+
+    # ══════════════════════════════════════════════════════════════
+    #  SKILL IMPLEMENTATIONS
+    # ══════════════════════════════════════════════════════════════
+
+    async def _skill_intelligence_scan(self, ctx: SkillContext) -> SkillResult:
+        """Full intelligence pipeline: tracker, competitor clustering, briefings."""
         try:
-            intel = await self.intelligence.run(turn_id)
+            intel = await self.intelligence.run(ctx.turn_id)
             self._latest_intel = intel
             logger.info(
                 f"Intelligence: {len(intel.get('briefings', {}))} briefings, "
                 f"{len(intel.get('clusters', {}))} clusters"
             )
+            return SkillResult(
+                skill_name="intelligence_scan",
+                success=True,
+                data={"briefings": len(intel.get("briefings", {}))},
+            )
         except Exception as e:
             logger.error(f"Intelligence pipeline failed: {e}", exc_info=True)
-            intel = {}
-            self._latest_intel = intel
+            self._latest_intel = {}
+            return SkillResult(
+                skill_name="intelligence_scan", success=False, error=str(e)
+            )
 
-        # 2. Fetch our current state
-        our_state = await load_our_restaurant()
-        balance = our_state.get("balance", 10000) if our_state else 10000
-        inventory = our_state.get("inventory", {}) if our_state else {}
-        reputation = our_state.get("reputation", 50) if our_state else 50
+    async def _skill_quick_intelligence(self, ctx: SkillContext) -> SkillResult:
+        """
+        Lightweight intelligence for mid-turn catch-up.
 
-        # 3. Tentative zone selection (pre-bid — will be re-evaluated in waiting)
-        zone = self.subagent_router.route(
-            balance=balance,
-            inventory=inventory,
-            reputation=reputation,
-            recipes=list(self.recipe_db.values()),
-            competitor_clusters=intel.get("clusters", {}),
-            competitor_briefings=intel.get("briefings", {}),
-        )
-        logger.info(f"Tentative zone: {zone}")
+        Skips tracker + heavy analysis. Just fetches restaurant states
+        and builds minimal competitor context for zone selection.
+        """
+        try:
+            import aiohttp
 
-        # 4. Compute tentative menu via MILP
-        decision = solve_zone_ilp(
-            zone=zone,
-            balance=balance,
-            inventory=inventory,
-            recipes=list(self.recipe_db.values()),
-            demand_forecast=intel.get("demand_forecast", {}),
-            competitor_briefings=intel.get("briefings", {}),
-            reputation=reputation,
-        )
+            # Fetch all restaurants for basic competitor awareness
+            url = f"{BASE_URL}/restaurants"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=HEADERS) as resp:
+                    if resp.status == 200:
+                        restaurants = await resp.json()
+                    else:
+                        restaurants = []
 
-        # 5. Set tentative menu via MCP
-        if decision.menu:
-            try:
-                result = await self.mcp_client.call_tool(
-                    "save_menu",
-                    {"items": decision.menu},
-                )
-                self.serving.set_menu(decision.menu)
-                logger.info(f"Tentative menu set: {len(decision.menu)} items")
-            except Exception as e:
-                logger.error(f"Failed to set menu: {e}")
+            # Build minimal intel from restaurant overview
+            all_states = {}
+            for r in restaurants:
+                rid = r.get("id", r.get("restaurantId"))
+                if rid and rid != TEAM_ID:
+                    all_states[rid] = r
 
-        # 6. Run diplomacy
+            self._latest_intel = {
+                "briefings": {},
+                "clusters": {},
+                "all_states": all_states,
+                "demand_forecast": {},
+                "features": {},
+            }
+            logger.info(
+                f"Quick intelligence: {len(all_states)} competitor states fetched"
+            )
+            return SkillResult(
+                skill_name="quick_intelligence",
+                success=True,
+                data={"competitors_seen": len(all_states)},
+            )
+        except Exception as e:
+            logger.warning(f"Quick intelligence failed: {e}")
+            self._latest_intel = {}
+            return SkillResult(
+                skill_name="quick_intelligence", success=False, error=str(e)
+            )
+
+    async def _skill_zone_selection(self, ctx: SkillContext) -> SkillResult:
+        """Select strategic zone via subagent router."""
+        try:
+            zone = self.subagent_router.route(
+                balance=ctx.balance,
+                inventory=ctx.inventory,
+                reputation=ctx.reputation,
+                recipes=list(ctx.recipes.values()),
+                competitor_clusters=ctx.intel.get("clusters", {}),
+                competitor_briefings=ctx.intel.get("briefings", {}),
+            )
+            logger.info(f"Zone selected: {zone}")
+            return SkillResult(
+                skill_name="zone_selection",
+                success=True,
+                data={"zone": zone},
+            )
+        except Exception as e:
+            logger.error(f"Zone selection failed: {e}")
+            return SkillResult(
+                skill_name="zone_selection", success=False, error=str(e)
+            )
+
+    async def _skill_menu_planning(self, ctx: SkillContext) -> SkillResult:
+        """Compute menu via ILP solver."""
+        try:
+            zone = self.subagent_router.active_zone
+            spending = 0.0 if ctx.phase in ("waiting", "serving") else 0.4
+            decision = solve_zone_ilp(
+                zone=zone,
+                balance=ctx.balance,
+                inventory=ctx.inventory,
+                recipes=list(ctx.recipes.values()),
+                demand_forecast=ctx.intel.get("demand_forecast", {}),
+                competitor_briefings=ctx.intel.get("briefings", {}),
+                reputation=ctx.reputation,
+                spending_fraction=spending,
+            )
+            # Store for downstream skills
+            self._latest_decision = decision
+            logger.info(f"Menu planned: {len(decision.menu)} items")
+            return SkillResult(
+                skill_name="menu_planning",
+                success=True,
+                data={"menu_size": len(decision.menu), "menu": decision.menu},
+            )
+        except Exception as e:
+            logger.error(f"Menu planning failed: {e}")
+            return SkillResult(
+                skill_name="menu_planning", success=False, error=str(e)
+            )
+
+    async def _skill_menu_save(self, ctx: SkillContext) -> SkillResult:
+        """Save menu to server via MCP."""
+        decision = getattr(self, "_latest_decision", None)
+        menu_result = self.skill_orchestrator.get_result("menu_planning")
+
+        menu = []
+        if menu_result and menu_result.success:
+            menu = menu_result.data.get("menu", [])
+        elif decision and hasattr(decision, "menu"):
+            menu = decision.menu
+
+        if not menu:
+            return SkillResult(
+                skill_name="menu_save", success=False,
+                error="No menu to save (planning failed or empty)"
+            )
+
+        try:
+            await self.mcp_client.call_tool("save_menu", {"items": menu})
+            self.serving.set_menu(menu)
+            logger.info(f"Menu saved: {len(menu)} items")
+            return SkillResult(
+                skill_name="menu_save", success=True,
+                data={"menu_size": len(menu)},
+            )
+        except Exception as e:
+            logger.error(f"Failed to save menu: {e}")
+            return SkillResult(
+                skill_name="menu_save", success=False, error=str(e)
+            )
+
+    async def _skill_diplomacy_send(self, ctx: SkillContext) -> SkillResult:
+        """Run diplomacy turn."""
         try:
             sent = await self.diplomacy.run_diplomacy_turn(
-                competitor_briefings=intel.get("briefings", {}),
-                competitor_states=intel.get("all_states", {}),
-                turn_id=turn_id,
+                competitor_briefings=ctx.intel.get("briefings", {}),
+                competitor_states=ctx.intel.get("all_states", {}),
+                turn_id=ctx.turn_id,
             )
             logger.info(f"Diplomacy: sent {len(sent)} messages")
+            return SkillResult(
+                skill_name="diplomacy_send", success=True,
+                data={"messages_sent": len(sent)},
+            )
         except Exception as e:
             logger.error(f"Diplomacy failed: {e}", exc_info=True)
-
-    async def _phase_closed_bid(self, data: dict):
-        """
-        Closed bid phase:
-        1. Compute optimal bids from ILP
-        2. Submit bids via MCP (single call, final)
-        """
-        turn_id = data.get("turn_id", self.phase_router.current_turn)
-        logger.info(f"[CLOSED_BID] Turn {turn_id}")
-
-        intel = self._latest_intel
-
-        # Get current state
-        our_state = await load_our_restaurant()
-        balance = our_state.get("balance", 10000) if our_state else 10000
-        inventory = our_state.get("inventory", {}) if our_state else {}
-        reputation = our_state.get("reputation", 50) if our_state else 50
-
-        # Get zone from subagent router
-        zone = self.subagent_router.active_zone
-
-        # Compute bids via ILP
-        decision = solve_zone_ilp(
-            zone=zone,
-            balance=balance,
-            inventory=inventory,
-            recipes=list(self.recipe_db.values()),
-            demand_forecast=intel.get("demand_forecast", {}),
-            competitor_briefings=intel.get("briefings", {}),
-            reputation=reputation,
-        )
-
-        if decision.bids:
-            try:
-                result = await self.mcp_client.call_tool(
-                    "closed_bid",
-                    {"bids": decision.bids},
-                )
-                logger.info(
-                    f"Bids submitted: {len(decision.bids)} items, "
-                    f"total cost={decision.total_bid_cost:.0f}"
-                )
-            except Exception as e:
-                logger.error(f"Bid submission failed: {e}")
-        else:
-            logger.warning("No bids computed — skipping bid phase")
-
-    async def _phase_waiting(self, data: dict):
-        """
-        Waiting phase (after bids resolve):
-        1. Fetch fresh post-bid inventory
-        2. Re-select zone with actual inventory (ILP zone classification)
-        3. Verify/rebuild menu to match actual inventory
-        4. Market operations — buy missing, sell surplus
-        5. Set final menu
-        6. Open restaurant
-        """
-        turn_id = data.get("turn_id", self.phase_router.current_turn)
-        logger.info(f"[WAITING] Turn {turn_id}")
-
-        intel = self._latest_intel
-
-        # 1. Fetch fresh inventory (post-bid)
-        our_state = await load_our_restaurant()
-        if our_state:
-            balance = our_state.get("balance", 10000)
-            inventory = our_state.get("inventory", {})
-            reputation = our_state.get("reputation", 50)
-            logger.info(
-                f"Post-bid state: balance={balance}, "
-                f"inventory_items={len(inventory)}, rep={reputation}"
+            return SkillResult(
+                skill_name="diplomacy_send", success=False, error=str(e)
             )
-        else:
-            balance = 10000
-            inventory = {}
-            reputation = 50
 
-        # 2. Re-select zone with actual post-bid inventory
-        zone = self.subagent_router.route(
-            balance=balance,
-            inventory=inventory,
-            reputation=reputation,
-            recipes=list(self.recipe_db.values()),
-            competitor_clusters=intel.get("clusters", {}),
-            competitor_briefings=intel.get("briefings", {}),
-        )
-        logger.info(f"Post-bid zone selection: {zone}")
+    async def _skill_bid_compute(self, ctx: SkillContext) -> SkillResult:
+        """Compute optimal bids via ILP."""
+        try:
+            zone = self.subagent_router.active_zone
+            decision = solve_zone_ilp(
+                zone=zone,
+                balance=ctx.balance,
+                inventory=ctx.inventory,
+                recipes=list(ctx.recipes.values()),
+                demand_forecast=ctx.intel.get("demand_forecast", {}),
+                competitor_briefings=ctx.intel.get("briefings", {}),
+                reputation=ctx.reputation,
+            )
+            self._latest_decision = decision
+            return SkillResult(
+                skill_name="bid_compute", success=True,
+                data={
+                    "bids": decision.bids,
+                    "total_cost": getattr(decision, "total_bid_cost", 0),
+                },
+            )
+        except Exception as e:
+            logger.error(f"Bid computation failed: {e}")
+            return SkillResult(
+                skill_name="bid_compute", success=False, error=str(e)
+            )
 
-        # 3. Verify menu items can be cooked with actual inventory
+    async def _skill_bid_submit(self, ctx: SkillContext) -> SkillResult:
+        """Submit computed bids via MCP."""
+        bid_result = self.skill_orchestrator.get_result("bid_compute")
+        bids = []
+        if bid_result and bid_result.success:
+            bids = bid_result.data.get("bids", [])
+
+        if not bids:
+            logger.warning("No bids to submit — skipping")
+            return SkillResult(
+                skill_name="bid_submit", success=True,
+                data={"submitted": 0},
+            )
+
+        try:
+            await self.mcp_client.call_tool("closed_bid", {"bids": bids})
+            total_cost = bid_result.data.get("total_cost", 0) if bid_result else 0
+            logger.info(
+                f"Bids submitted: {len(bids)} items, "
+                f"total cost={total_cost:.0f}"
+            )
+            return SkillResult(
+                skill_name="bid_submit", success=True,
+                data={"submitted": len(bids)},
+            )
+        except Exception as e:
+            logger.error(f"Bid submission failed: {e}")
+            return SkillResult(
+                skill_name="bid_submit", success=False, error=str(e)
+            )
+
+    async def _skill_inventory_verify(self, ctx: SkillContext) -> SkillResult:
+        """Verify menu items can be cooked with actual post-bid inventory."""
         current_menu = list(self.serving.menu.values())
-        verified_menu = []
+        verified = []
 
         for item in current_menu:
             recipe = self.recipe_db.get(item["name"])
             if recipe:
                 can_cook = all(
-                    inventory.get(ing, 0) >= qty
+                    ctx.inventory.get(ing, 0) >= qty
                     for ing, qty in recipe.get("ingredients", {}).items()
                 )
                 if can_cook:
-                    verified_menu.append(item)
+                    verified.append(item)
                 else:
                     logger.info(f"Removing {item['name']} — insufficient ingredients")
 
-        # If menu shrunk too much, recompute with MILP
-        if len(verified_menu) < 2 and self.recipe_db:
-            logger.info("Menu too small — recomputing with MILP for actual inventory")
-            decision = solve_zone_ilp(
-                zone=zone,
-                balance=balance,
-                inventory=inventory,
-                recipes=list(self.recipe_db.values()),
-                demand_forecast=intel.get("demand_forecast", {}),
-                competitor_briefings=intel.get("briefings", {}),
-                reputation=reputation,
-                spending_fraction=0.0,  # no more bids in waiting
+        # If menu shrunk too much, flag for replanning
+        if len(verified) < 2 and self.recipe_db:
+            logger.info("Menu too small after verify — will be replanned by menu_planning skill")
+            # Clear current menu so menu_planning picks up
+            self.serving.set_menu([])
+            return SkillResult(
+                skill_name="inventory_verify", success=True,
+                data={"verified_count": 0, "needs_replan": True},
             )
-            verified_menu = decision.menu
 
-        # 4. Market operations — buy missing ingredients, sell surplus
-        await self._market_operations(
-            inventory=inventory,
-            verified_menu=verified_menu,
-            balance=balance,
+        # Update the serving pipeline with verified menu
+        if verified:
+            self.serving.set_menu(verified)
+
+        return SkillResult(
+            skill_name="inventory_verify", success=True,
+            data={"verified_count": len(verified), "needs_replan": False},
         )
 
-        # 5. Set final menu
-        if verified_menu:
-            try:
-                result = await self.mcp_client.call_tool(
-                    "save_menu",
-                    {"items": verified_menu},
-                )
-                self.serving.set_menu(verified_menu)
-                logger.info(f"Final menu: {len(verified_menu)} items")
-            except Exception as e:
-                logger.error(f"Failed to update menu: {e}")
-
-        # 6. Open restaurant
+    async def _skill_market_ops(self, ctx: SkillContext) -> SkillResult:
+        """Buy missing / sell surplus ingredients."""
         try:
-            result = await self.mcp_client.call_tool(
-                "update_restaurant_is_open",
-                {"is_open": True},
+            current_menu = list(self.serving.menu.values())
+            await self._market_operations(
+                inventory=ctx.inventory,
+                verified_menu=current_menu,
+                balance=ctx.balance,
+            )
+            return SkillResult(skill_name="market_ops", success=True)
+        except Exception as e:
+            logger.warning(f"Market ops failed: {e}")
+            return SkillResult(
+                skill_name="market_ops", success=False, error=str(e)
+            )
+
+    async def _skill_restaurant_open(self, ctx: SkillContext) -> SkillResult:
+        """Open restaurant for serving."""
+        # Don't open if we have no menu
+        if not self.serving.menu:
+            logger.warning("Not opening — no menu set")
+            return SkillResult(
+                skill_name="restaurant_open", success=False,
+                error="No menu to serve",
+            )
+
+        try:
+            await self.mcp_client.call_tool(
+                "update_restaurant_is_open", {"is_open": True}
             )
             logger.info("Restaurant opened")
+            return SkillResult(skill_name="restaurant_open", success=True)
         except Exception as e:
             logger.error(f"Failed to open restaurant: {e}")
+            return SkillResult(
+                skill_name="restaurant_open", success=False, error=str(e)
+            )
 
-        # 7. Pre-start serving pipeline
-        await self.serving.start_serving(turn_id)
-        # Capture inventory snapshot for ingredient accounting
-        if our_state:
-            self.serving.set_inventory_snapshot(inventory)
+    async def _skill_serving_prep(self, ctx: SkillContext) -> SkillResult:
+        """Pre-start serving pipeline with inventory snapshot."""
+        try:
+            await self.serving.start_serving(ctx.turn_id)
+            if ctx.inventory:
+                self.serving.set_inventory_snapshot(ctx.inventory)
+            logger.info("Serving pipeline ready")
+            return SkillResult(skill_name="serving_prep", success=True)
+        except Exception as e:
+            logger.error(f"Serving prep failed: {e}")
+            return SkillResult(
+                skill_name="serving_prep", success=False, error=str(e)
+            )
+
+    async def _skill_serving_readiness_check(self, ctx: SkillContext) -> SkillResult:
+        """
+        Mid-turn serving entry: check if we can serve at all.
+
+        We may have joined mid-turn at serving phase. Check:
+        - Do we have a menu? (may persist from server-side)
+        - Do we have inventory?
+        - Is restaurant open?
+        """
+        our_state = ctx.our_state
+        menu_items = our_state.get("menu", [])
+        inventory = ctx.inventory
+        is_open = our_state.get("is_open", False)
+
+        can_serve = bool(menu_items) and bool(inventory) and is_open
+
+        logger.info(
+            f"Serving readiness: menu={len(menu_items)}, "
+            f"inventory={len(inventory)}, open={is_open} → "
+            f"{'READY' if can_serve else 'NOT READY'}"
+        )
+
+        if menu_items and not self.serving.menu:
+            # Server has a menu but our pipeline doesn't — sync it
+            self.serving.set_menu(menu_items)
+            logger.info(f"Synced {len(menu_items)} menu items from server")
+
+        return SkillResult(
+            skill_name="serving_readiness_check", success=True,
+            data={
+                "can_serve": can_serve,
+                "has_menu": bool(menu_items),
+                "has_inventory": bool(inventory),
+                "is_open": is_open,
+            },
+        )
+
+    async def _skill_emergency_menu(self, ctx: SkillContext) -> SkillResult:
+        """
+        Emergency menu: set a minimal menu from available inventory.
+
+        Only runs during mid-turn serving entry when no menu exists.
+        Cannot use save_menu during serving (server forbids it), but we
+        may already have a menu from a previous turn on the server.
+        """
+        # Check if readiness check found we already have a menu
+        readiness = self.skill_orchestrator.get_result("serving_readiness_check")
+        if readiness and readiness.data.get("has_menu"):
+            return SkillResult(
+                skill_name="emergency_menu", success=True,
+                data={"action": "menu_already_exists"},
+            )
+
+        # In serving phase, save_menu is FORBIDDEN by the server.
+        # We cannot set a new menu. Log this and let close_decision handle it.
+        logger.warning(
+            "No menu and in serving phase — save_menu forbidden. "
+            "Will close restaurant to avoid penalties."
+        )
+        return SkillResult(
+            skill_name="emergency_menu", success=False,
+            error="Cannot set menu during serving phase (server restriction)",
+        )
+
+    async def _skill_serving_monitor(self, ctx: SkillContext) -> SkillResult:
+        """Log serving phase start — clients handled by SSE events."""
+        logger.info(
+            f"[SERVING] Turn {ctx.turn_id} — "
+            f"menu={len(self.serving.menu)}, "
+            f"awaiting clients"
+        )
+        return SkillResult(skill_name="serving_monitor", success=True)
+
+    async def _skill_close_decision(self, ctx: SkillContext) -> SkillResult:
+        """
+        Decide whether to close the restaurant.
+
+        Close if:
+        - No menu and in serving (can't set one)
+        - No cookable dishes remain (all ingredients exhausted)
+        """
+        should_close = False
+        reason = ""
+
+        if not self.serving.menu:
+            should_close = True
+            reason = "No menu available"
+
+        if not should_close and not ctx.inventory:
+            should_close = True
+            reason = "No ingredients available"
+
+        if should_close:
+            logger.warning(f"Closing restaurant: {reason}")
+            try:
+                await self.mcp_client.call_tool(
+                    "update_restaurant_is_open", {"is_open": False}
+                )
+                return SkillResult(
+                    skill_name="close_decision", success=True,
+                    data={"closed": True, "reason": reason},
+                )
+            except Exception as e:
+                return SkillResult(
+                    skill_name="close_decision", success=False, error=str(e)
+                )
+
+        return SkillResult(
+            skill_name="close_decision", success=True,
+            data={"closed": False},
+        )
+
+    async def _skill_end_turn_snapshot(self, ctx: SkillContext) -> SkillResult:
+        """Capture end-of-turn state, update memories, measure deception."""
+        try:
+            our_state = ctx.our_state
+            if our_state:
+                current = RestaurantState(
+                    turn_id=ctx.turn_id,
+                    phase="stopped",
+                    balance=our_state.get("balance", 0),
+                    inventory=our_state.get("inventory", {}),
+                    reputation=our_state.get("reputation", 0),
+                    menu=our_state.get("menu", []),
+                    clients_served=len(self.serving.served_this_turn),
+                    revenue_this_turn=0,
+                )
+                self.game_state.snapshot(current)
+
+            # Update competitor memory
+            intel = self._latest_intel
+            for rid, feat in intel.get("features", {}).items():
+                self.competitor_memory.update_entity(rid, feat)
+            for rid, cluster in intel.get("clusters", {}).items():
+                self.competitor_memory.classify_entity(rid, cluster)
+
+            # Measure deception rewards
+            try:
+                await self.diplomacy.measure_deception_rewards(
+                    competitor_states=intel.get("all_states", {})
+                )
+            except Exception as e:
+                logger.warning(f"Deception reward measurement failed: {e}")
+
+            # Zero inventory
+            self.game_state.end_turn(ctx.turn_id)
+
+            # Log summary
+            served = len(self.serving.served_this_turn)
+            logger.info(
+                f"Turn {ctx.turn_id} complete: "
+                f"served={served}, "
+                f"balance={our_state.get('balance', '?')}, "
+                f"reputation={our_state.get('reputation', '?')}"
+            )
+            return SkillResult(
+                skill_name="end_turn_snapshot", success=True,
+                data={"served": served},
+            )
+        except Exception as e:
+            logger.error(f"End-turn snapshot failed: {e}", exc_info=True)
+            return SkillResult(
+                skill_name="end_turn_snapshot", success=False, error=str(e)
+            )
+
+    async def _skill_info_gather(self, ctx: SkillContext) -> SkillResult:
+        """Gather observable info for next turn planning."""
+        try:
+            import aiohttp
+
+            # Fetch bid history for this turn
+            url = f"{BASE_URL}/bid_history?turn_id={ctx.turn_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=HEADERS) as resp:
+                    if resp.status == 200:
+                        bid_history = await resp.json()
+                        logger.info(
+                            f"Bid history: {len(bid_history)} entries for turn {ctx.turn_id}"
+                        )
+                    else:
+                        bid_history = []
+
+            # Feed to intelligence for next turn
+            if bid_history:
+                self._latest_intel["bid_history"] = bid_history
+
+            return SkillResult(
+                skill_name="info_gather", success=True,
+                data={"bid_history_entries": len(bid_history)},
+            )
+        except Exception as e:
+            logger.warning(f"Info gather failed: {e}")
+            return SkillResult(
+                skill_name="info_gather", success=False, error=str(e)
+            )
+
+    # ══════════════════════════════════════════════════════════════
+    #  MARKET OPERATIONS (shared helper)
+    # ══════════════════════════════════════════════════════════════
 
     async def _market_operations(
         self,
@@ -534,7 +1177,7 @@ class GameOrchestrator:
             have = inventory.get(ing, 0)
             deficit = need_qty - have
             if deficit > 0:
-                buy_price = max(10, int(balance * 0.02))  # conservative price
+                buy_price = max(10, int(balance * 0.02))
                 try:
                     await self.mcp_client.call_tool(
                         "create_market_entry",
@@ -553,7 +1196,7 @@ class GameOrchestrator:
         needed_ings = set(needed.keys())
         for ing, qty in inventory.items():
             if ing not in needed_ings and qty > 0:
-                sell_price = max(5, int(balance * 0.01))  # low price to move
+                sell_price = max(5, int(balance * 0.01))
                 try:
                     await self.mcp_client.call_tool(
                         "create_market_entry",
@@ -568,74 +1211,70 @@ class GameOrchestrator:
                 except Exception as e:
                     logger.warning(f"Market SELL failed for {ing}: {e}")
 
-    async def _phase_serving(self, data: dict):
+    # ══════════════════════════════════════════════════════════════
+    #  COUNTDOWN TIMER
+    # ══════════════════════════════════════════════════════════════
+
+    async def _countdown_timer(self):
         """
-        Serving phase:
-        Clients are handled by SSE events → client_spawned → preparation_complete.
-        This handler just logs the transition.
+        Background task that periodically logs estimated time remaining
+        in the current phase and until the next turn.
+
+        Phase duration estimates are updated from observed transitions
+        (rolling average in PhaseRouter).
         """
-        turn_id = data.get("turn_id", self.phase_router.current_turn)
-        logger.info(f"[SERVING] Turn {turn_id} — awaiting clients")
+        logger.info("Countdown timer started")
+        while self._running:
+            try:
+                await asyncio.sleep(COUNTDOWN_LOG_INTERVAL)
 
-    async def _phase_stopped(self, data: dict):
-        """
-        Stopped phase:
-        1. Stop serving pipeline
-        2. End-of-turn snapshot
-        3. Update all memories
-        4. Measure deception rewards
-        5. Zero inventory
-        6. Persist state
-        """
-        turn_id = data.get("turn_id", self.phase_router.current_turn)
-        logger.info(f"[STOPPED] Turn {turn_id}")
+                phase = self.phase_router.current_phase
+                if not phase:
+                    continue  # no active game
 
-        # 1. Stop serving
-        await self.serving.stop_serving()
+                turn = self.phase_router.current_turn
+                elapsed = self.phase_router.elapsed_in_phase
+                remaining = self.phase_router.estimated_remaining
+                est_total = self.phase_router.estimated_durations.get(phase, 60)
 
-        # 2. End-of-turn snapshot
-        our_state = await load_our_restaurant()
-        if our_state:
-            current = RestaurantState(
-                turn_id=turn_id,
-                phase="stopped",
-                balance=our_state.get("balance", 0),
-                inventory=our_state.get("inventory", {}),
-                reputation=our_state.get("reputation", 0),
-                menu=our_state.get("menu", []),
-                clients_served=len(self.serving.served_this_turn),
-                revenue_this_turn=0,
-            )
-            self.game_state.snapshot(current)
+                # Format times
+                def fmt_time(s: float) -> str:
+                    m, sec = divmod(int(s), 60)
+                    return f"{m}m{sec:02d}s" if m > 0 else f"{sec}s"
 
-        # 3. Update competitor memory from intelligence
-        intel = self._latest_intel
-        all_features = intel.get("features", {})
-        for rid, feat in all_features.items():
-            self.competitor_memory.update_entity(rid, feat)
-        clusters = intel.get("clusters", {})
-        for rid, cluster in clusters.items():
-            self.competitor_memory.classify_entity(rid, cluster)
+                # Compute time until next turn starts
+                # Sum remaining of current phase + all subsequent phases
+                from src.skills import PHASE_ORDER
 
-        # 4. Measure deception rewards
-        try:
-            await self.diplomacy.measure_deception_rewards(
-                competitor_states=intel.get("all_states", {})
-            )
-        except Exception as e:
-            logger.warning(f"Deception reward measurement failed: {e}")
+                if phase in PHASE_ORDER:
+                    idx = PHASE_ORDER.index(phase)
+                    remaining_phases = PHASE_ORDER[idx + 1:]
+                    time_to_next_turn = remaining
+                    for p in remaining_phases:
+                        time_to_next_turn += self.phase_router.estimated_durations.get(
+                            p, 60
+                        )
+                else:
+                    time_to_next_turn = remaining
 
-        # 5. Zero inventory (all ingredients expire at end of turn)
-        self.game_state.end_turn(turn_id)
+                # Build progress bar for phase
+                progress = min(1.0, elapsed / max(est_total, 1))
+                bar_len = 20
+                filled = int(bar_len * progress)
+                bar = "█" * filled + "░" * (bar_len - filled)
 
-        # 6. Log turn summary
-        profiles = self.serving.served_this_turn
-        logger.info(
-            f"Turn {turn_id} complete: "
-            f"served={len(profiles)}, "
-            f"balance={our_state.get('balance', '?')}, "
-            f"reputation={our_state.get('reputation', '?')}"
-        )
+                logger.info(
+                    f"⏱ Turn {turn} | {phase.upper()} "
+                    f"[{bar}] {fmt_time(elapsed)}/{fmt_time(est_total)} "
+                    f"(~{fmt_time(remaining)} left) | "
+                    f"Next turn in ~{fmt_time(time_to_next_turn)}"
+                )
+
+            except asyncio.CancelledError:
+                logger.info("Countdown timer stopped")
+                return
+            except Exception as e:
+                logger.debug(f"Countdown timer error: {e}")
 
 
 async def main():
@@ -662,6 +1301,9 @@ async def _shutdown(orchestrator: GameOrchestrator):
     """Graceful shutdown."""
     logger.info("Shutting down...")
     orchestrator._running = False
+    # Cancel countdown timer
+    if orchestrator._countdown_task:
+        orchestrator._countdown_task.cancel()
     # Allow pending tasks to complete
     await asyncio.sleep(0.5)
     sys.exit(0)

@@ -2137,16 +2137,16 @@ Reply with just the number."""
 
 During the serving phase, every millisecond counts AND every dropped client costs revenue + reputation. The serving pipeline is hardened against **8 critical failure modes** that have been observed to cause other teams to lose income:
 
-| # | Failure Mode | Impact | Our Mitigation |
-|---|---|---|---|
-| 1 | **Duplicate dish key collision** | Second client ordering same dish overwrites first → client lost | FIFO deque per dish name in `self.preparing` |
-| 2 | **Ingredient over-commitment** | N clients order dish, ingredients for 1 → N-1 wasted prepare calls | Real-time ingredient accounting before `prepare_dish` |
-| 3 | **MCP transient failure** | `prepare_dish`/`serve_dish` 429 or timeout → client lost | Exponential backoff retry (3 attempts) |
-| 4 | **MCP `isError: true` ignored** | Server rejects operation, we don't know → silent failure | Parse `isError` + `content[0].text`, distinguish permanent vs transient |
-| 5 | **GET /meals flooding** | 10 clients → 10 HTTP calls → latency + rate limit risk | Cached `/meals` with 2s TTL + resolved-ID dedup |
-| 6 | **Queue re-entrancy** | Concurrent `client_spawned` → two `_process_queue` loops racing | `asyncio.Lock` + `_processing` flag |
-| 7 | **Preparation never completes** | `preparation_complete` SSE never fires → client stuck forever | Background watchdog (prep_time × 2.5 + 5s timeout) |
-| 8 | **Ingredient exhaustion** | Keep accepting clients after running out → all fail | Auto-close restaurant when no cookable dishes remain |
+| #   | Failure Mode                     | Impact                                                             | Our Mitigation                                                          |
+| --- | -------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| 1   | **Duplicate dish key collision** | Second client ordering same dish overwrites first → client lost    | FIFO deque per dish name in `self.preparing`                            |
+| 2   | **Ingredient over-commitment**   | N clients order dish, ingredients for 1 → N-1 wasted prepare calls | Real-time ingredient accounting before `prepare_dish`                   |
+| 3   | **MCP transient failure**        | `prepare_dish`/`serve_dish` 429 or timeout → client lost           | Exponential backoff retry (3 attempts)                                  |
+| 4   | **MCP `isError: true` ignored**  | Server rejects operation, we don't know → silent failure           | Parse `isError` + `content[0].text`, distinguish permanent vs transient |
+| 5   | **GET /meals flooding**          | 10 clients → 10 HTTP calls → latency + rate limit risk             | Cached `/meals` with 2s TTL + resolved-ID dedup                         |
+| 6   | **Queue re-entrancy**            | Concurrent `client_spawned` → two `_process_queue` loops racing    | `asyncio.Lock` + `_processing` flag                                     |
+| 7   | **Preparation never completes**  | `preparation_complete` SSE never fires → client stuck forever      | Background watchdog (prep_time × 2.5 + 5s timeout)                      |
+| 8   | **Ingredient exhaustion**        | Keep accepting clients after running out → all fail                | Auto-close restaurant when no cookable dishes remain                    |
 
 ### Architecture Overview
 
@@ -2251,12 +2251,14 @@ class ServingMetrics:
 **Why FIFO deque instead of dict for `self.preparing`?**
 
 If two clients order "Sinfonia Cosmica", the old code did:
+
 ```python
 self.preparing["Sinfonia Cosmica"] = client_A_id  # first client
 self.preparing["Sinfonia Cosmica"] = client_B_id  # OVERWRITES! client_A lost
 ```
 
 New code:
+
 ```python
 self.preparing["Sinfonia Cosmica"] = deque([pending_A, pending_B])
 # preparation_complete → deque.popleft() → serves client_A first (FIFO)
@@ -2266,6 +2268,7 @@ self.preparing["Sinfonia Cosmica"] = deque([pending_A, pending_B])
 
 Menu is verified in waiting phase, but ingredient consumption happens during serving.
 If our menu has 3 dishes each needing "Polvere di Crononite" × 2, and we only have 4:
+
 - Without accounting: all 3 accepted → 2 fail
 - With accounting: 2 accepted → 1 redirected to another dish → 3 served
 
@@ -2310,6 +2313,7 @@ async def _mcp_call_with_retry(self, tool_name: str, args: dict) -> bool:
 
 If we can't cook ANY menu dish with remaining uncommitted ingredients, accepting more
 clients just wastes their time and damages reputation. Closing the restaurant protects us:
+
 - No more clients spawn for us
 - Reputation impact of "closed" is much less than "accepted but failed to serve"
 
@@ -2353,17 +2357,18 @@ class OrderMatcher:
 
 ### Serving Strategy Per Archetype
 
-| Archetype | Priority | Strategy | Fallback |
-|---|---|---|---|
-| **Astrobarone** | 🔴 Highest (0) | Serve first — highest revenue, least patience | Redirect to highest-prestige cookable |
-| **Saggi del Cosmo** | 🟡 High (1) | Serve quality — they wait, so handle after Astrobaroni | Accept slower prep time dishes |
-| **Famiglie Orbitali** | 🟢 Medium (2) | Serve balanced — good margin, time-tolerant | Standard fallback path |
-| **Esploratore Galattico** | 🔵 Low (3) | Serve last — lowest revenue, fast dishes | Accept any cookable dish |
-| **Unknown** | ⚪ Lowest (99) | Best-effort after all known archetypes | Any available dish |
+| Archetype                 | Priority       | Strategy                                               | Fallback                              |
+| ------------------------- | -------------- | ------------------------------------------------------ | ------------------------------------- |
+| **Astrobarone**           | 🔴 Highest (0) | Serve first — highest revenue, least patience          | Redirect to highest-prestige cookable |
+| **Saggi del Cosmo**       | 🟡 High (1)    | Serve quality — they wait, so handle after Astrobaroni | Accept slower prep time dishes        |
+| **Famiglie Orbitali**     | 🟢 Medium (2)  | Serve balanced — good margin, time-tolerant            | Standard fallback path                |
+| **Esploratore Galattico** | 🔵 Low (3)     | Serve last — lowest revenue, fast dishes               | Accept any cookable dish              |
+| **Unknown**               | ⚪ Lowest (99) | Best-effort after all known archetypes                 | Any available dish                    |
 
 ### Metrics & Observability
 
 Every turn produces a `ServingMetrics` object logged at turn end:
+
 ```
 Serving ended: received=12 matched=11 prepared=10 served=9
   failed=1 no_match=1 no_id=0 no_ingredients=2
@@ -2371,6 +2376,7 @@ Serving ended: received=12 matched=11 prepared=10 served=9
 ```
 
 This data feeds into:
+
 - **Turn-over-turn trend analysis**: Are we serving more or fewer clients each turn?
 - **Failure mode diagnosis**: Which stage is the bottleneck?
 - **Intolerance learning**: Which archetypes are triggering swaps? Update priors.
@@ -3140,6 +3146,82 @@ pipeline.connect("features", "clusters")
 > - **Preserve cross-turn memory**: CompetitorMemory, ClientProfileMemory, EventLog (keep for debugging)
 > - **Reconnect SSE** if needed (server may drop the connection on reset)
 > - Do NOT call any MCP tools in response to `game_reset` — wait for the next `game_started` event
+
+### 12.1 Phase-Aware Skill Orchestrator & Mid-Turn Entry
+
+The system is designed to be robust to **joining a turn already in progress**. When we connect to SSE and the first `game_phase_changed` event is NOT `speaking`, the PhaseRouter detects this as a **mid-turn entry** and injects metadata that the SkillOrchestrator uses to run catch-up logic.
+
+#### Mid-Turn Detection
+
+```
+PhaseRouter.handle_phase_change():
+  if first_phase_received AND new_phase != "speaking":
+    → is_mid_turn_entry = True
+    → skipped_phases = ["speaking", ...] (all phases before current)
+    → data["is_mid_turn_entry"] = True
+```
+
+#### Skill System Architecture
+
+```
+PhaseRouter → GameOrchestrator._phase_* → SkillOrchestrator.execute_for_phase(ctx)
+                                                 │
+                   ┌─────────────────────────────┼──────────────────────────────┐
+                   │                             │                              │
+            NORMAL_PHASE_SKILLS[phase]    MID_TURN_CATCHUP_SKILLS[phase]        │
+                   │                             │                              │
+                   └─────────── select ──────────┘                              │
+                                  │                                             │
+                          Sort by priority                                      │
+                                  │                                             │
+                      Execute sequentially                                      │
+                      (with dependency checks)                                  │
+```
+
+Each **Skill** is a named, phase-gated async function:
+
+| Skill                     | Phases                                 | Priority | Description                               |
+| ------------------------- | -------------------------------------- | -------- | ----------------------------------------- |
+| `intelligence_scan`       | speaking                               | 10       | Full intelligence pipeline                |
+| `quick_intelligence`      | speaking, closed_bid, waiting, serving | 10       | Lightweight: fetch restaurant states only |
+| `zone_selection`          | speaking, closed_bid, waiting          | 20       | ILP zone classification                   |
+| `menu_planning`           | speaking, closed_bid, waiting          | 30       | Compute menu via ILP solver               |
+| `menu_save`               | speaking, closed_bid, waiting          | 35       | Save menu to server (MCP)                 |
+| `diplomacy_send`          | speaking, closed_bid, waiting, serving | 50       | Run diplomacy turn                        |
+| `bid_compute`             | closed_bid                             | 10       | Compute optimal bids                      |
+| `bid_submit`              | closed_bid                             | 15       | Submit bids via MCP                       |
+| `inventory_verify`        | waiting                                | 25       | Verify menu vs post-bid inventory         |
+| `market_ops`              | speaking, closed_bid, waiting, serving | 40       | Buy missing / sell surplus                |
+| `restaurant_open`         | speaking, closed_bid, waiting          | 45       | Open restaurant                           |
+| `serving_prep`            | waiting, serving                       | 48       | Start serving pipeline                    |
+| `serving_readiness_check` | serving                                | 5        | Mid-turn: check if we can serve           |
+| `emergency_menu`          | serving                                | 8        | Mid-turn: attempt emergency menu          |
+| `serving_monitor`         | serving                                | 50       | Log + await clients                       |
+| `close_decision`          | serving                                | 55       | Close if no menu/ingredients              |
+| `end_turn_snapshot`       | stopped                                | 10       | State snapshot + memory update            |
+| `info_gather`             | stopped                                | 20       | Fetch bid history for next turn           |
+
+#### Mid-Turn Catch-Up by Phase
+
+| Entry Phase  | Skipped                       | Catch-Up Skills                                                  |
+| ------------ | ----------------------------- | ---------------------------------------------------------------- |
+| `speaking`   | —                             | Full pipeline (normal flow)                                      |
+| `closed_bid` | speaking                      | quick_intelligence → zone → menu → bid                           |
+| `waiting`    | speaking, closed_bid          | quick_intelligence → zone → verify → menu → market → open → prep |
+| `serving`    | speaking, closed_bid, waiting | readiness_check → emergency_menu → open → prep → close_decision  |
+| `stopped`    | all                           | snapshot + info_gather only (wait for next turn)                 |
+
+#### Countdown Timer
+
+A background `asyncio` task logs phase timing every 15 seconds:
+
+```
+⏱ Turn 5 | SERVING [████████████░░░░░░░░] 1m45s/2m30s (~45s left) | Next turn in ~1m15s
+```
+
+- Phase durations are estimated from a **rolling average** of observed transitions
+- Defaults: speaking=90s, closed_bid=45s, waiting=45s, serving=150s, stopped=30s
+- Updates automatically as more turns are observed
 
 ---
 
