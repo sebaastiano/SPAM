@@ -790,8 +790,11 @@ class GroundTruthFirewall:
         3. Update sender credibility score
         4. If claims are verifiable via GET, verify them
         """
+        message_id = message["messageId"]
         sender_id = message["senderId"]
+        sender_name = message["senderName"]
         claim = message["text"]
+        timestamp = message["datetime"]
 
         # Cross-reference against ground truth
         verifiable = self.extract_verifiable_claims(claim)
@@ -801,7 +804,11 @@ class GroundTruthFirewall:
                 self.update_credibility(sender_id, claim, truth)
 
         return {
-            "message": message,
+            "message_id": message_id,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "text": claim,
+            "datetime": timestamp,
             "trust_level": self.TrustLevel.UNTRUSTED,
             "sender_credibility": self.get_credibility(sender_id),
         }
@@ -1213,6 +1220,8 @@ class EventLog:
 │  │    menu_history: list[dict]            # what they served   │  │
 │  │    bid_history: list[dict]             # what they bid      │  │
 │  │    balance_history: list[float]        # their balance      │  │
+│  │    inventory_history: list[dict]       # their inventory    │  │
+│  │    kitchen_history: list[dict]         # their kitchen state│  │
 │  │  }                                                          │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │                                                                    │
@@ -1743,6 +1752,8 @@ async def analyze_competitors() -> str:
         summary_lines.append(
             f"Team {r['id']} ({r['name']}): balance={r['balance']}, "
             f"rep={r['reputation']}, open={r['isOpen']}, "
+            f"inventory={r.get('inventory', {})}, "
+            f"kitchen={r.get('kitchen', {})}, "
             f"menu_items={len(r.get('menu', []))}"
         )
     return "\n".join(summary_lines)
