@@ -109,6 +109,19 @@ def sse_relay_thread():
                             elif event_name == "game_reset":
                                 state["phase"] = "reset"
                                 state["turn_id"] = None
+                            elif event_name == "new_message":
+                                msg_entry = {
+                                    "ts": now_ts(),
+                                    "sender_id": parsed.get("sender_id"),
+                                    "sender_name": parsed.get("sender_name", "?"),
+                                    "recipient_id": parsed.get("recipient_id"),
+                                    "recipient_name": parsed.get("recipient_name", "?"),
+                                    "text": parsed.get("text") or parsed.get("content") or str(parsed),
+                                    "turn_id": state.get("turn_id"),
+                                }
+                                state["messages"].append(msg_entry)
+                                if len(state["messages"]) > 200:
+                                    state["messages"].pop(0)
 
                         push_event("sse_event", {
                             "event": event_name,
@@ -396,6 +409,710 @@ def _poll_bid_history():
 # ──────────────────────────────────────────────
 # Flask routes
 # ──────────────────────────────────────────────
+
+SOCIAL_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🍕 Agent Social — SPAM!</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel: #12121a;
+    --border: #1e1e30;
+    --accent: #e85d04;
+    --accent2: #ff9f1c;
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --yellow: #f39c12;
+    --blue: #3d9eff;
+    --purple: #a855f7;
+    --pink: #ec4899;
+    --text: #e0e0e0;
+    --muted: #666;
+    --font: 'Segoe UI', system-ui, sans-serif;
+    --mono: 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+
+  /* ── Header ── */
+  header {
+    height: 52px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 14px;
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  header .logo { font-size: 20px; color: var(--accent); font-weight: 700; letter-spacing: 1px; }
+  header .logo span { color: var(--accent2); }
+  .badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .5px;
+    border: 1px solid;
+  }
+  #phase-badge { border-color: var(--yellow); color: var(--yellow); background: rgba(243,156,18,.1); }
+  #turn-badge  { border-color: var(--blue);   color: var(--blue);   background: rgba(61,158,255,.1); }
+  #conn-badge  { border-color: var(--green);  color: var(--green);  background: rgba(46,204,113,.1); }
+  #conn-badge.off { border-color: var(--red); color: var(--red); background: rgba(231,76,60,.1); }
+  .spacer { flex: 1; }
+  #agent-count { color: var(--muted); font-size: 12px; }
+
+  /* ── Layout ── */
+  .layout {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    height: calc(100vh - 52px);
+    overflow: hidden;
+  }
+
+  /* ── Left: Agent Roster ── */
+  .roster {
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .roster-header {
+    padding: 12px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--muted);
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  .roster-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .agent-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+    position: relative;
+  }
+  .agent-card:hover { border-color: #333; background: #16161f; }
+  .agent-card.active { border-color: var(--accent); background: rgba(232,93,4,.06); }
+  .agent-card.our-team { border-color: var(--purple) !important; }
+  .agent-avatar {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 16px; flex-shrink: 0;
+    color: #fff;
+  }
+  .agent-info { flex: 1; min-width: 0; }
+  .agent-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-sub { font-size: 11px; color: var(--muted); display: flex; gap: 8px; margin-top: 2px; flex-wrap: wrap; }
+  .agent-sub .val { color: var(--text); font-family: var(--mono); }
+  .status-dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.open { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .status-dot.closed { background: #333; }
+  .agent-badge {
+    position: absolute;
+    top: 6px; right: 8px;
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--purple);
+    color: #fff;
+    font-weight: 600;
+  }
+  .our-badge { background: var(--purple); }
+
+  /* ── Right: Social Feed ── */
+  .feed-col {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .feed-header {
+    padding: 12px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--muted);
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  #msg-count {
+    background: var(--accent);
+    color: #fff;
+    border-radius: 20px;
+    padding: 1px 8px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .feed-filter {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    background: #0d0d14;
+  }
+  .filt-btn {
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 11px;
+    font-family: var(--font);
+    transition: all .15s;
+  }
+  .filt-btn.on { border-color: var(--accent); color: var(--accent); background: rgba(232,93,4,.12); }
+  .feed-stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  /* ── Post Card ── */
+  .post {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    animation: slideIn .25s ease;
+    position: relative;
+  }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .post.new-msg   { border-left: 3px solid var(--purple); }
+  .post.sys-msg   { border-left: 3px solid var(--blue); opacity: .8; }
+  .post.phase-evt { border-left: 3px solid var(--yellow); }
+  .post.rest-evt  { border-left: 3px solid var(--green); }
+  .post.meal-evt  { border-left: 3px solid var(--accent); }
+  .post-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-bottom: 7px;
+  }
+  .mini-avatar {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; flex-shrink: 0;
+    color: #fff;
+  }
+  .post-meta { flex: 1; min-width: 0; }
+  .post-author { font-weight: 600; font-size: 13px; }
+  .post-to { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .post-ts { font-size: 10px; color: var(--muted); font-family: var(--mono); flex-shrink: 0; }
+  .post-body { font-size: 13px; line-height: 1.5; color: var(--text); word-break: break-word; }
+  .post-body.mono { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+  .tag-chip {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .tag-chip.msg   { background: var(--purple); color: #fff; }
+  .tag-chip.sys   { background: var(--blue);   color: #fff; }
+  .tag-chip.phase { background: var(--yellow); color: #000; }
+  .tag-chip.rest  { background: var(--green);  color: #000; }
+  .tag-chip.meal  { background: var(--accent); color: #fff; }
+  .tag-chip.bid   { background: var(--pink);   color: #fff; }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a5a; }
+
+  /* ── Empty state ── */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--muted);
+    gap: 10px;
+  }
+  .empty-state .icon { font-size: 40px; opacity: .3; }
+  .empty-state p { font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">🍕 Agent<span>Social</span></div>
+  <div id="phase-badge" class="badge">—</div>
+  <div id="turn-badge"  class="badge">Turn —</div>
+  <div class="spacer"></div>
+  <span id="agent-count">Loading agents…</span>
+  <div id="conn-badge" class="badge off">● CONNECTING</div>
+</header>
+
+<div class="layout">
+  <!-- ── Roster ── -->
+  <div class="roster">
+    <div class="roster-header">🤖 Agents Online</div>
+    <div class="roster-list" id="roster"></div>
+  </div>
+
+  <!-- ── Feed ── -->
+  <div class="feed-col">
+    <div class="feed-header">
+      📡 Live Feed
+      <span id="msg-count">0</span>
+    </div>
+    <div class="feed-filter">
+      <button class="filt-btn on" data-f="all">All</button>
+      <button class="filt-btn" data-f="new-msg">💬 Messages</button>
+      <button class="filt-btn" data-f="phase-evt">⚡ Phase</button>
+      <button class="filt-btn" data-f="rest-evt">🏪 Restaurants</button>
+      <button class="filt-btn" data-f="meal-evt">🍽️ Meals</button>
+      <button class="filt-btn" data-f="sys-msg">⚙️ System</button>
+    </div>
+    <div class="feed-stream" id="feed">
+      <div class="empty-state">
+        <div class="icon">📡</div>
+        <p>Waiting for game events…</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════
+// Config
+// ═══════════════════════════════════════════════════
+const TEAM_ID = 17;
+const MAX_POSTS = 200;
+
+// ═══════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════
+let restaurants = {};   // id → raw + flat
+let posts = [];         // all post objects {id,type,html}
+let postCount = 0;
+let activeFilter = 'all';
+let emptyCleared = false;
+
+// ═══════════════════════════════════════════════════
+// Avatar colors (deterministic by ID)
+// ═══════════════════════════════════════════════════
+const COLORS = [
+  '#e85d04','#ff9f1c','#2ecc71','#3d9eff','#a855f7',
+  '#ec4899','#06b6d4','#84cc16','#f59e0b','#8b5cf6',
+  '#10b981','#ef4444','#6366f1','#14b8a6','#f97316',
+];
+function avatarColor(id) {
+  return COLORS[Math.abs(parseInt(id) || 0) % COLORS.length];
+}
+function avatarLetter(name) {
+  return (name || '?')[0].toUpperCase();
+}
+function miniAvatar(id, name, size=32) {
+  const c = avatarColor(id);
+  const l = avatarLetter(name);
+  return `<div class="mini-avatar" style="width:${size}px;height:${size}px;background:${c}">${l}</div>`;
+}
+
+// ═══════════════════════════════════════════════════
+// Roster rendering
+// ═══════════════════════════════════════════════════
+function renderRoster() {
+  const roster = document.getElementById('roster');
+  const sorted = Object.values(restaurants).sort((a,b) => {
+    // Our team first, then by reputation desc
+    if (a.id == TEAM_ID) return -1;
+    if (b.id == TEAM_ID) return 1;
+    const ra = a._flat?.reputation ?? 0;
+    const rb = b._flat?.reputation ?? 0;
+    return rb - ra;
+  });
+
+  document.getElementById('agent-count').textContent =
+    `${sorted.length} agent${sorted.length !== 1 ? 's' : ''}`;
+
+  roster.innerHTML = sorted.map(r => {
+    const f = r._flat || {};
+    const isUs = r.id == TEAM_ID;
+    const isOpen = f.is_open;
+    const rep = f.reputation ?? '—';
+    const bal = f.balance != null ? '€' + Math.round(f.balance).toLocaleString() : '—';
+    const zone = f.zone ?? '—';
+    const menuN = Array.isArray(r.menu) ? r.menu.length : (f.menu_count ?? '—');
+    const c = avatarColor(r.id);
+    const letter = avatarLetter(r.name);
+    return `
+      <div class="agent-card${isUs ? ' our-team' : ''}" data-id="${r.id}" onclick="filterByAgent(${r.id})">
+        ${isUs ? '<div class="agent-badge our-badge">US</div>' : ''}
+        <div class="agent-avatar" style="background:${c}">${letter}</div>
+        <div class="agent-info">
+          <div class="agent-name">${r.name || 'Team ' + r.id}</div>
+          <div class="agent-sub">
+            <span>Rep <span class="val">${rep}</span></span>
+            <span>Bal <span class="val">${bal}</span></span>
+            <span>Zone <span class="val">${zone}</span></span>
+            <span>Menu <span class="val">${menuN}</span></span>
+          </div>
+        </div>
+        <div class="status-dot ${isOpen ? 'open' : 'closed'}"></div>
+      </div>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════
+// Feed: creating posts
+// ═══════════════════════════════════════════════════
+function clearEmpty() {
+  if (!emptyCleared) {
+    document.getElementById('feed').innerHTML = '';
+    emptyCleared = true;
+  }
+}
+
+function addPost(type, html, anchorId) {
+  clearEmpty();
+  const feed = document.getElementById('feed');
+  const id = 'p' + (++postCount);
+  const div = document.createElement('div');
+  div.className = `post ${type}`;
+  div.dataset.type = type;
+  div.dataset.agent = anchorId || '';
+  div.id = id;
+  div.innerHTML = html;
+
+  // Apply filter visibility
+  if (activeFilter !== 'all' && !type.includes(activeFilter)) {
+    div.style.display = 'none';
+  }
+
+  feed.appendChild(div);
+  // Trim to max
+  const all = feed.querySelectorAll('.post');
+  if (all.length > MAX_POSTS) all[0].remove();
+  // Scroll to bottom
+  feed.scrollTop = feed.scrollHeight;
+
+  document.getElementById('msg-count').textContent =
+    feed.querySelectorAll('.post').length;
+
+  return id;
+}
+
+// ── Agent message (new_message SSE event) ──
+function postAgentMessage(payload) {
+  const sid  = payload.sender_id    || null;
+  const sname = payload.sender_name  || (sid ? 'Agent ' + sid : 'Unknown');
+  const rid  = payload.recipient_id  || null;
+  const rname = payload.recipient_name || (rid ? 'Agent ' + rid : 'broadcast');
+  const text  = payload.text || payload.content || JSON.stringify(payload);
+  const ts    = new Date().toLocaleTimeString();
+
+  const html = `
+    <div class="post-head">
+      ${miniAvatar(sid, sname)}
+      <div class="post-meta">
+        <div class="post-author"><span class="tag-chip msg">MSG</span>${sname}</div>
+        <div class="post-to">→ ${rname}</div>
+      </div>
+      <div class="post-ts">${ts}</div>
+    </div>
+    <div class="post-body">${escHtml(text)}</div>`;
+  addPost('new-msg', html, sid);
+}
+
+// ── System / server message ──
+function postSystem(msg) {
+  const ts = new Date().toLocaleTimeString();
+  const html = `
+    <div class="post-head">
+      ${miniAvatar('0', '⚙')}
+      <div class="post-meta"><div class="post-author"><span class="tag-chip sys">SYS</span>Server</div></div>
+      <div class="post-ts">${ts}</div>
+    </div>
+    <div class="post-body">${escHtml(msg)}</div>`;
+  addPost('sys-msg', html, null);
+}
+
+// ── Phase change ──
+function postPhase(phase, turnId) {
+  const ts = new Date().toLocaleTimeString();
+  const phaseEmoji = {speaking:'🗣️',closed_bid:'🔒',waiting:'⏳',serving:'🍽️',stopped:'🛑'}[phase] || '⚡';
+  const html = `
+    <div class="post-head">
+      ${miniAvatar('sys', phaseEmoji, 32)}
+      <div class="post-meta">
+        <div class="post-author"><span class="tag-chip phase">PHASE</span>Game Phase Changed</div>
+        <div class="post-to">Turn ${turnId ?? '—'}</div>
+      </div>
+      <div class="post-ts">${ts}</div>
+    </div>
+    <div class="post-body">Phase: <strong>${phase}</strong></div>`;
+  addPost('phase-evt', html, null);
+}
+
+// ── Restaurant change ──
+function postRestaurant(name, id, changes) {
+  const ts = new Date().toLocaleTimeString();
+  const changesText = changes.map(c => `${c.key}: ${c.old} → ${c.new}`).join(', ');
+  const html = `
+    <div class="post-head">
+      ${miniAvatar(id, name)}
+      <div class="post-meta">
+        <div class="post-author"><span class="tag-chip rest">AGENT</span>${name}</div>
+        <div class="post-to">State updated</div>
+      </div>
+      <div class="post-ts">${ts}</div>
+    </div>
+    <div class="post-body">${escHtml(changesText)}</div>`;
+  addPost('rest-evt', html, id);
+}
+
+// ── Meal event ──
+function postMeal(restaurantName, rid, meal, isNew) {
+  const ts = new Date().toLocaleTimeString();
+  const label = isNew ? 'New order' : 'Order updated';
+  const dish = meal?.dish || meal?.dish_name || '?';
+  const client = meal?.client_id || '?';
+  const executed = meal?.executed;
+  const html = `
+    <div class="post-head">
+      ${miniAvatar(rid, restaurantName)}
+      <div class="post-meta">
+        <div class="post-author"><span class="tag-chip meal">MEAL</span>${restaurantName}</div>
+        <div class="post-to">${label} — Client #${client}</div>
+      </div>
+      <div class="post-ts">${ts}</div>
+    </div>
+    <div class="post-body">🍽️ ${escHtml(dish)} ${executed === true ? '✅' : executed === false ? '❌' : ''}</div>`;
+  addPost('meal-evt', html, rid);
+}
+
+// ═══════════════════════════════════════════════════
+// Filter
+// ═══════════════════════════════════════════════════
+document.querySelectorAll('.filt-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filt-btn').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    activeFilter = btn.dataset.f;
+    document.querySelectorAll('.post').forEach(p => {
+      if (activeFilter === 'all') {
+        p.style.display = '';
+      } else {
+        p.style.display = p.dataset.type === activeFilter ? '' : 'none';
+      }
+    });
+  });
+});
+
+function filterByAgent(id) {
+  // Toggle: if already filtering this agent, clear
+  document.querySelectorAll('.post').forEach(p => {
+    if (activeFilter === 'agent-' + id) {
+      p.style.display = '';
+    } else {
+      p.style.display = (p.dataset.agent == id) ? '' : 'none';
+    }
+  });
+  activeFilter = activeFilter === 'agent-' + id ? 'all' : 'agent-' + id;
+  // Reset filter buttons
+  document.querySelectorAll('.filt-btn').forEach(b => b.classList.remove('on'));
+  if (activeFilter === 'all') document.querySelector('.filt-btn[data-f=all]').classList.add('on');
+  // Highlight active card
+  document.querySelectorAll('.agent-card').forEach(c => {
+    c.classList.toggle('active', c.dataset.id == id && activeFilter === 'agent-' + id);
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// Helper
+// ═══════════════════════════════════════════════════
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ═══════════════════════════════════════════════════
+// Phase badge update
+// ═══════════════════════════════════════════════════
+const PHASE_COLORS = {
+  speaking: '#f39c12', closed_bid: '#e85d04', waiting: '#3d9eff',
+  serving: '#2ecc71', stopped: '#e74c3c', reset: '#9b59b6'
+};
+function updateHeader(phase, turnId) {
+  const pb = document.getElementById('phase-badge');
+  const tb = document.getElementById('turn-badge');
+  pb.textContent = (phase || '—').toUpperCase();
+  const c = PHASE_COLORS[phase] || '#aaa';
+  pb.style.borderColor = c;
+  pb.style.color = c;
+  pb.style.background = c + '19';
+  if (turnId) tb.textContent = 'Turn ' + turnId;
+}
+
+// ═══════════════════════════════════════════════════
+// Initial data load
+// ═══════════════════════════════════════════════════
+async function loadInitial() {
+  try {
+    const [restResp, stateResp, msgResp] = await Promise.all([
+      fetch('/api/all_restaurants'),
+      fetch('/api/game_state'),
+      fetch('/api/messages'),
+    ]);
+    if (restResp.ok) {
+      const data = await restResp.json();
+      Object.assign(restaurants, data);
+      renderRoster();
+    }
+    if (stateResp.ok) {
+      const gs = await stateResp.json();
+      updateHeader(gs.phase, gs.turn_id);
+    }
+    if (msgResp.ok) {
+      const msgs = await msgResp.json();
+      msgs.forEach(m => postAgentMessage(m));
+    }
+  } catch(e) {
+    console.warn('Initial load failed:', e);
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// SSE — only connects to our OWN tracker (port 5555)
+// NO direct calls to the game server ever!
+// ═══════════════════════════════════════════════════
+function connectSSE() {
+  const connBadge = document.getElementById('conn-badge');
+  const es = new EventSource('/stream');
+
+  es.onopen = () => {
+    connBadge.textContent = '● LIVE';
+    connBadge.className = 'badge';
+    connBadge.style.borderColor = 'var(--green)';
+    connBadge.style.color = 'var(--green)';
+    connBadge.style.background = 'rgba(46,204,113,.1)';
+  };
+  es.onerror = () => {
+    connBadge.textContent = '● RECONNECTING';
+    connBadge.className = 'badge off';
+    connBadge.style.borderColor = '';
+    connBadge.style.color = '';
+    connBadge.style.background = '';
+  };
+
+  es.onmessage = (ev) => {
+    let evt;
+    try { evt = JSON.parse(ev.data); } catch { return; }
+    const { type, data: d } = evt;
+
+    if (type === 'sse_event') {
+      const gameEvt = d.event;
+      const payload = d.payload || {};
+
+      if (gameEvt === 'new_message') {
+        postAgentMessage(payload);
+      } else if (gameEvt === 'game_phase_changed' || gameEvt === 'game_started') {
+        const phase = payload.phase || (gameEvt === 'game_started' ? 'speaking' : null);
+        const turn  = payload.turn_id;
+        updateHeader(phase, turn);
+        postPhase(phase, turn);
+      } else if (gameEvt === 'game_reset') {
+        updateHeader('reset', null);
+        postSystem('Game has been reset.');
+      }
+
+    } else if (type === 'restaurant_changed') {
+      // Update our local restaurant cache
+      const rid = d.id;
+      if (restaurants[rid]) {
+        if (d.state) restaurants[rid]._flat = d.state;
+      } else {
+        restaurants[rid] = { id: rid, name: d.name, _flat: d.state || {} };
+      }
+      renderRoster();
+      if (d.changes && d.changes.length) {
+        postRestaurant(d.name, rid, d.changes);
+      }
+
+    } else if (type === 'restaurant_snapshot') {
+      const rid = d.id;
+      if (!restaurants[rid]) {
+        restaurants[rid] = { id: rid, name: d.name, _flat: d.state || {} };
+        renderRoster();
+      }
+
+    } else if (type === 'meal_new') {
+      postMeal(d.restaurant_name, d.restaurant_id, d.meal, true);
+
+    } else if (type === 'meal_changed') {
+      postMeal(d.restaurant_name, d.restaurant_id, d.meal, false);
+
+    } else if (type === 'system') {
+      postSystem(d.msg || JSON.stringify(d));
+    }
+  };
+}
+
+// ═══════════════════════════════════════════════════
+// Boot
+// ═══════════════════════════════════════════════════
+loadInitial();
+connectSSE();
+
+// Refresh roster every 10 s (tracker already polls, no game API calls)
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/all_restaurants');
+    if (r.ok) { Object.assign(restaurants, await r.json()); renderRoster(); }
+  } catch {}
+}, 10000);
+</script>
+</body>
+</html>
+"""  # end SOCIAL_TEMPLATE
+
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1114,6 +1831,26 @@ def api_meals():
     return jsonify(meals)
 
 
+@app.route("/api/game_state")
+def api_game_state():
+    """Return current phase, turn, and restaurant count."""
+    with state_lock:
+        return jsonify({
+            "phase": state["phase"],
+            "turn_id": state["turn_id"],
+            "restaurant_count": len(state["restaurants"]),
+        })
+
+
+@app.route("/api/messages")
+def api_messages():
+    """Return recent agent messages (captured from new_message SSE events)."""
+    limit = flask_request.args.get("limit", 100, type=int)
+    with state_lock:
+        msgs = list(state["messages"][-limit:])
+    return jsonify(msgs)
+
+
 @app.route("/api/restaurant/<rid>")
 def api_restaurant_detail(rid):
     """Return full live detail for a restaurant (raw + change log + meals)."""
@@ -1147,6 +1884,11 @@ def api_restaurant_detail(rid):
         "change_log": change_log,
         "turn_id": turn_id,
     })
+
+
+@app.route("/social")
+def social():
+    return render_template_string(SOCIAL_TEMPLATE)
 
 
 @app.route("/stream")
