@@ -175,6 +175,7 @@ class GameOrchestrator:
         self._latest_intel: dict = {}
         self._running = False
         self._countdown_task: asyncio.Task | None = None
+        self._discovered_turn: int | None = None  # cached turn from probe
 
     async def start(self):
         """Initialise and start the game agent."""
@@ -438,6 +439,56 @@ class GameOrchestrator:
     #  SKILL CONTEXT BUILDER
     # ══════════════════════════════════════════════════════════════
 
+    async def _discover_turn_id(self) -> int:
+        """Discover the current turn_id by probing GET /meals.
+
+        Binary-searches turn_ids: 200 = valid (within current ± 2 window),
+        400 = outside window. The highest turn_id that returns 200 is the
+        current turn (or current+1/+2, close enough).
+
+        Returns discovered turn_id, or 1 as absolute last resort.
+        """
+        import aiohttp
+
+        if self._discovered_turn and self._discovered_turn > 0:
+            return self._discovered_turn
+
+        logger.info("Probing server to discover current turn_id...")
+
+        async with aiohttp.ClientSession() as session:
+            # Phase 1: exponential search to find upper bound
+            # Try 1, 2, 4, 8, 16, 32, 64... until we get 400
+            lo, hi = 1, 1
+            while hi <= 200:  # safety cap
+                url = f"{BASE_URL}/meals?turn_id={hi}&restaurant_id={TEAM_ID}"
+                try:
+                    async with session.get(url, headers=HEADERS) as resp:
+                        if resp.status == 200:
+                            lo = hi
+                            hi *= 2
+                        else:
+                            break
+                except Exception:
+                    break
+
+            # Phase 2: binary search between lo and hi
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                url = f"{BASE_URL}/meals?turn_id={mid}&restaurant_id={TEAM_ID}"
+                try:
+                    async with session.get(url, headers=HEADERS) as resp:
+                        if resp.status == 200:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                except Exception:
+                    hi = mid - 1
+
+            self._discovered_turn = lo
+            logger.info(f"Discovered current turn_id={lo}")
+            self.phase_router.current_turn = lo
+            return lo
+
     async def _build_skill_context(
         self,
         data: dict,
@@ -456,8 +507,8 @@ class GameOrchestrator:
         if not turn_id or turn_id <= 0:
             turn_id = self.phase_router.current_turn
         if not turn_id or turn_id <= 0:
-            turn_id = 1  # absolute fallback
-            logger.warning(f"turn_id was 0, using fallback turn_id={turn_id}")
+            turn_id = await self._discover_turn_id()
+            logger.info(f"Using discovered turn_id={turn_id}")
         phase = data.get("phase", self.phase_router.current_phase or "speaking")
         is_mid = data.get("is_mid_turn_entry", False)
         skipped = data.get("skipped_phases", [])
@@ -509,6 +560,7 @@ class GameOrchestrator:
         'speaking' phase event, so all speaking-phase logic must run here.
         """
         logger.info("Game started event received (= speaking phase)")
+        self._discovered_turn = None  # reset cache for new turn
         await self.phase_router.handle_game_started(data)
         self.skill_orchestrator.new_turn()
 
@@ -521,8 +573,10 @@ class GameOrchestrator:
         # Manually advance the router so _build_skill_context sees the right state.
         turn_id = data.get("turn_id", self.phase_router.current_turn)
         if turn_id <= 0:
-            logger.warning(f"game_started had turn_id={turn_id} — using 1 as fallback")
-            turn_id = max(turn_id, 1)
+            turn_id = await self._discover_turn_id()
+            logger.info(f"game_started had no turn_id — discovered turn_id={turn_id}")
+        else:
+            self._discovered_turn = turn_id  # cache the known turn
         self.phase_router.current_turn = turn_id
         self.phase_router.current_phase = "speaking"
         self.phase_router._turn_has_seen_speaking = True
@@ -540,6 +594,7 @@ class GameOrchestrator:
     async def _handle_game_reset(self, data: dict):
         """Handle game_reset — clear turn-scoped state, preserve cross-turn memory."""
         logger.info("Game reset — clearing turn state")
+        self._discovered_turn = None  # reset cache
         self.game_state.reset()
         self.serving.set_menu([])
         await self.phase_router.handle_game_reset(data)
