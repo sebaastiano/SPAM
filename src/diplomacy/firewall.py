@@ -64,12 +64,13 @@ class GroundTruthFirewall:
 
         # Record in message log
         if self.message_log:
-            self.message_log.record_received(
-                sender_id=sender_id,
-                sender_name=sender_name,
-                text=claim,
-                turn=0,
-            )
+            self.message_log.log_received({
+                "messageId": message_id,
+                "senderId": sender_id,
+                "senderName": sender_name,
+                "text": claim,
+                "datetime": timestamp,
+            })
 
         credibility = 0.5
         if self.message_log:
@@ -135,7 +136,7 @@ class GroundTruthFirewall:
         if self.message_log:
             current = self.message_log.get_credibility(sender_id)
             new_cred = max(0.0, min(1.0, current + adjustment * 0.1))
-            self.message_log.credibility[sender_id] = new_cred
+            self.message_log._credibility[sender_id] = new_cred
             logger.debug(
                 f"Credibility for {sender_id}: {current:.2f} → {new_cred:.2f}"
             )
