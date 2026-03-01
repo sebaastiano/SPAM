@@ -94,7 +94,10 @@ class TrackerBridge:
             data = resp.json()
             if isinstance(data, list):
                 return {r.get("id", i): r for i, r in enumerate(data)}
-            return data if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                # JSON keys are strings — convert to int for consistency
+                return {int(k): v for k, v in data.items()}
+            return {}
         except Exception as e:
             logger.warning(f"Failed to fetch restaurants from tracker: {e}")
             return {}
