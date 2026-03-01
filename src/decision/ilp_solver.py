@@ -31,6 +31,7 @@ from src.config import (
     ZONE_PRICE_FACTORS,
     ARCHETYPE_CEILINGS,
     ZONE_TARGET_ARCHETYPES,
+    PRICE_TIERS,
     HIGH_DELTA_INGREDIENTS,
     SERVINGS_BUFFER,
     DEFAULT_SPENDING_FRACTION,
@@ -273,7 +274,7 @@ def _greedy_fallback(
 
     selected = scored_recipes[:menu_max]
     if len(selected) < menu_min:
-        selected = scored_recipes[:menu_min]
+        selected = scored_recipes[:min(menu_min, len(scored_recipes))]
 
     for entry in selected:
         recipe = entry["recipe"]
@@ -336,7 +337,7 @@ def _score_recipes(
     reputation: float,
     demand_forecast: dict[str, float],
 ) -> list[dict]:
-    """Score and rank recipes for a zone."""
+    """Score and rank recipes for a zone — favor volume and diversity."""
     scored = []
 
     high_delta_set = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
@@ -349,16 +350,19 @@ def _score_recipes(
         # Score components
         prestige_score = prestige / 100.0
 
-        # Speed score (faster = better)
+        # Speed score (faster = better — MORE customers served)
         speed_score = max(0, 1.0 - prep_time / 15.0)
 
-        # Inventory fit (how many ingredients do we already have?)
+        # Inventory fit (CRITICAL for volume: cook what we HAVE = no bidding cost)
         total_needed = sum(ingredients.values())
         have = sum(
             min(inventory.get(ing, 0), qty)
             for ing, qty in ingredients.items()
         )
         inventory_score = have / max(total_needed, 1)
+
+        # Ingredient simplicity bonus: fewer distinct ingredients = cheaper to stock
+        simplicity_bonus = max(0, 1.0 - len(ingredients) / 10.0) * 0.15
 
         # High-delta ingredient bonus
         delta_bonus = sum(
@@ -374,11 +378,12 @@ def _score_recipes(
         )
 
         total_score = (
-            prestige_score * 0.3
+            prestige_score * 0.20
             + speed_score * 0.25
-            + inventory_score * 0.25
-            + delta_bonus * 0.1
-            - competition_penalty * 0.1
+            + inventory_score * 0.30   # heavily favor what we already have
+            + simplicity_bonus
+            + delta_bonus * 0.05
+            - competition_penalty * 0.05
         )
 
         scored.append({"recipe": recipe, "score": total_score})
@@ -392,66 +397,71 @@ def compute_menu_price(
     competitor_briefings: dict[int, dict] | None = None,
 ) -> float:
     """
-    Compute menu price for a dish.
+    Compute menu price for a dish using MIXED TIERED PRICING.
 
-    PROFIT-MAXIMISATION PRICING:
-    - Astrobarone and Saggi del Cosmo do NOT care about price → charge maximum!
-    - Famiglie Orbitali are price-sensitive but tolerant → charge moderately high
-    - Esploratori want cheap → keep accessible but still profitable
-    - Every dish must generate maximum margin over ingredient cost
-    - NEVER cap prices below what the archetype will pay
+    VOLUME-FIRST STRATEGY:
+    - Prestige determines the tier → each tier has a different base price
+    - Low-prestige dishes are CHEAP → attract Esploratori, Famiglie (volume!)
+    - Mid-prestige dishes are MODERATE → broad appeal, solid margins
+    - High-prestige dishes are HIGHER → extract value from Astrobaroni, Saggi
+    - The menu naturally offers something for EVERY archetype
+
+    Key insight: 10 customers × 50 credits = 500 revenue
+                 0 customers × 500 credits = 0 revenue
+    Volume wins. Always.
     """
-    target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
-    if target_archetypes:
-        archetype = target_archetypes[0]
-    else:
-        archetype = "Famiglie Orbitali"  # default
-
-    base_price = ARCHETYPE_CEILINGS.get(archetype, 150)
-
-    # Reputation multiplier — higher rep = charge more
-    rep_mult = 1.0 + (reputation - 50) / 150
-
-    # Zone factor (PREMIUM = 1.0, no discounting the rich!)
-    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.75)
-
-    # Prestige bonus — high prestige dishes command premium prices
     prestige = recipe.get("prestige", 50)
-    prestige_mult = 1.0 + (prestige - 50) / 100  # stronger prestige effect
 
-    price = int(base_price * rep_mult * zone_factor * prestige_mult)
+    # TIERED BASE PRICES — determined by prestige level
+    # Each tier targets a different customer segment
+    base_price = 60  # fallback
+    for tier_name, (p_min, p_max, tier_price) in PRICE_TIERS.items():
+        if p_min <= prestige <= p_max:
+            base_price = tier_price
+            break
 
-    # INTELLIGENCE ADJUSTMENT
+    # Gentle prestige scaling WITHIN each tier (±20% max)
+    prestige_mult = 1.0 + (prestige - 50) / 250
+
+    # Reputation bonus — subtle, we're building trust not gouging
+    # At rep=50: mult=1.0, at rep=100: mult=1.17
+    rep_mult = 1.0 + (reputation - 50) / 300
+
+    # Zone factor — still differentiate zones, but less aggressively
+    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.65)
+
+    price = int(base_price * prestige_mult * rep_mult * zone_factor)
+
+    # COMPETITION ADJUSTMENT: undercut to win customers
     if competitor_briefings:
         active_competitors = sum(
             1 for b in competitor_briefings.values()
             if b.get("is_connected", False)
         )
         if active_competitors == 0:
-            # NO competition — MONOPOLY! Price at ceiling × prestige boost
-            price = int(base_price * rep_mult * prestige_mult)
-            # Premium archetypes: push even higher (they'll pay!)
-            if archetype in ("Astrobarone", "Saggi del Cosmo"):
-                price = int(price * 1.15)
+            # Monopoly — modest increase (don't get greedy, volume still matters)
+            price = int(price * 1.15)
         else:
-            # Competition exists — still price high, don't race to bottom
+            # Competition exists — match or undercut depending on tier
             competitor_prices = [
-                b.get("menu_price_avg", 100)
+                b.get("menu_price_avg", 0)
                 for b in competitor_briefings.values()
                 if b.get("menu_price_avg", 0) > 0
             ]
             if competitor_prices:
                 avg_comp_price = sum(competitor_prices) / len(competitor_prices)
-                if zone == "PREMIUM_MONOPOLIST":
-                    # Stay premium — price ABOVE competitors
-                    price = max(price, int(avg_comp_price * 1.15))
-                elif zone == "BUDGET_OPPORTUNIST":
-                    # Undercut only slightly — still maintain decent margin
-                    price = min(price, int(avg_comp_price * 0.92))
+                if prestige <= 50:
+                    # Bargain/budget tier: aggressively undercut
+                    price = min(price, int(avg_comp_price * 0.75))
+                elif prestige <= 70:
+                    # Mid tier: slight undercut to stay competitive
+                    price = min(price, int(avg_comp_price * 0.90))
+                # Premium tier: keep our price (rich clients don't mind)
 
-    # Price floor: never sell below minimum viable margin
-    # Price ceiling: generous — let the market decide
-    price = max(15, min(price, int(base_price * 2.0)))
+    # Hard floor and ceiling
+    # Floor: 12 credits minimum (never give food away)
+    # Ceiling: 250 credits max (nobody likes being gouged)
+    price = max(12, min(price, 250))
 
     return price
 

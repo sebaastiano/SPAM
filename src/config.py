@@ -45,14 +45,25 @@ ZONES = [
 ]
 
 # ── Archetype price ceilings (estimated from analysis) ──
-# Astrobarone: "guarda poco al prezzo" → price very high!
-# Saggi del Cosmo: "badano poco al prezzo" → price very high!
-# These are NOT spending limits — they're our target prices.
+# These are the MAXIMUM a client archetype will tolerate.
+# We should price WELL BELOW these to attract volume!
+# Pricing far below ceiling → more clients → more total revenue.
 ARCHETYPE_CEILINGS = {
     "Esploratore Galattico": 60,
     "Astrobarone": 500,
     "Saggi del Cosmo": 600,
     "Famiglie Orbitali": 150,
+}
+
+# ── ACTUAL target prices per tier (volume-first mixed pricing) ──
+# These are what we CHARGE — well below ceilings to attract customers.
+# Mixed tiers ensure we appeal to ALL archetypes simultaneously.
+PRICE_TIERS = {
+    "bargain":  (0,  35,  25),   # (prestige_min, prestige_max, base_price)
+    "budget":   (36, 50,  40),
+    "mid":      (51, 65,  60),
+    "mid_high": (66, 80,  90),
+    "premium":  (81, 100, 135),
 }
 
 # ── Known archetypes ──
@@ -94,14 +105,15 @@ NEGATIVE_DELTA_INGREDIENTS = [
 ]
 
 # ── Zone-specific price factors ──
-# PREMIUM_MONOPOLIST: NO discount — rich clients pay full price!
-# BUDGET: slight discount to attract volume (still profitable).
+# VOLUME-FIRST: price attractively across all zones.
+# Even premium zone uses moderate factor — we need customers!
+# Once reputation is high (>85), we can revisit upward.
 ZONE_PRICE_FACTORS = {
-    "PREMIUM_MONOPOLIST": 1.0,
-    "BUDGET_OPPORTUNIST": 0.60,
-    "NICHE_SPECIALIST": 0.85,
-    "SPEED_CONTENDER": 0.75,
-    "MARKET_ARBITRAGEUR": 0.65,
+    "PREMIUM_MONOPOLIST": 0.90,
+    "BUDGET_OPPORTUNIST": 0.50,
+    "NICHE_SPECIALIST": 0.75,
+    "SPEED_CONTENDER": 0.65,
+    "MARKET_ARBITRAGEUR": 0.55,
 }
 
 # ── Zone-specific system prompts ──
@@ -165,31 +177,35 @@ ZONE_TARGET_ARCHETYPES = {
 }
 
 # ── Zone prestige ranges ──
+# WIDER ranges = more eligible recipes = bigger menus = more customers.
+# Mixed prestige naturally creates mixed prices (the core strategy).
 ZONE_PRESTIGE_RANGE = {
-    "PREMIUM_MONOPOLIST": (85, 100),
-    "BUDGET_OPPORTUNIST": (23, 60),
-    "NICHE_SPECIALIST": (50, 100),
-    "SPEED_CONTENDER": (50, 80),
+    "PREMIUM_MONOPOLIST": (55, 100),
+    "BUDGET_OPPORTUNIST": (23, 75),
+    "NICHE_SPECIALIST": (35, 100),
+    "SPEED_CONTENDER": (23, 90),
     "MARKET_ARBITRAGEUR": (23, 100),
 }
 
 # ── Zone menu size constraints ──
-# More items = more customers we can serve = more revenue.
-# This is one of the most important levers for winning.
+# MORE ITEMS = MORE CHOICE = MORE CUSTOMERS = MORE REVENUE.
+# This is the single most important lever for winning.
+# Bigger menus attract more archetypes and serve more clients.
 ZONE_MENU_SIZE = {
-    "PREMIUM_MONOPOLIST": (5, 8),
-    "BUDGET_OPPORTUNIST": (8, 12),
-    "NICHE_SPECIALIST": (5, 8),
-    "SPEED_CONTENDER": (6, 10),
-    "MARKET_ARBITRAGEUR": (2, 4),
+    "PREMIUM_MONOPOLIST": (8, 15),
+    "BUDGET_OPPORTUNIST": (10, 18),
+    "NICHE_SPECIALIST": (8, 14),
+    "SPEED_CONTENDER": (10, 18),
+    "MARKET_ARBITRAGEUR": (4, 8),
 }
 
 # ── Max prep time per zone (seconds) ──
+# Relaxed slightly to allow more recipes into the pool.
 ZONE_MAX_PREP_TIME = {
-    "PREMIUM_MONOPOLIST": 7.0,
-    "BUDGET_OPPORTUNIST": 6.0,
-    "NICHE_SPECIALIST": 10.0,
-    "SPEED_CONTENDER": 5.0,
+    "PREMIUM_MONOPOLIST": 9.0,
+    "BUDGET_OPPORTUNIST": 8.0,
+    "NICHE_SPECIALIST": 12.0,
+    "SPEED_CONTENDER": 6.0,
     "MARKET_ARBITRAGEUR": 15.0,
 }
 
