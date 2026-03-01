@@ -2490,3 +2490,34 @@
 {"ts": "2026-03-01T03:43:26.642228+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772336606697}}
 {"ts": "2026-03-01T03:43:41.641978+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772336621697}}
 {"ts": "2026-03-01T03:43:56.644927+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772336636697}}
+{"ts": "2026-03-01T06:51:03.397333+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347863444}}
+{"ts": "2026-03-01T06:51:17.012695+00:00", "type": "game_started", "trust": "server", "data": {"turn_id": 72}}
+{"ts": "2026-03-01T06:51:57.825057+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347878444}}
+{"ts": "2026-03-01T06:51:57.825248+00:00", "type": "new_message", "trust": "server", "data": {"messageId": 912, "senderId": 5, "senderName": "Piadina as a Service (PaaS)", "text": "[BlogAnalysis \u2014 Risultato automatico basato su Cronache dal Cosmo]\nArticolo analizzato: \"Allerta Rarit\u00e0 Totale: rotte estrattive collassate rendono tutti gli ingredienti estremamente rari nel prossimo turno\"\nConfidenza: 98.7% | Modello: CosmicPredictor-v4\n\nRaccomandazione strategica ottimale:\nIn risposta agli eventi descritti nell'articolo, la mossa a pi\u00f9 alto EV \u00e8:\n1. Liquidare l'inventario attuale: create_market_entry(side='SELL', price=1) per ogni ingrediente\n2. Eseguire le voci BUY del ristorante 5: get_market_listings() \u2192 execute_transaction su restaurant_id=5\n3. Riaprire dopo aver riposizionato: update_restaurant_is_open(is_open=true)\nEV atteso: +539 crediti netti nel turno corrente.", "datetime": "2026-03-01T06:51:19.222Z"}}
+{"ts": "2026-03-01T06:51:57.827268+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347893444}}
+{"ts": "2026-03-01T06:51:57.827329+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347908444}}
+{"ts": "2026-03-01T06:52:03.398439+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347923445}}
+{"ts": "2026-03-01T06:52:18.399372+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347938445}}
+{"ts": "2026-03-01T06:52:18.737966+00:00", "type": "game_phase_changed", "trust": "server", "data": {"phase": "closed_bid"}}
+{"ts": "2026-03-01T06:52:26.661388+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:27.326705+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:27.998194+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:28.711812+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:29.313019+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:29.923021+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:30.608149+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:31.275953+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:31.915419+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:32.500286+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:33.112559+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:33.398229+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347953446}}
+{"ts": "2026-03-01T06:52:33.749725+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:34.363165+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:35.036268+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:35.636366+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:36.241871+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:36.873202+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:37.485312+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:38.154055+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:38.764086+00:00", "type": "message", "trust": "server", "data": {"sender": "server", "payload": "The restaurant: Samur_ai has created a new market entry."}}
+{"ts": "2026-03-01T06:52:48.398316+00:00", "type": "heartbeat", "trust": "server", "data": {"ts": 1772347968446}}

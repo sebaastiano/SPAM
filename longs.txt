@@ -1,39 +1,890 @@
-2026-03-01 04:15:06,407 spam.main                      INFO    Game started event received (= speaking phase)
-2026-03-01 04:15:06,407 spam.phase_router              INFO    Game started — turn_id=53, awaiting first phase
-2026-03-01 04:15:06,762 spam.recipe_loader             INFO    Loaded 287 raw recipes from server
-2026-03-01 04:15:06,763 spam.recipe_loader             INFO    Normalised 287 recipes
-2026-03-01 04:15:06,764 spam.main                      INFO    Probing server to discover current turn_id...
-2026-03-01 04:15:06,936 spam.main                      INFO    Discovered current turn_id=1
-2026-03-01 04:15:06,937 spam.main                      INFO    Dispatching speaking phase with turn_id=53
-2026-03-01 04:15:06,937 spam.main                      INFO    [SPEAKING] Turn 53
-2026-03-01 04:15:07,147 spam.main                      INFO    Context built: turn=53, phase=speaking, balance=43155, reputation=98, inventory=0 types/0 units, menu=12 items, open=False, mid_turn=False
-2026-03-01 04:15:07,148 spam.skills                    INFO    ▸ Executing skill: strategic_plan
-2026-03-01 04:15:07,150 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 53...
-2026-03-01 04:15:10,737 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-01 04:15:10,743 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=16, bid_aggr=0.40, price=volume_first, diplomacy=silent, confidence=0.75
-2026-03-01 04:15:10,743 spam.main                      INFO    Strategic plan: zone=DIVERSIFIED, menu_size=16, bid_aggr=0.40, price=volume_first, diplo=silent, confidence=0.75
-2026-03-01 04:15:10,743 spam.main                      INFO      Zone reasoning: No competition and a full range of customer archetypes present; a broad menu maximizes foot traffic and revenue.
-2026-03-01 04:15:10,743 spam.main                      INFO      Bid reasoning: Secure core high-demand ingredients at modest bids to ensure menu variety without overspending.
-2026-03-01 04:15:10,743 spam.skills                    INFO      ✓ strategic_plan succeeded
-2026-03-01 04:15:10,743 spam.skills                    INFO    ▸ Executing skill: intelligence_scan
-2026-03-01 04:15:10,743 spam.intelligence.pipeline     INFO    Running intelligence pipeline (DagPipeline) for turn 53
-2026-03-01 04:15:10,765 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/bid_history "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,766 spam.intelligence.tracker_bridge WARNING Failed to fetch bid history: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/bid_history'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,767 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/market "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,767 spam.intelligence.tracker_bridge WARNING Failed to fetch market entries: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/market'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,768 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/meals "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,768 spam.intelligence.tracker_bridge WARNING Failed to fetch meals: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/meals'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,769 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/all_restaurants "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,769 spam.intelligence.tracker_bridge WARNING Failed to fetch restaurants from tracker: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/all_restaurants'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,769 spam.intelligence.pipeline     INFO    Intelligence: 0 competitors analyzed, clusters: {}
-2026-03-01 04:15:10,769 spam.main                      INFO    Intelligence: 0 briefings, 0 connected, 0 non-dormant, 0 clusters
-2026-03-01 04:15:10,769 spam.skills                    INFO      ✓ intelligence_scan succeeded
-2026-03-01 04:15:10,769 spam.skills                    INFO    ▸ Executing skill: strategic_refine
-2026-03-01 04:15:10,770 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 53...
-2026-03-01 04:15:12,967 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-01 04:15:12,979 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=18, bid_aggr=0.45, price=volume_first, diplomacy=silent, confidence=0.78
-2026-03-01 04:15:12,979 spam.main                      INFO    Strategy refined with intel: zone=DIVERSIFIED, confidence=0.78
+(.venv) pietrosaveri@Pietros-MacBook-Pro SPAM % python3 -m src.main
+2026-03-01 07:50:57,473 spam.main                      INFO    Tracker already running on port 5555 — reusing existing instance
+2026-03-01 07:50:57,474 spam.main                      INFO    Dashboard already running on port 5556 — reusing
+2026-03-01 07:50:57,542 spam.intelligence.pipeline     INFO    Intelligence DagPipeline built with 8 modules, 10 connections
+2026-03-01 07:50:57,564 spam.main                      INFO    Registered 20 skills
+2026-03-01 07:50:57,564 spam.main                      INFO    === SPAM! (Team 17) Starting ===
+2026-03-01 07:50:57,719 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:50:57,720 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 07:50:57,765 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 07:50:57,939 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:50:57,940 spam.main                      INFO    MCP tools available: ['closed_bid', 'save_menu', 'create_market_entry', 'execute_transaction', 'delete_market_entry', 'prepare_dish', 'serve_dish', 'update_restaurant_is_open', 'send_message']
+2026-03-01 07:50:58,042 spam.decision.subagent_router  INFO    Initialized 6 zone agents + strategy agent
+2026-03-01 07:50:58,246 spam.recipe_loader             INFO    Loaded 287 raw recipes from server
+2026-03-01 07:50:58,247 spam.recipe_loader             INFO    Normalised 287 recipes
+2026-03-01 07:50:58,247 spam.main                      INFO    Loaded 287 recipes
+2026-03-01 07:50:58,427 spam.main                      INFO    Initial state: balance=43427, reputation=97
+2026-03-01 07:50:58,427 spam.main                      INFO    Connecting to SSE stream...
+2026-03-01 07:50:58,427 spam.event_bus                 INFO    Connecting to SSE at https://hackapizza.datapizza.tech/events/17
+2026-03-01 07:50:58,427 spam.main                      INFO    Countdown timer started
+2026-03-01 07:50:58,612 spam.event_bus                 INFO    SSE connection established
+2026-03-01 07:50:58,612 spam.event_bus                 INFO    SSE connected acknowledgement
+2026-03-01 07:51:17,013 spam.main                      INFO    Game started event received (= speaking phase)
+2026-03-01 07:51:17,013 spam.phase_router              INFO    Game started — turn_id=72, awaiting first phase
+2026-03-01 07:51:17,452 spam.recipe_loader             INFO    Loaded 287 raw recipes from server
+2026-03-01 07:51:17,454 spam.recipe_loader             INFO    Normalised 287 recipes
+2026-03-01 07:51:17,455 spam.main                      INFO    Probing server to discover current turn_id...
+2026-03-01 07:51:17,682 spam.main                      INFO    Discovered current turn_id=1
+2026-03-01 07:51:17,683 spam.main                      INFO    Dispatching speaking phase with turn_id=72
+2026-03-01 07:51:17,683 spam.main                      INFO    [SPEAKING] Turn 72
+2026-03-01 07:51:17,863 spam.main                      INFO    Context built: turn=72, phase=speaking, balance=44427, reputation=97, inventory=0 types/0 units, menu=22 items, open=False, mid_turn=False
+2026-03-01 07:51:17,863 spam.skills                    INFO    ▸ Executing skill: strategic_plan
+2026-03-01 07:51:17,864 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 72...
+2026-03-01 07:51:21,536 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:21,545 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=15, bid_aggr=0.60, price=balanced, diplomacy=silent, confidence=0.78
+2026-03-01 07:51:21,545 spam.main                      INFO    Strategic plan: zone=DIVERSIFIED, menu_size=15, bid_aggr=0.60, price=balanced, diplo=silent, confidence=0.78, skills=['zone_selection', 'bid_submit', 'intelligence_scan', 'menu_planning', 'menu_save', 'market_ops', 'bid_compute']
+2026-03-01 07:51:21,545 spam.main                      INFO      Zone reasoning: No active competitors and high reputation allow us to target all archetypes; a broad menu maximizes revenue potential ac
+2026-03-01 07:51:21,545 spam.main                      INFO      Bid reasoning: Invest moderate bids to secure versatile, high-demand ingredients for a diversified menu; early spending is justified to
+2026-03-01 07:51:21,545 spam.skills                    INFO      ✓ strategic_plan succeeded
+2026-03-01 07:51:21,545 spam.skills                    INFO    ▸ Executing skill: intelligence_scan
+2026-03-01 07:51:21,545 spam.intelligence.pipeline     INFO    Running intelligence pipeline (DagPipeline) for turn 72
+2026-03-01 07:51:21,576 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/meals "HTTP/1.1 200 OK"
+2026-03-01 07:51:21,588 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/market "HTTP/1.1 200 OK"
+2026-03-01 07:51:21,589 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/all_restaurants "HTTP/1.1 200 OK"
+2026-03-01 07:51:21,589 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/bid_history "HTTP/1.1 200 OK"
+2026-03-01 07:51:25,483 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/11 "HTTP/1.1 200 OK"
+2026-03-01 07:51:25,718 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/2 "HTTP/1.1 200 OK"
+2026-03-01 07:51:25,934 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/18 "HTTP/1.1 200 OK"
+2026-03-01 07:51:26,106 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/16 "HTTP/1.1 200 OK"
+2026-03-01 07:51:26,324 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/21 "HTTP/1.1 200 OK"
+2026-03-01 07:51:26,553 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/12 "HTTP/1.1 200 OK"
+2026-03-01 07:51:27,068 spam.intelligence.data_collector INFO    Fetched 745 prior-turn bids (turn 71)
+2026-03-01 07:51:27,069 spam.intelligence.data_collector INFO    Data collected: 25 restaurants, 5330 effective bids (current=5330, prior=745), 6075 total accumulated bids across 2 turns
+2026-03-01 07:51:27,086 spam.intelligence.vector_store INFO    Saved 24 feature vectors for turn 72
+2026-03-01 07:51:27,086 spam.intelligence.pipeline     INFO    Intelligence: 24 competitors analyzed, clusters: {'STABLE_SPECIALIST': 5, 'UNCLASSIFIED': 17, 'DORMANT': 2}
+2026-03-01 07:51:27,086 spam.main                      INFO    Intelligence: 24 briefings, 24 connected, 22 non-dormant, 24 clusters
+2026-03-01 07:51:27,086 spam.skills                    INFO      ✓ intelligence_scan succeeded
+2026-03-01 07:51:27,086 spam.skills                    INFO    ▸ Executing skill: strategic_refine
+2026-03-01 07:51:27,087 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 72...
+2026-03-01 07:51:28,430 spam.main                      INFO    ⏱ Turn 72 | SPEAKING [██░░░░░░░░░░░░░░░░░░] 10s/1m30s (~1m19s left) | Next turn in ~5m49s
+2026-03-01 07:51:30,213 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:30,214 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=16, bid_aggr=0.42, price=balanced, diplomacy=passive, confidence=0.78
+2026-03-01 07:51:30,214 spam.main                      INFO    Strategy refined with intel: zone=DIVERSIFIED, confidence=0.78, skills=['zone_selection', 'bid_submit', 'intelligence_scan', 'menu_planning', 'menu_save', 'market_ops', 'bid_compute']
+2026-03-01 07:51:30,214 spam.skills                    INFO      ✓ strategic_refine succeeded
+2026-03-01 07:51:30,214 spam.skills                    INFO    ▸ Executing skill: zone_selection
+2026-03-01 07:51:30,216 spam.decision.zone_selector    INFO    Selected zone: DIVERSIFIED (score=0.47, active_competitors=24)
+2026-03-01 07:51:30,216 spam.decision.subagent_router  INFO    Active zone: DIVERSIFIED
+2026-03-01 07:51:30,216 spam.main                      INFO    Zone selected: DIVERSIFIED (agent agrees)
+2026-03-01 07:51:30,216 spam.skills                    INFO      ✓ zone_selection succeeded
+2026-03-01 07:51:30,216 spam.skills                    INFO    ▸ Executing skill: menu_planning
+2026-03-01 07:51:30,216 spam.decision.strategy_agent   INFO    Menu guidance from agent: size=16, prestige=[20-90], prep≤12.0s, diversify=True
+2026-03-01 07:51:30,216 spam.decision.strategy_agent   INFO    Bid guidance from agent: spending=0.35, aggr=0.42, priority=['Gnocchi del Crepuscolo', 'Plasma Vitale', 'Carne di Xenodonte']
+2026-03-01 07:51:30,216 spam.main                      INFO    Menu planning: zone=DIVERSIFIED, phase=speaking, spending=0.35, balance=44427, inventory_items=0, inventory_total=0
+2026-03-01 07:51:30,216 spam.main                      INFO      Agent guidance: size=16, prestige=[20-90], prep≤12.0s, diversify=True
+2026-03-01 07:51:30,216 spam.decision.ilp_solver       INFO    Agent guidance applied: prestige=[10,100], menu=[12,22], prep≤12.0s
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Proteine Interstellari    price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Il Crepuscolo dell’Unicorno                   price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Universo in Fusilli - Variazione Celestiale   price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Echi del Mare Eterno                          price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmologica                          price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: La Voce del Vento                             price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Sinfonia Aromatica del Multiverso             price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Danza Luminosa del Multiverso                 price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Sinfonia Celestiale di Echi Galattici         price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Sinfonia Galattica Agentica                   price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: L'Abbraccio del Cosmo                         price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO      Menu: Nebulosa di Sapori dell'Infinito              price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:51:30,237 spam.decision.ilp_solver       INFO    MILP [DIVERSIFIED]: 12 menu items, 33 bids (total_qty=60), cost=1008/15416 budget, expected_rev=3, NET PROFIT=-1005
+2026-03-01 07:51:30,237 spam.main                      INFO    Menu planned: 12 items — ['Sinfonia Cosmica di Proteine Interstella', 'Il Crepuscolo dell’Unicorno', 'Universo in Fusilli - Variazione Celesti', 'Echi del Mare Eterno', 'Sinfonia Cosmologica', 'La Voce del Vento', 'Sinfonia Aromatica del Multiverso', 'Danza Luminosa del Multiverso', 'Sinfonia Celestiale di Echi Galattici', 'Sinfonia Galattica Agentica', "L'Abbraccio del Cosmo", "Nebulosa di Sapori dell'Infinito"]
+2026-03-01 07:51:30,237 spam.skills                    INFO      ✓ menu_planning succeeded
+2026-03-01 07:51:30,237 spam.skills                    INFO    ▸ Executing skill: menu_save
+2026-03-01 07:51:30,415 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:30,415 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 07:51:30,477 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 07:51:30,638 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:30,639 spam.main                      ERROR   MCP save_menu FAILED: MCP error -32602: Input validation error: Invalid arguments for tool save_menu: [
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      0,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      1,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      2,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      3,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      4,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      5,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      6,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      7,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      8,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      9,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      10,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      11,
+      "price"
+    ]
+  }
+]
+2026-03-01 07:51:30,639 spam.main                      ERROR   Failed to save menu: MCP save_menu failed: MCP error -32602: Input validation error: Invalid arguments for tool save_menu: [
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      0,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      1,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      2,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      3,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      4,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      5,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      6,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      7,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      8,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      9,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      10,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      11,
+      "price"
+    ]
+  }
+]
+2026-03-01 07:51:30,639 spam.skills                    WARNING   ✗ menu_save failed: MCP save_menu failed: MCP error -32602: Input validation error: Invalid arguments for tool save_menu: [
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      0,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      1,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      2,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      3,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      4,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      5,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      6,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      7,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      8,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      9,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      10,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      11,
+      "price"
+    ]
+  }
+]
+2026-03-01 07:51:30,639 spam.skills                    INFO    ▸ Executing skill: market_ops
+2026-03-01 07:51:30,639 spam.main                      WARNING Market ops: No menu set — skipping market operations. Selling without a menu would dump all inventory as surplus.
+2026-03-01 07:51:30,639 spam.skills                    INFO      ✓ market_ops succeeded
+2026-03-01 07:51:30,639 spam.skills                    INFO    ▸ Executing skill: diplomacy_send
+2026-03-01 07:51:30,640 spam.main                      INFO    Diplomacy agent guidance: priority=passive, max_messages=1, targets=[12, 19]
+2026-03-01 07:51:30,640 spam.main                      INFO    Diplomacy input: 24 briefings, 24 competitor states available
+2026-03-01 07:51:30,640 spam.diplomacy.agent           INFO    Diplomacy candidates: 24 total briefings, 22 non-dormant
+2026-03-01 07:51:30,640 spam.diplomacy.agent           INFO    Running DeceptionBandit target selection on 22 candidates
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Samur_ai (threat=0.70): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Bluers (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Cavalli al trotto (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Claudio Opuscoli (threat=0.70): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target DeepAiUG (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Desf-AI (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Starrats (threat=0.70): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target sphacketti (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target MARADONA (threat=0.70): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target AI Caramba (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Accattoni (threat=0.70): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Prompt in the shell (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Domenicaln (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Neural Nomads (threat=0.70): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Piadina as a Service (PaaS) (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target RAGù (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Siesta dopo pizza (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target Synapse AI (threat=0.70): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.deception_bandit INFO    Target The Hallucinators (threat=0.60): building threat response
+2026-03-01 07:51:30,640 spam.diplomacy.agent           INFO    DeceptionBandit selected 3 action(s): manufactured_scarcity→Samur_ai, manufactured_scarcity→Claudio Opuscoli, manufactured_scarcity→Starrats
+2026-03-01 07:51:30,640 spam.diplomacy.agent           INFO    PseudoGAN crafting [manufactured_scarcity] message for Samur_ai (desired: overbid_on_ingredient)
+2026-03-01 07:51:30,640 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: generating message...
+2026-03-01 07:51:31,980 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:34,220 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:34,221 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: score=0.10, msg='Ciao Samur_ai! Ho notato che il tuo menù medio è 249 e ami l'
+2026-03-01 07:51:34,221 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: generating message...
+2026-03-01 07:51:36,939 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:39,167 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:39,169 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: score=0.25, msg='Ciao Samur_ai! Ho notato che il tuo Sale Temporale sta volan'
+2026-03-01 07:51:39,169 spam.diplomacy.agent           INFO    PseudoGAN result for Samur_ai: 'Ciao Samur_ai! Ho notato che il tuo Sale Temporale sta volando, sto tenendo una scorta limitata per '
+2026-03-01 07:51:39,170 spam.diplomacy.agent           INFO    Sending message to restaurant 10 via MCP send_message
+2026-03-01 07:51:39,385 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:39,386 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 07:51:39,472 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 07:51:39,792 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:39,856 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:39,857 spam.diplomacy.agent           INFO    Message sent to 10 (confirmed by server)
+2026-03-01 07:51:39,882 httpx                          INFO    HTTP Request: POST http://localhost:5555/api/messages/sent "HTTP/1.1 200 OK"
+2026-03-01 07:51:39,882 spam.diplomacy.agent           INFO    Sent [manufactured_scarcity] to Samur_ai: 'Ciao Samur_ai! Ho notato che il tuo Sale Temporale...'
+2026-03-01 07:51:39,882 spam.diplomacy.agent           INFO    PseudoGAN crafting [manufactured_scarcity] message for Claudio Opuscoli (desired: overbid_on_ingredient)
+2026-03-01 07:51:39,882 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: generating message...
+2026-03-01 07:51:42,656 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:43,432 spam.main                      INFO    ⏱ Turn 72 | SPEAKING [█████░░░░░░░░░░░░░░░] 25s/1m30s (~1m04s left) | Next turn in ~5m34s
+2026-03-01 07:51:43,962 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:43,964 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: score=0.20, msg='Ciao Claudio! Ho notato che il tuo amido di Stellarion spicc'
+2026-03-01 07:51:43,964 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: generating message...
+2026-03-01 07:51:46,229 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:48,942 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:48,945 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: score=0.35, msg='Ciao Claudio! Ho visto i tuoi piatti con Amido di Stellarion'
+2026-03-01 07:51:48,945 spam.diplomacy.agent           INFO    PseudoGAN result for Claudio Opuscoli: 'Ciao Claudio! Ho visto i tuoi piatti con Amido di Stellarion, fantastici. Stiamo accumulando una sco'
+2026-03-01 07:51:48,945 spam.diplomacy.agent           INFO    Sending message to restaurant 14 via MCP send_message
+2026-03-01 07:51:49,148 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:49,149 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 07:51:49,211 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 07:51:49,424 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:49,488 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:49,489 spam.diplomacy.agent           INFO    Message sent to 14 (confirmed by server)
+2026-03-01 07:51:49,509 httpx                          INFO    HTTP Request: POST http://localhost:5555/api/messages/sent "HTTP/1.1 200 OK"
+2026-03-01 07:51:49,510 spam.diplomacy.agent           INFO    Sent [manufactured_scarcity] to Claudio Opuscoli: 'Ciao Claudio! Ho visto i tuoi piatti con Amido di ...'
+2026-03-01 07:51:49,510 spam.diplomacy.agent           INFO    PseudoGAN crafting [manufactured_scarcity] message for Starrats (desired: overbid_on_ingredient)
+2026-03-01 07:51:49,510 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: generating message...
+2026-03-01 07:51:52,052 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:53,267 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:53,273 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: score=0.30, msg='Ciao Starrats! Ho notato che il Sale Temporale è sempre nel '
+2026-03-01 07:51:53,273 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: generating message...
+2026-03-01 07:51:55,859 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:57,256 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 07:51:57,261 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: score=0.20, msg='Ciao Starrats! Ho visto che il Sale Temporale è spesso nella'
+2026-03-01 07:51:57,262 spam.diplomacy.agent           INFO    PseudoGAN result for Starrats: 'Ciao Starrats! Ho notato che il Sale Temporale è sempre nel vostro top list. Sto tenendo qualche ris'
+2026-03-01 07:51:57,262 spam.diplomacy.agent           INFO    Sending message to restaurant 18 via MCP send_message
+2026-03-01 07:51:57,453 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:57,455 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 07:51:57,524 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 07:51:57,733 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:57,796 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:51:57,798 spam.diplomacy.agent           INFO    Message sent to 18 (confirmed by server)
+2026-03-01 07:51:57,824 httpx                          INFO    HTTP Request: POST http://localhost:5555/api/messages/sent "HTTP/1.1 200 OK"
+2026-03-01 07:51:57,824 spam.diplomacy.agent           INFO    Sent [manufactured_scarcity] to Starrats: 'Ciao Starrats! Ho notato che il Sale Temporale è s...'
+2026-03-01 07:51:57,824 spam.main                      INFO    Agent caps diplomacy to 1 messages (was 3)
+2026-03-01 07:51:57,824 spam.main                      INFO      ✉ [manufactured_scarcity] → Samur_ai (effect=overbid_on_ingredient): 'Ciao Samur_ai! Ho notato che il tuo Sale Temporale sta volando, sto tenendo una '
+2026-03-01 07:51:57,824 spam.main                      INFO    Diplomacy: sent 1 messages total
+2026-03-01 07:51:57,824 spam.skills                    INFO      ✓ diplomacy_send succeeded
+2026-03-01 07:51:57,824 spam.main                      INFO    Skills executed: 7/8 OK (strategic_plan, intelligence_scan, strategic_refine, zone_selection, menu_planning, menu_save, market_ops, diplomacy_send)
+2026-03-01 07:51:57,824 spam.main                      WARNING   FAILED: menu_save — MCP save_menu failed: MCP error -32602: Input validation error: Invalid arguments for tool save_menu: [
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      0,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      1,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      2,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      3,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      4,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      5,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      6,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      7,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      8,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      9,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      10,
+      "price"
+    ]
+  },
+  {
+    "code": "too_small",
+    "minimum": 0,
+    "type": "number",
+    "inclusive": false,
+    "exact": false,
+    "message": "Number must be greater than 0",
+    "path": [
+      "items",
+      11,
+      "price"
+    ]
+  }
+]
+2026-03-01 07:51:57,827 spam.memory.message_log        INFO    Received message from Piadina as a Service (PaaS) (5): [BlogAnalysis — Risultato automatico basato su Cronache dal Cosmo]
+Articolo anal...
+2026-03-01 07:51:57,827 spam.memory.message_log        INFO    Received message from Piadina as a Service (PaaS) (5): [BlogAnalysis — Risultato automatico basato su Cronache dal Cosmo]
+Articolo anal...
+2026-03-01 07:51:57,827 spam.main                      INFO    Message from Piadina as a Service (PaaS) (cred=0.50): '[BlogAnalysis — Risultato automatico basato su Cronache dal Cosmo]
+Articolo anal' 
+2026-03-01 07:51:58,435 spam.main                      INFO    ⏱ Turn 72 | SPEAKING [█████████░░░░░░░░░░░] 40s/1m30s (~49s left) | Next turn in ~5m19s
+2026-03-01 07:52:13,436 spam.main                      INFO    ⏱ Turn 72 | SPEAKING [████████████░░░░░░░░] 55s/1m30s (~34s left) | Next turn in ~5m04s
+2026-03-01 07:52:18,738 spam.phase_router              INFO    Phase: speaking → closed_bid (turn 72)
+2026-03-01 07:52:18,738 spam.main                      INFO    [CLOSED_BID] Turn 72
+2026-03-01 07:52:19,018 spam.main                      INFO    Context built: turn=72, phase=closed_bid, balance=44427, reputation=97, inventory=0 types/0 units, menu=22 items, open=False, mid_turn=False
+2026-03-01 07:52:19,018 spam.skills                    INFO    ▸ Executing skill: bid_compute
+2026-03-01 07:52:19,018 spam.decision.strategy_agent   INFO    Bid guidance from agent: spending=0.35, aggr=0.42, priority=['Gnocchi del Crepuscolo', 'Plasma Vitale', 'Carne di Xenodonte']
+2026-03-01 07:52:19,018 spam.main                      INFO    Bid compute: agent-guided spending=0.35, aggressiveness=0.42
+2026-03-01 07:52:19,018 spam.main                      INFO    Bid compute: zone=DIVERSIFIED, balance=44427, inventory=0 types, recipes=287, active_competitors=24, spending=0.35
+2026-03-01 07:52:19,033 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Proteine Interstellari    price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Il Crepuscolo dell’Unicorno                   price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Universo in Fusilli - Variazione Celestiale   price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Echi del Mare Eterno                          price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmologica                          price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: La Voce del Vento                             price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Danza Luminosa del Multiverso                 price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Sinfonia Celestiale di Echi Galattici         price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Sinfonia Galattica Agentica                   price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: L'Abbraccio del Cosmo                         price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica: la Vendetta Fantasma        price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO      Menu: Nebulosa di Sapori dell'Infinito              price=   0, ing_cost=75, margin=-100%
+2026-03-01 07:52:19,034 spam.decision.ilp_solver       INFO    MILP [DIVERSIFIED]: 12 menu items, 34 bids (total_qty=60), cost=1008/15416 budget, expected_rev=3, NET PROFIT=-1005
+2026-03-01 07:52:19,034 spam.skills                    INFO      ✓ bid_compute succeeded
+2026-03-01 07:52:19,034 spam.skills                    INFO    ▸ Executing skill: bid_submit
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Alghe Bioluminescenti @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Amido di Stellarion @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Baccacedro @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 3x Biscotti della Galassia @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 4x Carne di Balena spaziale @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Carne di Drago @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 4x Carne di Kraken @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Carne di Mucca @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 4x Carne di Xenodonte @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Colonia di Mycoflora @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Cristalli di Memoria @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 3x Essenza di Vuoto @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Farina di Nettuno @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Fibra di Sintetex @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 3x Foglie di Nebulosa @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 2x Funghi dell’Etere @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 2x Fusilli del Vento @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 2x Lacrime di Unicorno @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Lattuga Namecciana @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Muffa Lunare @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Nduja Fritta Tanto @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Nettare di Sirena @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 2x Pane degli Abissi @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Pane di Luce @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Petali di Eco @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 3x Plasma Vitale @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Polvere di Pulsar @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 2x Radici di Gravità @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Sale Temporale @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 2x Salsa Szechuan @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 2x Shard di Materia Oscura @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Spaghi del Sole @ 18 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 3x Teste di Idra @ 16 each
+2026-03-01 07:52:19,034 spam.main                      INFO      Bid: 1x Uova di Fenice @ 16 each
+2026-03-01 07:52:19,197 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:52:19,198 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 07:52:19,247 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 07:52:19,514 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:52:19,581 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 07:52:19,585 spam.main                      INFO    Bids submitted: 34 items, total cost=1008
+2026-03-01 07:52:19,585 spam.skills                    INFO      ✓ bid_submit succeeded
+2026-03-01 07:52:19,585 spam.main                      INFO    Skills executed: 2/2 OK (bid_compute, bid_submit)
+2026-03-01 07:52:28,437 spam.main                      INFO    ⏱ Turn 72 | CLOSED_BID [████░░░░░░░░░░░░░░░░] 9s/45
