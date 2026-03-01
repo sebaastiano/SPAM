@@ -47,6 +47,7 @@ state = {
     "meals": {},            # (turn_id, restaurant_id, meal_id) -> dict
     "bid_history": {},      # (turn_id, entry_id) -> dict
     "messages": [],         # recent broadcast messages
+    "_seen_message_ids": set(),  # dedup across polls
 }
 state_lock = threading.Lock()
 
@@ -113,18 +114,21 @@ def sse_relay_thread():
                                 state["phase"] = "reset"
                                 state["turn_id"] = None
                             elif event_name == "new_message":
-                                msg_entry = {
-                                    "ts": now_ts(),
-                                    "sender_id": parsed.get("sender_id"),
-                                    "sender_name": parsed.get("sender_name", "?"),
-                                    "recipient_id": parsed.get("recipient_id"),
-                                    "recipient_name": parsed.get("recipient_name", "?"),
-                                    "text": parsed.get("text") or parsed.get("content") or str(parsed),
-                                    "turn_id": state.get("turn_id"),
-                                }
-                                state["messages"].append(msg_entry)
-                                if len(state["messages"]) > 200:
-                                    state["messages"].pop(0)
+                                mid = parsed.get("messageId") or parsed.get("message_id") or id(parsed)
+                                if mid not in state["_seen_message_ids"]:
+                                    state["_seen_message_ids"].add(mid)
+                                    msg_entry = {
+                                        "ts": now_ts(),
+                                        "sender_id": parsed.get("senderId") or parsed.get("sender_id"),
+                                        "sender_name": parsed.get("senderName") or parsed.get("sender_name", "?"),
+                                        "recipient_id": parsed.get("recipientId") or parsed.get("recipient_id"),
+                                        "recipient_name": parsed.get("recipientName") or parsed.get("recipient_name", "?"),
+                                        "text": parsed.get("text") or parsed.get("content") or str(parsed),
+                                        "turn_id": state.get("turn_id"),
+                                    }
+                                    state["messages"].append(msg_entry)
+                                    if len(state["messages"]) > 200:
+                                        state["messages"].pop(0)
 
                         push_event("sse_event", {
                             "event": event_name,
@@ -258,10 +262,15 @@ GAME_EVENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "game_events.js
 
 
 def _poll_game_state():
-    """Infer turn_id and phase from game_events.jsonl written by the bot's SSE connection."""
+    """Infer turn_id, phase, and messages from game_events.jsonl written by the bot's SSE connection."""
     best_turn_id = None
     best_phase = None
+    new_messages = []
     try:
+        with state_lock:
+            seen_ids = set(state["_seen_message_ids"])
+            current_turn = state.get("turn_id")
+
         with open(GAME_EVENTS_PATH, "r") as f:
             for raw in f:
                 raw = raw.strip()
@@ -273,11 +282,13 @@ def _poll_game_state():
                     continue
                 etype = evt.get("type")
                 data = evt.get("data") or {}
+                ts = evt.get("ts", "")
                 if etype == "game_started":
                     tid = data.get("turn_id")
                     if tid is not None:
                         best_turn_id = tid
                         best_phase = "speaking"
+                        current_turn = tid
                 elif etype == "game_phase_changed":
                     ph = data.get("phase")
                     if ph:
@@ -285,6 +296,27 @@ def _poll_game_state():
                 elif etype == "game_reset":
                     best_turn_id = None
                     best_phase = "reset"
+                    current_turn = None
+                elif etype == "new_message":
+                    # API sends camelCase: messageId, senderId, senderName, text, datetime
+                    mid = (
+                        data.get("messageId")
+                        or data.get("message_id")
+                        or data.get("id")
+                        or f"{ts}_{data.get('senderId', data.get('sender_id', '?'))}"
+                    )
+                    if mid not in seen_ids:
+                        seen_ids.add(mid)
+                        new_messages.append({
+                            "ts": ts or now_ts(),
+                            "sender_id": data.get("senderId") or data.get("sender_id"),
+                            "sender_name": data.get("senderName") or data.get("sender_name", "?"),
+                            "recipient_id": data.get("recipientId") or data.get("recipient_id"),
+                            "recipient_name": data.get("recipientName") or data.get("recipient_name", "?"),
+                            "text": data.get("text") or data.get("content") or str(data),
+                            "turn_id": current_turn,
+                            "message_id": mid,
+                        })
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -297,6 +329,14 @@ def _poll_game_state():
         if best_phase is not None and state["phase"] != best_phase:
             state["phase"] = best_phase
             push_event("system", {"msg": f"phase from game_events.jsonl: {best_phase}"})
+        for msg in new_messages:
+            state["_seen_message_ids"].add(msg["message_id"])
+            state["messages"].append(msg)
+            if len(state["messages"]) > 200:
+                state["messages"].pop(0)
+            push_event("new_message", msg)
+    if new_messages:
+        push_event("system", {"msg": f"Loaded {len(new_messages)} new message(s) from game_events.jsonl"})
 
 
 def polling_thread():
