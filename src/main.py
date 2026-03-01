@@ -605,6 +605,8 @@ class GameOrchestrator:
         """
         logger.info("Game started event received (= speaking phase)")
         self._discovered_turn = None  # reset cache for new turn
+        self._current_strategy = None  # clear stale strategy from previous turn
+        self.subagent_router._current_strategy = None
         await self.phase_router.handle_game_started(data)
         self.skill_orchestrator.new_turn()
 
@@ -662,6 +664,8 @@ class GameOrchestrator:
     async def _on_turn_change(self, turn_id: int):
         """Called when a new turn starts (stopped → speaking)."""
         logger.info(f"Turn change: {turn_id}")
+        self._current_strategy = None  # clear stale strategy from previous turn
+        self.subagent_router._current_strategy = None
         self.game_state.new_turn(turn_id)
         self.skill_orchestrator.new_turn()
 
@@ -843,8 +847,10 @@ class GameOrchestrator:
             )
         except Exception as e:
             logger.error(f"Strategic plan failed: {e}", exc_info=True)
-            # Fallback to default strategy
-            self._current_strategy = TurnStrategy()
+            # Fallback to default strategy — sync BOTH copies
+            fallback = TurnStrategy()
+            self._current_strategy = fallback
+            self.subagent_router._current_strategy = fallback
             return SkillResult(
                 skill_name="strategic_plan", success=False, error=str(e)
             )
@@ -1130,6 +1136,7 @@ class GameOrchestrator:
                         competitor_briefings=ctx.intel.get("briefings", {}),
                         reputation=ctx.reputation,
                         spending_fraction=0.0,
+                        agent_guidance=agent_guidance,
                     )
                     if decision.menu:
                         logger.info(
@@ -1295,12 +1302,23 @@ class GameOrchestrator:
                     f"aggressiveness={bid_guidance.get('aggressiveness', 0):.2f}"
                 )
 
+            # Build agent_guidance for the ILP solver (same as menu_planning)
+            agent_guidance = None
+            if strategy and self.subagent_router.strategy_agent:
+                agent_guidance = await self.subagent_router.strategy_agent.consult_menu(
+                    zone=zone,
+                    eligible_recipes=list(ctx.recipes.values()),
+                    inventory=ctx.inventory,
+                    balance=ctx.balance,
+                )
+
             logger.info(
                 f"Bid compute: zone={zone}, balance={ctx.balance}, "
                 f"inventory={len(ctx.inventory)} types, "
                 f"recipes={len(ctx.recipes)}, "
                 f"active_competitors={active}, "
-                f"spending={'auto' if spending is None else f'{spending:.2f}'}"
+                f"spending={'auto' if spending is None else f'{spending:.2f}'}, "
+                f"agent_guidance={'yes' if agent_guidance else 'no'}"
             )
             decision = solve_zone_ilp(
                 zone=zone,
@@ -1311,6 +1329,7 @@ class GameOrchestrator:
                 competitor_briefings=briefings,
                 reputation=ctx.reputation,
                 spending_fraction=spending,
+                agent_guidance=agent_guidance,
             )
             self._latest_decision = decision
             return SkillResult(
