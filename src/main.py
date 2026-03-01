@@ -74,10 +74,6 @@ from src.skills import (
     compute_skipped_phases,
 )
 
-# X-Ray Explainability
-from src.xray import xray
-from src.xray.hooks import install_hooks
-
 # ── Logging ──
 logging.basicConfig(
     level=logging.INFO,
@@ -183,19 +179,9 @@ class GameOrchestrator:
         self._countdown_task: asyncio.Task | None = None
         self._discovered_turn: int | None = None  # cached turn from probe
 
-        # ── X-Ray Explainability ──
-        install_hooks(self)
-
     async def start(self):
         """Initialise and start the game agent."""
         logger.info(f"=== SPAM! (Team {TEAM_ID}) Starting ===")
-
-        # Start X-Ray dashboard
-        try:
-            await xray.start(port=8777)
-            logger.info("X-Ray dashboard ready at http://localhost:8777")
-        except Exception as e:
-            logger.warning(f"X-Ray dashboard failed to start: {e} — continuing without it")
 
         # Load MCP tools list
         try:
