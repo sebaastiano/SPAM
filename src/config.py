@@ -37,6 +37,7 @@ HEADERS = {
 
 # ── Strategic Zones ──
 ZONES = [
+    "DIVERSIFIED",
     "PREMIUM_MONOPOLIST",
     "BUDGET_OPPORTUNIST",
     "NICHE_SPECIALIST",
@@ -58,12 +59,16 @@ ARCHETYPE_CEILINGS = {
 # ── ACTUAL target prices per tier (volume-first mixed pricing) ──
 # These are what we CHARGE — well below ceilings to attract customers.
 # Mixed tiers ensure we appeal to ALL archetypes simultaneously.
+# More granular tiers = better coverage of the full prestige spectrum.
 PRICE_TIERS = {
-    "bargain":  (0,  35,  25),   # (prestige_min, prestige_max, base_price)
-    "budget":   (36, 50,  40),
-    "mid":      (51, 65,  60),
-    "mid_high": (66, 80,  90),
-    "premium":  (81, 100, 135),
+    "ultra_bargain": (0,  20,  15),   # (prestige_min, prestige_max, base_price)
+    "bargain":       (21, 35,  22),
+    "budget":        (36, 50,  35),
+    "mid_low":       (51, 60,  48),
+    "mid":           (61, 70,  62),
+    "mid_high":      (71, 80,  80),
+    "premium":       (81, 90,  105),
+    "luxury":        (91, 100, 140),
 }
 
 # ── Known archetypes ──
@@ -107,9 +112,10 @@ NEGATIVE_DELTA_INGREDIENTS = [
 # ── Zone-specific price factors ──
 # VOLUME-FIRST: price attractively across all zones.
 # Even premium zone uses moderate factor — we need customers!
-# Once reputation is high (>85), we can revisit upward.
+# DIVERSIFIED uses a balanced factor to serve all archetypes.
 ZONE_PRICE_FACTORS = {
-    "PREMIUM_MONOPOLIST": 0.90,
+    "DIVERSIFIED": 0.70,
+    "PREMIUM_MONOPOLIST": 0.85,
     "BUDGET_OPPORTUNIST": 0.50,
     "NICHE_SPECIALIST": 0.75,
     "SPEED_CONTENDER": 0.65,
@@ -118,6 +124,18 @@ ZONE_PRICE_FACTORS = {
 
 # ── Zone-specific system prompts ──
 ZONE_SYSTEM_PROMPTS = {
+    "DIVERSIFIED": (
+        "You are managing a diversified galactic restaurant targeting ALL customer types.\n"
+        "Target clients: ALL archetypes (Esploratori, Famiglie, Saggi, Astrobaroni).\n"
+        "Price strategy: Mixed tiered pricing — cheap dishes for budget clients, "
+        "moderate dishes for families, premium dishes for luxury clients.\n"
+        "Recipe focus: Full prestige spectrum (15-100), prep time ≤ 12s.\n"
+        "Menu size: LARGE (12-20 dishes) to maximize choice and customer attraction.\n"
+        "Bidding priority: Diverse ingredients for broad menu coverage.\n"
+        "Risk tolerance: Moderate — invest in variety, not luxury.\n"
+        "Key principle: MAX CUSTOMERS through MAX CHOICE. Every archetype should "
+        "find something appealing and affordable on our menu."
+    ),
     "PREMIUM_MONOPOLIST": (
         "You are managing a premium galactic restaurant.\n"
         "Target clients: Saggi del Cosmo, Astrobaroni.\n"
@@ -169,6 +187,7 @@ ARCHETYPE_PRIORITY = {
 
 # ── Zone target archetypes ──
 ZONE_TARGET_ARCHETYPES = {
+    "DIVERSIFIED": list(KNOWN_ARCHETYPES),  # ALL archetypes
     "PREMIUM_MONOPOLIST": ["Saggi del Cosmo", "Astrobarone"],
     "BUDGET_OPPORTUNIST": ["Esploratore Galattico", "Famiglie Orbitali"],
     "NICHE_SPECIALIST": [],  # determined at runtime
@@ -179,33 +198,39 @@ ZONE_TARGET_ARCHETYPES = {
 # ── Zone prestige ranges ──
 # WIDER ranges = more eligible recipes = bigger menus = more customers.
 # Mixed prestige naturally creates mixed prices (the core strategy).
+# DIVERSIFIED uses the FULL spectrum to attract every archetype.
 ZONE_PRESTIGE_RANGE = {
-    "PREMIUM_MONOPOLIST": (55, 100),
-    "BUDGET_OPPORTUNIST": (23, 75),
-    "NICHE_SPECIALIST": (35, 100),
-    "SPEED_CONTENDER": (23, 90),
-    "MARKET_ARBITRAGEUR": (23, 100),
+    "DIVERSIFIED": (10, 100),
+    "PREMIUM_MONOPOLIST": (50, 100),
+    "BUDGET_OPPORTUNIST": (10, 75),
+    "NICHE_SPECIALIST": (30, 100),
+    "SPEED_CONTENDER": (15, 95),
+    "MARKET_ARBITRAGEUR": (10, 100),
 }
 
 # ── Zone menu size constraints ──
 # MORE ITEMS = MORE CHOICE = MORE CUSTOMERS = MORE REVENUE.
 # This is the single most important lever for winning.
 # Bigger menus attract more archetypes and serve more clients.
+# DIVERSIFIED has the largest menu to cover all price/prestige points.
 ZONE_MENU_SIZE = {
-    "PREMIUM_MONOPOLIST": (8, 15),
-    "BUDGET_OPPORTUNIST": (10, 18),
-    "NICHE_SPECIALIST": (8, 14),
-    "SPEED_CONTENDER": (10, 18),
-    "MARKET_ARBITRAGEUR": (4, 8),
+    "DIVERSIFIED": (12, 22),
+    "PREMIUM_MONOPOLIST": (8, 16),
+    "BUDGET_OPPORTUNIST": (10, 20),
+    "NICHE_SPECIALIST": (8, 16),
+    "SPEED_CONTENDER": (10, 20),
+    "MARKET_ARBITRAGEUR": (4, 10),
 }
 
 # ── Max prep time per zone (seconds) ──
-# Relaxed slightly to allow more recipes into the pool.
+# Relaxed to allow more recipes into the pool = bigger menus.
+# DIVERSIFIED is generous on prep time to maximize recipe pool.
 ZONE_MAX_PREP_TIME = {
-    "PREMIUM_MONOPOLIST": 9.0,
-    "BUDGET_OPPORTUNIST": 8.0,
-    "NICHE_SPECIALIST": 12.0,
-    "SPEED_CONTENDER": 6.0,
+    "DIVERSIFIED": 12.0,
+    "PREMIUM_MONOPOLIST": 10.0,
+    "BUDGET_OPPORTUNIST": 10.0,
+    "NICHE_SPECIALIST": 14.0,
+    "SPEED_CONTENDER": 7.0,
     "MARKET_ARBITRAGEUR": 15.0,
 }
 

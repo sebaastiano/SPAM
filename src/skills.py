@@ -106,7 +106,9 @@ class Skill:
 
 NORMAL_PHASE_SKILLS: dict[str, list[str]] = {
     "speaking": [
+        "strategic_plan",       # Agent plans turn strategy FIRST
         "intelligence_scan",
+        "strategic_refine",     # Agent refines after intel
         "zone_selection",
         "menu_planning",
         "menu_save",
@@ -147,7 +149,9 @@ NORMAL_PHASE_SKILLS: dict[str, list[str]] = {
 MID_TURN_CATCHUP_SKILLS: dict[str, list[str]] = {
     "speaking": [
         # Full pipeline — we didn't miss anything
+        "strategic_plan",
         "intelligence_scan",
+        "strategic_refine",
         "zone_selection",
         "menu_planning",
         "menu_save",
@@ -157,6 +161,7 @@ MID_TURN_CATCHUP_SKILLS: dict[str, list[str]] = {
     "closed_bid": [
         # Missed speaking: quick intel → zone → menu → bid
         "quick_intelligence",   # lightweight version
+        "strategic_plan",       # agent plans even mid-turn
         "zone_selection",
         "menu_planning",
         "menu_save",
@@ -167,6 +172,7 @@ MID_TURN_CATCHUP_SKILLS: dict[str, list[str]] = {
     "waiting": [
         # Missed speaking + bidding: work with whatever we have
         "quick_intelligence",
+        "strategic_plan",
         "zone_selection",
         "inventory_verify",
         "menu_planning",

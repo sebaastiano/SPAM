@@ -62,7 +62,8 @@ def solve_zone_ilp(
     demand_forecast: dict[str, float],
     competitor_briefings: dict[int, dict],
     reputation: float = 100.0,
-    spending_fraction: float = None,
+    spending_fraction: float | None = None,
+    agent_guidance: dict | None = None,
 ) -> ZoneDecision:
     """
     Solve the zone-specific MILP for menu selection and bid allocation.
@@ -93,10 +94,34 @@ def solve_zone_ilp(
         else:
             spending_fraction = DEFAULT_SPENDING_FRACTION
 
-    # ── Zone constraints ──
+    # ── Zone constraints (optionally overridden by agent guidance) ──
     prestige_min, prestige_max = ZONE_PRESTIGE_RANGE.get(zone, (0, 100))
     menu_min, menu_max = ZONE_MENU_SIZE.get(zone, (3, 10))
     max_prep_time = ZONE_MAX_PREP_TIME.get(zone, 10.0)
+
+    # Apply agent guidance overrides if available
+    if agent_guidance:
+        ag_pmin = agent_guidance.get("prestige_min")
+        ag_pmax = agent_guidance.get("prestige_max")
+        ag_prep = agent_guidance.get("max_prep_time")
+        ag_size = agent_guidance.get("target_size")
+
+        if ag_pmin is not None:
+            prestige_min = min(prestige_min, ag_pmin)  # widen lower bound
+        if ag_pmax is not None:
+            prestige_max = max(prestige_max, ag_pmax)  # widen upper bound
+        if ag_prep is not None:
+            max_prep_time = max(max_prep_time, ag_prep)  # relax prep time
+        if ag_size is not None:
+            # Agent can push for larger menu — widen upper bound
+            menu_max = max(menu_max, ag_size)
+            # But keep a reasonable minimum
+            menu_min = max(menu_min, min(8, ag_size - 4))
+
+        logger.info(
+            f"Agent guidance applied: prestige=[{prestige_min},{prestige_max}], "
+            f"menu=[{menu_min},{menu_max}], prep≤{max_prep_time}s"
+        )
 
     # ── Filter eligible recipes ──
     eligible_recipes: list[dict] = []
@@ -120,9 +145,19 @@ def solve_zone_ilp(
     I = len(all_ingredients)
     ing_idx = {name: idx for idx, name in enumerate(all_ingredients)}
 
+    # ── Extract agent pricing guidance if available ──
+    agent_pricing = None
+    if agent_guidance:
+        agent_pricing = {
+            "strategy": agent_guidance.get("price_strategy", "volume_first"),
+            "adjustment_factor": agent_guidance.get("price_adjustment", 1.0),
+            "undercut": agent_guidance.get("undercut", True),
+        }
+
     # ── Per-recipe revenue (price estimate) ──
     revenues = np.array(
-        [compute_menu_price(r, zone, reputation, competitor_briefings) for r in eligible_recipes],
+        [compute_menu_price(r, zone, reputation, competitor_briefings, agent_pricing)
+         for r in eligible_recipes],
         dtype=float,
     )
 
@@ -337,10 +372,13 @@ def _score_recipes(
     reputation: float,
     demand_forecast: dict[str, float],
 ) -> list[dict]:
-    """Score and rank recipes for a zone — favor volume and diversity."""
+    """Score and rank recipes for a zone — favor volume, diversity, and speed."""
     scored = []
 
     high_delta_set = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
+
+    # Track prestige distribution for diversity bonus
+    prestige_buckets = {}  # bucket_id -> count
 
     for recipe in recipes:
         prestige = recipe.get("prestige", 50)
@@ -377,13 +415,31 @@ def _score_recipes(
             for ing in ingredients
         )
 
+        # Diversity bonus: recipes in underrepresented prestige buckets
+        # score higher. This ensures the menu covers all price tiers.
+        bucket = int(prestige // 20)  # 5 buckets: 0-19, 20-39, 40-59, 60-79, 80-100
+        bucket_count = prestige_buckets.get(bucket, 0)
+        diversity_bonus = max(0, 0.15 - bucket_count * 0.03)  # first in bucket gets most
+        prestige_buckets[bucket] = bucket_count + 1
+
+        # Zone-specific bonuses
+        zone_bonus = 0.0
+        if zone == "DIVERSIFIED":
+            # DIVERSIFIED zone: extra bonus for covering extreme tiers
+            if prestige <= 30 or prestige >= 80:
+                zone_bonus = 0.08  # bonus for extreme tiers (budget + premium)
+            # Extra speed bonus for diversified (need to serve many quickly)
+            zone_bonus += speed_score * 0.05
+
         total_score = (
-            prestige_score * 0.20
+            prestige_score * 0.15
             + speed_score * 0.25
             + inventory_score * 0.30   # heavily favor what we already have
             + simplicity_bonus
             + delta_bonus * 0.05
             - competition_penalty * 0.05
+            + diversity_bonus
+            + zone_bonus
         )
 
         scored.append({"recipe": recipe, "score": total_score})
@@ -395,6 +451,7 @@ def _score_recipes(
 def compute_menu_price(
     recipe: dict, zone: str, reputation: float,
     competitor_briefings: dict[int, dict] | None = None,
+    agent_pricing: dict | None = None,
 ) -> float:
     """
     Compute menu price for a dish using MIXED TIERED PRICING.
@@ -406,14 +463,14 @@ def compute_menu_price(
     - High-prestige dishes are HIGHER → extract value from Astrobaroni, Saggi
     - The menu naturally offers something for EVERY archetype
 
-    Key insight: 10 customers × 50 credits = 500 revenue
-                 0 customers × 500 credits = 0 revenue
-    Volume wins. Always.
+    agent_pricing: optional dict from strategy agent with:
+      - strategy: "volume_first" | "balanced" | "premium"
+      - adjustment_factor: float multiplier (e.g. 0.9 = 10% cheaper)
+      - undercut: bool (whether to undercut competitors)
     """
     prestige = recipe.get("prestige", 50)
 
     # TIERED BASE PRICES — determined by prestige level
-    # Each tier targets a different customer segment
     base_price = 60  # fallback
     for tier_name, (p_min, p_max, tier_price) in PRICE_TIERS.items():
         if p_min <= prestige <= p_max:
@@ -423,14 +480,25 @@ def compute_menu_price(
     # Gentle prestige scaling WITHIN each tier (±20% max)
     prestige_mult = 1.0 + (prestige - 50) / 250
 
-    # Reputation bonus — subtle, we're building trust not gouging
-    # At rep=50: mult=1.0, at rep=100: mult=1.17
+    # Reputation bonus — subtle
     rep_mult = 1.0 + (reputation - 50) / 300
 
-    # Zone factor — still differentiate zones, but less aggressively
+    # Zone factor
     zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.65)
 
-    price = int(base_price * prestige_mult * rep_mult * zone_factor)
+    # Agent pricing adjustments
+    agent_factor = 1.0
+    agent_undercut = True
+    if agent_pricing:
+        agent_factor = agent_pricing.get("adjustment_factor", 1.0)
+        strategy = agent_pricing.get("strategy", "volume_first")
+        agent_undercut = agent_pricing.get("undercut", True)
+        if strategy == "premium":
+            agent_factor *= 1.15
+        elif strategy == "balanced":
+            agent_factor *= 1.05
+
+    price = int(base_price * prestige_mult * rep_mult * zone_factor * agent_factor)
 
     # COMPETITION ADJUSTMENT: undercut to win customers
     if competitor_briefings:
@@ -441,8 +509,8 @@ def compute_menu_price(
         if active_competitors == 0:
             # Monopoly — modest increase (don't get greedy, volume still matters)
             price = int(price * 1.15)
-        else:
-            # Competition exists — match or undercut depending on tier
+        elif agent_undercut:
+            # Competition exists AND agent allows undercutting
             competitor_prices = [
                 b.get("menu_price_avg", 0)
                 for b in competitor_briefings.values()
@@ -451,12 +519,9 @@ def compute_menu_price(
             if competitor_prices:
                 avg_comp_price = sum(competitor_prices) / len(competitor_prices)
                 if prestige <= 50:
-                    # Bargain/budget tier: aggressively undercut
                     price = min(price, int(avg_comp_price * 0.75))
                 elif prestige <= 70:
-                    # Mid tier: slight undercut to stay competitive
                     price = min(price, int(avg_comp_price * 0.90))
-                # Premium tier: keep our price (rich clients don't mind)
 
     # Hard floor and ceiling
     # Floor: 12 credits minimum (never give food away)
