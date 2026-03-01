@@ -102,11 +102,13 @@ class ServingPipeline:
         intolerance_detector: IntoleranceDetector,
         client_library: GlobalClientLibrary,
         mcp_client=None,
+        llm_client=None,
     ):
         self.recipes = recipes
         self.intolerance_detector = intolerance_detector
         self.client_library = client_library
         self.mcp_client = mcp_client
+        self.llm_client = llm_client  # fast LLM for order parsing fallback
 
         # Set during waiting phase
         self.menu: dict[str, dict] = {}  # dish_name → {name, price}
@@ -162,7 +164,9 @@ class ServingPipeline:
         self.menu = {item["name"]: item for item in normalised}
         self.order_matcher = OrderMatcher(
             normalised,
+            recipe_db=self.recipes,
             order_cache=self.client_library.order_to_dish_cache,
+            llm_client=self.llm_client,
         )
         logger.info(f"Menu set with {len(normalised)} items")
 
@@ -439,7 +443,10 @@ class ServingPipeline:
             logger.info(f"Using SSE-cached orderText for {client_name}: '{order_text}'")
 
         # Step 0.5: Extract declared intolerances from order text
-        declared_intolerances = self._extract_intolerances(order_text)
+        declared_intolerances = (
+            self.order_matcher.extract_intolerances(order_text)
+            if self.order_matcher else self._extract_intolerances(order_text)
+        )
         if declared_intolerances:
             logger.info(f"Client {client_name} declared intolerances: {declared_intolerances}")
 

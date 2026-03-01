@@ -166,6 +166,7 @@ class GameOrchestrator:
             intolerance_detector=self.intolerance_detector,
             client_library=self.client_library,
             mcp_client=self.mcp_client,
+            llm_client=self.fast_client,
         )
 
         # ── Decision ──
@@ -2180,14 +2181,48 @@ def _start_dashboard() -> bool:
 
     Launches dashboard/app.py as a subprocess (reads from tracker on 5555).
     Non-fatal: if it fails, the agent continues normally.
+
+    If a stale dashboard (missing /vectorspace route) is detected,
+    kill it and launch a fresh one.
     """
     global _dashboard_proc
 
     if _is_port_open(_DASHBOARD_PORT):
-        logger.info(
-            f"Dashboard already running on port {_DASHBOARD_PORT} — reusing"
-        )
-        return True
+        # Validate the existing dashboard has the /vectorspace route
+        try:
+            import requests as _req
+            resp = _req.get(
+                f"http://localhost:{_DASHBOARD_PORT}/vectorspace", timeout=3
+            )
+            if resp.status_code == 200:
+                logger.info(
+                    f"Dashboard already running on port {_DASHBOARD_PORT} — reusing"
+                )
+                return True
+            else:
+                logger.warning(
+                    f"Dashboard on port {_DASHBOARD_PORT} missing /vectorspace "
+                    f"(HTTP {resp.status_code}) — killing stale instance"
+                )
+        except Exception:
+            logger.warning(
+                f"Dashboard on port {_DASHBOARD_PORT} unresponsive — killing stale instance"
+            )
+        # Kill whatever is on the port
+        try:
+            import subprocess as _sp
+            result = _sp.run(
+                ["lsof", "-ti", f":{_DASHBOARD_PORT}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = result.stdout.strip().split()
+            for pid in pids:
+                if pid:
+                    _sp.run(["kill", "-9", pid], timeout=5)
+                    logger.info(f"Killed stale dashboard process pid={pid}")
+            time.sleep(1)  # let the port free up
+        except Exception as e:
+            logger.warning(f"Failed to kill stale dashboard: {e}")
 
     log_path = Path("dashboard.log")
     logger.info(f"Starting dashboard — log → {log_path.resolve()}")
