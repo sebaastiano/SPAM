@@ -143,7 +143,10 @@ class ReactiveEventBus:
                 await asyncio.sleep(retry_delay)
                 continue
 
-            break  # clean exit
+            # Stream ended cleanly (server closed it) — reconnect
+            logger.warning(f"SSE stream ended cleanly — reconnecting in {retry_delay}s")
+            self._connected = False
+            await asyncio.sleep(retry_delay)
 
     async def _handle_line(self, raw_line: bytes):
         """Parse a single SSE line and dispatch."""
