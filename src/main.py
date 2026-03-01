@@ -60,6 +60,7 @@ from src.intelligence.feature_extractor import set_recipe_db
 from src.decision.ilp_solver import solve_zone_ilp
 from src.decision.subagent_router import SubagentRouter
 from src.decision.pricing import compute_menu_prices, adjust_prices_competitive
+from src.decision.strategy_agent import StrategyAgent, TurnStrategy
 
 # Diplomacy
 from src.diplomacy.agent import DiplomacyAgent
@@ -191,6 +192,7 @@ class GameOrchestrator:
         self._running = False
         self._countdown_task: asyncio.Task | None = None
         self._discovered_turn: int | None = None  # cached turn from probe
+        self._current_strategy: TurnStrategy | None = None  # agent's turn strategy
 
     async def start(self):
         """Initialise and start the game agent."""
@@ -279,6 +281,25 @@ class GameOrchestrator:
     def _register_skills(self):
         """Register all skills with the orchestrator."""
         so = self.skill_orchestrator
+
+        # ── Strategic Plan (agent-driven, runs FIRST) ──
+        so.register(Skill(
+            name="strategic_plan",
+            description="Consult strategy agent for turn-level plan",
+            valid_phases={"speaking", "closed_bid", "waiting"},
+            priority=1,  # runs before everything else
+            execute_fn=self._skill_strategic_plan,
+        ))
+
+        # ── Strategic Refine (agent refines after intel is available) ──
+        so.register(Skill(
+            name="strategic_refine",
+            description="Refine strategy after intelligence data is available",
+            valid_phases={"speaking"},
+            priority=7,  # after intelligence_scan (5), before zone_selection (8)
+            requires_skills=["intelligence_scan"],
+            execute_fn=self._skill_strategic_refine,
+        ))
 
         # ── Intelligence (full) ──
         so.register(Skill(
@@ -773,6 +794,104 @@ class GameOrchestrator:
     #  SKILL IMPLEMENTATIONS
     # ══════════════════════════════════════════════════════════════
 
+    async def _skill_strategic_plan(self, ctx: SkillContext) -> SkillResult:
+        """
+        Consult the strategy agent for a turn-level strategic plan.
+
+        This is the FIRST skill to run each turn. It produces a TurnStrategy
+        that influences all downstream decisions:
+        - Zone selection (override heuristic if agent is confident)
+        - Menu composition (size, prestige range, diversification)
+        - Bid aggressiveness (spending fraction)
+        - Pricing strategy (volume vs. premium)
+        - Diplomacy priority (aggressive vs. passive)
+        """
+        try:
+            strategy = await self.subagent_router.run_strategic_plan(
+                turn_id=ctx.turn_id,
+                balance=ctx.balance,
+                inventory=ctx.inventory,
+                reputation=ctx.reputation,
+                recipes=ctx.recipes,
+                intel=ctx.intel,
+                menu_set=ctx.menu_set,
+                our_state=ctx.our_state,
+                phase=ctx.phase,
+            )
+            self._current_strategy = strategy
+            logger.info(
+                f"Strategic plan: zone={strategy.recommended_zone}, "
+                f"menu_size={strategy.menu_target_size}, "
+                f"bid_aggr={strategy.bid_aggressiveness:.2f}, "
+                f"price={strategy.price_strategy}, "
+                f"diplo={strategy.diplomacy_priority}, "
+                f"confidence={strategy.confidence:.2f}"
+            )
+            if strategy.zone_reasoning:
+                logger.info(f"  Zone reasoning: {strategy.zone_reasoning[:120]}")
+            if strategy.bid_reasoning:
+                logger.info(f"  Bid reasoning: {strategy.bid_reasoning[:120]}")
+
+            return SkillResult(
+                skill_name="strategic_plan",
+                success=True,
+                data={
+                    "zone": strategy.recommended_zone,
+                    "menu_size": strategy.menu_target_size,
+                    "confidence": strategy.confidence,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Strategic plan failed: {e}", exc_info=True)
+            # Fallback to default strategy
+            self._current_strategy = TurnStrategy()
+            return SkillResult(
+                skill_name="strategic_plan", success=False, error=str(e)
+            )
+
+    async def _skill_strategic_refine(self, ctx: SkillContext) -> SkillResult:
+        """
+        Refine the strategic plan after intelligence data is available.
+
+        Runs AFTER intelligence_scan. Updates the strategy with:
+        - Competitor intel (who's active, their strategies, prices)
+        - Market conditions
+        - Updated demand forecasts
+        """
+        if not self._current_strategy:
+            return SkillResult(
+                skill_name="strategic_refine", success=True,
+                data={"action": "no_strategy_to_refine"},
+            )
+
+        try:
+            # Re-run strategic plan with fresh intel
+            strategy = await self.subagent_router.run_strategic_plan(
+                turn_id=ctx.turn_id,
+                balance=ctx.balance,
+                inventory=ctx.inventory,
+                reputation=ctx.reputation,
+                recipes=ctx.recipes,
+                intel=ctx.intel,  # NOW has real intel data
+                menu_set=ctx.menu_set,
+                our_state=ctx.our_state,
+                phase=ctx.phase,
+            )
+            self._current_strategy = strategy
+            logger.info(
+                f"Strategy refined with intel: zone={strategy.recommended_zone}, "
+                f"confidence={strategy.confidence:.2f}"
+            )
+            return SkillResult(
+                skill_name="strategic_refine", success=True,
+                data={"zone": strategy.recommended_zone},
+            )
+        except Exception as e:
+            logger.warning(f"Strategic refine failed: {e} — keeping original plan")
+            return SkillResult(
+                skill_name="strategic_refine", success=False, error=str(e)
+            )
+
     async def _skill_intelligence_scan(self, ctx: SkillContext) -> SkillResult:
         """Full intelligence pipeline: tracker, competitor clustering, briefings."""
         try:
@@ -897,7 +1016,7 @@ class GameOrchestrator:
             )
 
     async def _skill_zone_selection(self, ctx: SkillContext) -> SkillResult:
-        """Select strategic zone via subagent router."""
+        """Select strategic zone via subagent router + agent consultation."""
         try:
             zone = self.subagent_router.route(
                 balance=ctx.balance,
@@ -908,7 +1027,16 @@ class GameOrchestrator:
                 competitor_briefings=ctx.intel.get("briefings", {}),
                 all_states=ctx.intel.get("all_states"),
             )
-            logger.info(f"Zone selected: {zone}")
+            # Log agent influence
+            strategy = self._current_strategy
+            if strategy and strategy.recommended_zone != zone:
+                logger.info(
+                    f"Zone selected: {zone} "
+                    f"(agent wanted {strategy.recommended_zone}, "
+                    f"confidence={strategy.confidence:.2f})"
+                )
+            else:
+                logger.info(f"Zone selected: {zone} (agent agrees)")
             return SkillResult(
                 skill_name="zone_selection",
                 success=True,
@@ -921,19 +1049,55 @@ class GameOrchestrator:
             )
 
     async def _skill_menu_planning(self, ctx: SkillContext) -> SkillResult:
-        """Compute menu via ILP solver."""
+        """Compute menu via ILP solver, guided by strategy agent."""
         try:
             zone = self.subagent_router.active_zone
+
+            # Get agent guidance for menu composition
+            strategy = self._current_strategy
+            agent_guidance = None
+            if strategy and self.subagent_router.strategy_agent:
+                agent_guidance = await self.subagent_router.strategy_agent.consult_menu(
+                    zone=zone,
+                    eligible_recipes=list(ctx.recipes.values()),
+                    inventory=ctx.inventory,
+                    balance=ctx.balance,
+                )
+
             # During waiting/serving, we can't bid anymore — spending=0.
-            # During speaking/closed_bid, let the ILP auto-select spending
-            # based on competition level (None = auto).
-            spending = 0.0 if ctx.phase in ("waiting", "serving") else None
+            # During speaking/closed_bid, use agent's bid guidance or auto.
+            if ctx.phase in ("waiting", "serving"):
+                spending = 0.0
+            elif strategy and strategy.confidence >= 0.4 and self.subagent_router.strategy_agent:
+                # Agent-guided spending fraction
+                bid_guidance = await self.subagent_router.strategy_agent.consult_bid(
+                    zone=zone,
+                    balance=ctx.balance,
+                    active_competitors=sum(
+                        1 for b in ctx.intel.get("briefings", {}).values()
+                        if b.get("is_connected", False)
+                    ),
+                )
+                spending = bid_guidance.get("spending_fraction")
+            else:
+                spending = None  # auto
+
             logger.info(
                 f"Menu planning: zone={zone}, phase={ctx.phase}, "
-                f"spending={'auto' if spending is None else spending}, balance={ctx.balance}, "
+                f"spending={'auto' if spending is None else f'{spending:.2f}'}, "
+                f"balance={ctx.balance}, "
                 f"inventory_items={len(ctx.inventory)}, "
                 f"inventory_total={sum(ctx.inventory.values()) if ctx.inventory else 0}"
             )
+            if agent_guidance:
+                logger.info(
+                    f"  Agent guidance: size={agent_guidance.get('target_size')}, "
+                    f"prestige=[{agent_guidance.get('prestige_min')}-"
+                    f"{agent_guidance.get('prestige_max')}], "
+                    f"prep≤{agent_guidance.get('max_prep_time')}s, "
+                    f"diversify={agent_guidance.get('diversify')}"
+                )
+
             decision = solve_zone_ilp(
                 zone=zone,
                 balance=ctx.balance,
@@ -943,13 +1107,15 @@ class GameOrchestrator:
                 competitor_briefings=ctx.intel.get("briefings", {}),
                 reputation=ctx.reputation,
                 spending_fraction=spending,
+                agent_guidance=agent_guidance,
             )
 
             # ── Zone fallback: if primary zone yields empty menu in
             #    waiting phase (can't bid anymore), try broader zones ──
             if not decision.menu and ctx.phase == "waiting" and ctx.inventory:
                 fallback_zones = [
-                    z for z in ["SPEED_CONTENDER", "BUDGET_OPPORTUNIST",
+                    z for z in ["DIVERSIFIED", "SPEED_CONTENDER",
+                                "BUDGET_OPPORTUNIST",
                                 "NICHE_SPECIALIST", "MARKET_ARBITRAGEUR"]
                     if z != zone
                 ]
@@ -1043,10 +1209,32 @@ class GameOrchestrator:
             )
 
     async def _skill_diplomacy_send(self, ctx: SkillContext) -> SkillResult:
-        """Run diplomacy turn."""
+        """Run diplomacy turn — guided by strategy agent."""
         try:
             briefings = ctx.intel.get("briefings", {})
             all_states = ctx.intel.get("all_states", {})
+
+            # Consult strategy agent for diplomacy guidance
+            diplomacy_guidance = None
+            strategy = self._current_strategy
+            if strategy and strategy.confidence >= 0.4 and self.subagent_router.strategy_agent:
+                diplomacy_guidance = await self.subagent_router.strategy_agent.consult_diplomacy(
+                    competitor_briefings=briefings,
+                    balance=ctx.balance,
+                )
+                logger.info(
+                    f"Diplomacy agent guidance: priority={diplomacy_guidance.get('priority')}, "
+                    f"max_messages={diplomacy_guidance.get('max_messages')}, "
+                    f"targets={diplomacy_guidance.get('targets')}"
+                )
+                # If agent says silent, skip diplomacy entirely
+                if diplomacy_guidance.get("priority") == "silent":
+                    logger.info("Strategy agent advises SILENT diplomacy — skipping")
+                    return SkillResult(
+                        skill_name="diplomacy_send", success=True,
+                        data={"messages_sent": 0, "agent_skipped": True},
+                    )
+
             logger.info(
                 f"Diplomacy input: {len(briefings)} briefings, "
                 f"{len(all_states)} competitor states available"
@@ -1056,6 +1244,17 @@ class GameOrchestrator:
                 competitor_states=all_states,
                 turn_id=ctx.turn_id,
             )
+
+            # Respect agent's max_messages limit
+            if diplomacy_guidance and sent:
+                max_msgs = diplomacy_guidance.get("max_messages", len(sent))
+                if len(sent) > max_msgs:
+                    logger.info(
+                        f"Agent caps diplomacy to {max_msgs} messages "
+                        f"(was {len(sent)})"
+                    )
+                    sent = sent[:max_msgs]
+
             if sent:
                 for msg in sent:
                     logger.info(
@@ -1075,18 +1274,34 @@ class GameOrchestrator:
             )
 
     async def _skill_bid_compute(self, ctx: SkillContext) -> SkillResult:
-        """Compute optimal bids via ILP — aggressive, value-aware bidding."""
+        """Compute optimal bids via ILP — guided by strategy agent."""
         try:
             zone = self.subagent_router.active_zone
             briefings = ctx.intel.get("briefings", {})
             active = sum(1 for b in briefings.values() if b.get("is_connected", False))
+
+            # Get agent bid guidance
+            spending = None
+            strategy = self._current_strategy
+            if strategy and strategy.confidence >= 0.4 and self.subagent_router.strategy_agent:
+                bid_guidance = await self.subagent_router.strategy_agent.consult_bid(
+                    zone=zone,
+                    balance=ctx.balance,
+                    active_competitors=active,
+                )
+                spending = bid_guidance.get("spending_fraction")
+                logger.info(
+                    f"Bid compute: agent-guided spending={spending:.2f}, "
+                    f"aggressiveness={bid_guidance.get('aggressiveness', 0):.2f}"
+                )
+
             logger.info(
                 f"Bid compute: zone={zone}, balance={ctx.balance}, "
                 f"inventory={len(ctx.inventory)} types, "
                 f"recipes={len(ctx.recipes)}, "
-                f"active_competitors={active}, spending=auto"
+                f"active_competitors={active}, "
+                f"spending={'auto' if spending is None else f'{spending:.2f}'}"
             )
-            # spending_fraction=None → ILP auto-selects based on competition
             decision = solve_zone_ilp(
                 zone=zone,
                 balance=ctx.balance,
@@ -1095,7 +1310,7 @@ class GameOrchestrator:
                 demand_forecast=ctx.intel.get("demand_forecast", {}),
                 competitor_briefings=briefings,
                 reputation=ctx.reputation,
-                spending_fraction=None,
+                spending_fraction=spending,
             )
             self._latest_decision = decision
             return SkillResult(

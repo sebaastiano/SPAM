@@ -24,6 +24,7 @@ def compute_menu_prices(
     reputation: float,
     competitor_avg_price: float = 120.0,
     competitor_briefings: dict[int, dict] | None = None,
+    agent_pricing: dict | None = None,
 ) -> list[dict]:
     """
     Compute optimized prices for all menu items using MIXED TIERED PRICING.
@@ -36,9 +37,30 @@ def compute_menu_prices(
 
     When no competition: modest premium (don't get greedy, volume still king)
     When competition: undercut on cheap dishes, hold on premium
+
+    agent_pricing: optional dict from strategy agent with:
+      - strategy: "volume_first" | "balanced" | "premium"
+      - adjustment_factor: float multiplier
+      - undercut: bool
     """
     zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.65)
     rep_mult = 1.0 + (reputation - 50) / 300
+
+    # Agent pricing adjustments
+    agent_factor = 1.0
+    agent_strategy = "volume_first"
+    agent_undercut = True
+    if agent_pricing:
+        agent_factor = agent_pricing.get("adjustment_factor", 1.0)
+        agent_strategy = agent_pricing.get("strategy", "volume_first")
+        agent_undercut = agent_pricing.get("undercut", True)
+
+    # Strategy-based adjustments
+    if agent_strategy == "premium":
+        agent_factor *= 1.15
+    elif agent_strategy == "balanced":
+        agent_factor *= 1.05
+    # volume_first: no change (keep prices low)
 
     # Assess competition
     active_competitors = 0
@@ -75,10 +97,10 @@ def compute_menu_prices(
 
         # Gentle scaling
         prestige_mult = 1.0 + (prestige - 50) / 250
-        price = int(base_price * prestige_mult * rep_mult * zone_factor * monopoly_mult)
+        price = int(base_price * prestige_mult * rep_mult * zone_factor * monopoly_mult * agent_factor)
 
-        # Competition undercutting (only when competitors exist)
-        if active_competitors > 0 and comp_avg > 0:
+        # Competition undercutting (only when competitors exist AND agent allows it)
+        if active_competitors > 0 and comp_avg > 0 and agent_undercut:
             if prestige <= 50:
                 price = min(price, int(comp_avg * 0.75))
             elif prestige <= 70:
@@ -92,6 +114,10 @@ def compute_menu_prices(
             "price": price,
         })
 
+    logger.info(
+        "Priced %d items | zone=%s agent_strategy=%s agent_factor=%.2f undercut=%s",
+        len(priced), zone, agent_strategy, agent_factor, agent_undercut,
+    )
     return priced
 
 

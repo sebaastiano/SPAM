@@ -70,13 +70,13 @@ def select_zone(
             )
             active_competitors = raw_active
 
-    # MONOPOLY EXPLOITATION: no active competition → premium zone always
+    # MONOPOLY EXPLOITATION: no active competition → DIVERSIFIED for max customer coverage
     if active_competitors == 0:
         logger.info(
-            f"No active competitors detected — selecting PREMIUM_MONOPOLIST "
-            f"for maximum revenue per customer (monopoly exploitation)"
+            f"No active competitors detected — selecting DIVERSIFIED "
+            f"for maximum customer coverage (no competition to worry about)"
         )
-        return "PREMIUM_MONOPOLIST"
+        return "DIVERSIFIED"
 
     zone_scores: dict[str, float] = {}
 
@@ -95,27 +95,34 @@ def select_zone(
         # 4. Reputation bonus
         reputation_bonus = _reputation_alignment(zone, reputation)
 
-        # 5. Monopoly bonus: fewer competitors = bigger bonus for premium zones
+        # 5. Monopoly bonus: fewer competitors = bigger bonus for broad zones
         monopoly_bonus = 0.0
         if active_competitors <= 2:
-            if zone == "PREMIUM_MONOPOLIST":
-                monopoly_bonus = 0.3 * (1 - active_competitors / 5)
+            if zone == "DIVERSIFIED":
+                monopoly_bonus = 0.35 * (1 - active_competitors / 5)
+            elif zone == "PREMIUM_MONOPOLIST":
+                monopoly_bonus = 0.2 * (1 - active_competitors / 5)
             elif zone == "NICHE_SPECIALIST":
-                monopoly_bonus = 0.15 * (1 - active_competitors / 5)
+                monopoly_bonus = 0.1 * (1 - active_competitors / 5)
+
+        # 6. Diversity bonus: DIVERSIFIED always gets a base bonus
+        #    because broader menus = more customers = more revenue
+        diversity_bonus = 0.15 if zone == "DIVERSIFIED" else 0.0
 
         score = (
-            revenue_potential * 0.4
-            + inventory_fit * 0.3
-            - competitor_penalty * 0.2
-            + reputation_bonus * 0.1
+            revenue_potential * 0.35
+            + inventory_fit * 0.30
+            - competitor_penalty * 0.15
+            + reputation_bonus * 0.10
             + monopoly_bonus
+            + diversity_bonus
         )
 
         zone_scores[zone] = score
         logger.debug(
             f"Zone {zone}: rev={revenue_potential:.2f} inv={inventory_fit:.2f} "
             f"comp={competitor_penalty:.2f} rep={reputation_bonus:.2f} "
-            f"mono={monopoly_bonus:.2f} → {score:.2f}"
+            f"mono={monopoly_bonus:.2f} div={diversity_bonus:.2f} → {score:.2f}"
         )
 
     best_zone = max(zone_scores, key=zone_scores.get)
@@ -145,6 +152,12 @@ def _estimate_zone_revenue(zone: str, reputation: float, balance: float) -> floa
 
     # Budget constraint
     budget_factor = min(1.0, balance / 5000)
+
+    # DIVERSIFIED zone: revenue comes from VOLUME across all archetypes
+    # Average ceiling is lower but we serve MORE customers
+    if zone == "DIVERSIFIED":
+        volume_bonus = 1.3  # 30% more customers from broader menu
+        return (avg_ceiling / 600) * rep_factor * budget_factor * volume_bonus
 
     return (avg_ceiling / 600) * rep_factor * budget_factor
 
@@ -195,6 +208,7 @@ def _count_competitors_in_zone(
     """Count how many competitors are in or approaching this zone."""
     # Map zone targets to approximate competitor strategies
     zone_to_strategies = {
+        "DIVERSIFIED": set(),  # broad — minimal penalty (competes with everyone slightly)
         "PREMIUM_MONOPOLIST": {"PREMIUM_MONOPOLIST", "STABLE_SPECIALIST"},
         "BUDGET_OPPORTUNIST": {"BUDGET_OPPORTUNIST"},
         "NICHE_SPECIALIST": {"STABLE_SPECIALIST"},
@@ -229,6 +243,9 @@ def _reputation_alignment(zone: str, reputation: float) -> float:
     if zone == "PREMIUM_MONOPOLIST":
         # Need high reputation for premium clients
         return min(1.0, reputation / 100)
+    elif zone == "DIVERSIFIED":
+        # Diversified works at any reputation, slight bonus at higher rep
+        return min(1.0, 0.6 + reputation / 200)
     elif zone == "BUDGET_OPPORTUNIST":
         # Budget works at any reputation
         return 0.7
