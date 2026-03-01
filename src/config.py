@@ -58,12 +58,14 @@ ARCHETYPE_CEILINGS = {
 # ── ACTUAL target prices per tier (volume-first mixed pricing) ──
 # These are what we CHARGE — well below ceilings to attract customers.
 # Mixed tiers ensure we appeal to ALL archetypes simultaneously.
+# KEY INSIGHT: 20 customers × 30 credits = 600 revenue
+#              0 customers × 150 credits = 0 revenue
 PRICE_TIERS = {
-    "bargain":  (0,  35,  25),   # (prestige_min, prestige_max, base_price)
-    "budget":   (36, 50,  40),
-    "mid":      (51, 65,  60),
-    "mid_high": (66, 80,  90),
-    "premium":  (81, 100, 135),
+    "bargain":  (0,  35,  15),   # (prestige_min, prestige_max, base_price)
+    "budget":   (36, 50,  22),
+    "mid":      (51, 65,  30),
+    "mid_high": (66, 80,  42),
+    "premium":  (81, 100, 58),
 }
 
 # ── Known archetypes ──
@@ -105,15 +107,15 @@ NEGATIVE_DELTA_INGREDIENTS = [
 ]
 
 # ── Zone-specific price factors ──
-# VOLUME-FIRST: price attractively across all zones.
-# Even premium zone uses moderate factor — we need customers!
-# Once reputation is high (>85), we can revisit upward.
+# VOLUME-FIRST: price LOW across all zones.
+# Even premium zone keeps prices accessible — we NEED customers!
+# Revenue = price × volume. Volume is king.
 ZONE_PRICE_FACTORS = {
-    "PREMIUM_MONOPOLIST": 0.90,
-    "BUDGET_OPPORTUNIST": 0.50,
-    "NICHE_SPECIALIST": 0.75,
-    "SPEED_CONTENDER": 0.65,
-    "MARKET_ARBITRAGEUR": 0.55,
+    "PREMIUM_MONOPOLIST": 0.70,
+    "BUDGET_OPPORTUNIST": 0.45,
+    "NICHE_SPECIALIST": 0.60,
+    "SPEED_CONTENDER": 0.55,
+    "MARKET_ARBITRAGEUR": 0.50,
 }
 
 # ── Zone-specific system prompts ──
@@ -179,10 +181,11 @@ ZONE_TARGET_ARCHETYPES = {
 # ── Zone prestige ranges ──
 # WIDER ranges = more eligible recipes = bigger menus = more customers.
 # Mixed prestige naturally creates mixed prices (the core strategy).
+# CRITICAL: Include LOW-prestige dishes in EVERY zone to attract budget customers!
 ZONE_PRESTIGE_RANGE = {
-    "PREMIUM_MONOPOLIST": (55, 100),
+    "PREMIUM_MONOPOLIST": (23, 100),
     "BUDGET_OPPORTUNIST": (23, 75),
-    "NICHE_SPECIALIST": (35, 100),
+    "NICHE_SPECIALIST": (23, 100),
     "SPEED_CONTENDER": (23, 90),
     "MARKET_ARBITRAGEUR": (23, 100),
 }

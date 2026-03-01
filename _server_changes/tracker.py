@@ -16,6 +16,7 @@ import copy
 import queue
 import requests
 from flask import Flask, Response
+from flask import request as flask_request
 from datetime import datetime
 
 # ──────────────────────────────────────────────
@@ -114,12 +115,13 @@ def sse_relay_thread():
                             elif event_name == "new_message":
                                 msg_entry = {
                                     "ts": now_ts(),
-                                    "sender_id": parsed.get("sender_id"),
-                                    "sender_name": parsed.get("sender_name", "?"),
-                                    "recipient_id": parsed.get("recipient_id"),
-                                    "recipient_name": parsed.get("recipient_name", "?"),
+                                    "sender_id": parsed.get("senderId") or parsed.get("sender_id"),
+                                    "sender_name": parsed.get("senderName") or parsed.get("sender_name", "?"),
+                                    "recipient_id": parsed.get("recipientId") or parsed.get("recipient_id"),
+                                    "recipient_name": parsed.get("recipientName") or parsed.get("recipient_name", "?"),
                                     "text": parsed.get("text") or parsed.get("content") or str(parsed),
                                     "turn_id": state.get("turn_id"),
+                                    "direction": "received",
                                 }
                                 state["messages"].append(msg_entry)
                                 if len(state["messages"]) > 200:
@@ -445,8 +447,6 @@ def _poll_bid_history():
 # (old WAITING_MARKET_TEMPLATE, SOCIAL_TEMPLATE, HTML_TEMPLATE removed)
 # Total: ~1,730 lines of HTML/CSS/JS templates deleted.
 
-from flask import jsonify, request as flask_request
-
 
 @app.route("/api/all_restaurants")
 def api_all_restaurants():
@@ -510,11 +510,37 @@ def api_game_state():
 
 @app.route("/api/messages")
 def api_messages():
-    """Return recent agent messages (captured from new_message SSE events)."""
+    """Return recent agent messages (captured from new_message SSE events + sent)."""
     limit = flask_request.args.get("limit", 100, type=int)
     with state_lock:
         msgs = list(state["messages"][-limit:])
     return jsonify(msgs)
+
+
+@app.route("/api/messages/sent", methods=["POST"])
+def api_messages_sent():
+    """Receive a sent message record from the main app."""
+    data = flask_request.get_json(force=True)
+    if not data:
+        return jsonify({"error": "no data"}), 400
+    msg_entry = {
+        "ts": data.get("ts", now_ts()),
+        "sender_id": TEAM_ID,
+        "sender_name": "SPAM!",
+        "recipient_id": data.get("recipient_id"),
+        "recipient_name": data.get("recipient_name", "?"),
+        "text": data.get("text", ""),
+        "turn_id": data.get("turn_id") or state.get("turn_id"),
+        "direction": "sent",
+        "arm": data.get("arm", ""),
+        "desired_effect": data.get("desired_effect", ""),
+    }
+    with state_lock:
+        state["messages"].append(msg_entry)
+        if len(state["messages"]) > 200:
+            state["messages"].pop(0)
+    push_event("sent_message", msg_entry)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/restaurant/<rid>")
