@@ -5,6 +5,7 @@ import pytest
 
 from src.decision.strategy_agent import StrategyAgent, TurnStrategy
 from src.decision.ilp_solver import compute_bid_price, _score_recipes
+from src.phase_router import PhaseRouter
 
 
 class TestBidHistoryRecording:
@@ -323,3 +324,107 @@ class TestMainWiring:
             __import__("src.main", fromlist=["GameOrchestrator"]).GameOrchestrator
         )
         assert "menu_recipes=" in source
+
+
+class TestMidTurnSkip:
+    """Test that mid-turn entry skips the turn and waits for the next one."""
+
+    @pytest.mark.asyncio
+    async def test_mid_turn_entry_sets_skip_flag(self):
+        """Joining at closed_bid should set _skip_until_next_turn."""
+        router = PhaseRouter()
+        await router.handle_phase_change({"phase": "closed_bid", "turn_id": 5})
+        assert router._skip_until_next_turn is True
+        assert router._is_mid_turn_entry is True
+        assert router.current_phase == "closed_bid"
+
+    @pytest.mark.asyncio
+    async def test_mid_turn_skips_subsequent_phases(self):
+        """After mid-turn entry, subsequent phases should be skipped."""
+        router = PhaseRouter()
+        handler_called = []
+
+        async def mock_handler(data):
+            handler_called.append(data.get("phase"))
+
+        router.register("closed_bid", mock_handler)
+        router.register("waiting", mock_handler)
+        router.register("serving", mock_handler)
+        router.register("stopped", mock_handler)
+
+        # Join mid-turn at closed_bid
+        await router.handle_phase_change({"phase": "closed_bid", "turn_id": 5})
+        # Subsequent phases should all be skipped
+        await router.handle_phase_change({"phase": "waiting", "turn_id": 5})
+        await router.handle_phase_change({"phase": "serving", "turn_id": 5})
+        await router.handle_phase_change({"phase": "stopped", "turn_id": 5})
+
+        # No handlers should have been called
+        assert handler_called == [], f"Handlers called during skip: {handler_called}"
+
+    @pytest.mark.asyncio
+    async def test_next_turn_resumes_after_skip(self):
+        """After a skipped turn, the next speaking phase should resume normally."""
+        router = PhaseRouter()
+        handler_called = []
+
+        async def mock_handler(data):
+            handler_called.append(data.get("phase"))
+
+        async def mock_turn_change(turn_id):
+            pass
+
+        router.register("speaking", mock_handler)
+        router.register("closed_bid", mock_handler)
+        router.register("waiting", mock_handler)
+        router.register("serving", mock_handler)
+        router.register("stopped", mock_handler)
+        router.on_turn_change(mock_turn_change)
+
+        # Join mid-turn at waiting
+        await router.handle_phase_change({"phase": "waiting", "turn_id": 3})
+        assert router._skip_until_next_turn is True
+
+        # Remaining phases of this turn are skipped
+        await router.handle_phase_change({"phase": "serving", "turn_id": 3})
+        await router.handle_phase_change({"phase": "stopped", "turn_id": 3})
+        assert handler_called == []
+
+        # Next turn: speaking arrives — should resume
+        await router.handle_phase_change({"phase": "speaking", "turn_id": 4})
+        assert router._skip_until_next_turn is False
+        assert "speaking" in handler_called
+
+    @pytest.mark.asyncio
+    async def test_game_started_clears_skip_flag(self):
+        """game_started should clear the skip flag for a fresh turn."""
+        router = PhaseRouter()
+        # Simulate mid-turn entry
+        await router.handle_phase_change({"phase": "serving", "turn_id": 2})
+        assert router._skip_until_next_turn is True
+
+        # game_started fires (new turn)
+        await router.handle_game_started({"turn_id": 3})
+        assert router._skip_until_next_turn is False
+
+    @pytest.mark.asyncio
+    async def test_normal_entry_does_not_set_skip(self):
+        """Normal entry at speaking should NOT set _skip_until_next_turn."""
+        router = PhaseRouter()
+        handler_called = []
+
+        async def mock_handler(data):
+            handler_called.append(data.get("phase"))
+
+        router.register("speaking", mock_handler)
+        await router.handle_phase_change({"phase": "speaking", "turn_id": 1})
+        assert router._skip_until_next_turn is False
+        assert "speaking" in handler_called
+
+    @pytest.mark.asyncio
+    async def test_game_reset_clears_skip_flag(self):
+        """game_reset should clear the skip flag."""
+        router = PhaseRouter()
+        router._skip_until_next_turn = True
+        await router.handle_game_reset({})
+        assert router._skip_until_next_turn is False

@@ -73,6 +73,7 @@ class PhaseRouter:
         self._is_mid_turn_entry = False
         self._skipped_phases: list[str] = []
         self._turn_has_seen_speaking = False
+        self._skip_until_next_turn = False  # skip all phases until next proper turn
 
         # ── Phase timing ──
         self.phase_start_time: float = 0.0
@@ -132,21 +133,47 @@ class PhaseRouter:
         if not self._first_phase_received:
             self._first_phase_received = True
             if new_phase != "speaking":
-                # We joined mid-turn — compute what we missed
+                # We joined mid-turn — SKIP this turn entirely
                 is_mid_turn = True
                 if new_phase in PHASE_ORDER:
                     idx = PHASE_ORDER.index(new_phase)
                     skipped = PHASE_ORDER[:idx]
                 self._is_mid_turn_entry = True
                 self._skipped_phases = skipped
+                self._skip_until_next_turn = True
                 logger.warning(
                     f"⚠ MID-TURN ENTRY detected! "
                     f"Joining at phase '{new_phase}' (turn {turn_id}). "
-                    f"Skipped phases: {skipped}"
+                    f"Skipped phases: {skipped}. "
+                    f"SKIPPING this turn — waiting for next turn to start cleanly."
                 )
             else:
                 self._turn_has_seen_speaking = True
                 logger.info("Normal turn entry at speaking phase")
+
+        # ── If skipping this turn, update state but don't dispatch ──
+        if self._skip_until_next_turn:
+            if new_phase == "speaking":
+                # New turn starting — clear skip flag and resume
+                self._skip_until_next_turn = False
+                self._is_mid_turn_entry = False
+                self._skipped_phases = []
+                self._turn_has_seen_speaking = True
+                logger.info(
+                    f"=== TURN {turn_id} STARTED (resuming after mid-turn skip) ==="
+                )
+                if self._on_turn_change:
+                    await self._on_turn_change(turn_id)
+            else:
+                # Still in the skipped turn — ignore this phase
+                self.current_phase = new_phase
+                self.current_turn = turn_id
+                self.phase_start_time = now
+                logger.info(
+                    f"Phase: {old_phase} → {new_phase} (turn {turn_id}) "
+                    f"[SKIPPED — waiting for next turn]"
+                )
+                return
 
         # ── Detect turn change (stopped → speaking) ──
         if new_phase == "speaking" and old_phase == "stopped":
@@ -154,6 +181,7 @@ class PhaseRouter:
             self._turn_has_seen_speaking = True
             self._is_mid_turn_entry = False
             self._skipped_phases = []
+            self._skip_until_next_turn = False  # new turn — resume normal operation
             logger.info(f"=== TURN {self.current_turn} STARTED ===")
             if self._on_turn_change:
                 await self._on_turn_change(self.current_turn)
@@ -195,6 +223,7 @@ class PhaseRouter:
         self._is_mid_turn_entry = False
         self._skipped_phases = []
         self._turn_has_seen_speaking = False
+        self._skip_until_next_turn = False  # game_started = fresh turn, resume
         logger.info(f"Game started — turn_id={turn_id}, awaiting first phase")
 
     async def handle_game_reset(self, data: dict):
@@ -210,6 +239,7 @@ class PhaseRouter:
         self._is_mid_turn_entry = False
         self._skipped_phases = []
         self._turn_has_seen_speaking = False
+        self._skip_until_next_turn = False  # reset clears skip flag
         # Keep: phase_durations, estimated_durations (cross-turn learning)
 
     # ── Timing helpers ──
