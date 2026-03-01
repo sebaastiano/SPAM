@@ -275,7 +275,10 @@ def solve_zone_ilp(
     for j in range(J):
         if y_sol[j]:
             recipe = eligible_recipes[j]
-            price = int(revenues[j])
+            # Use the actual menu price (raw_prices), NOT the expected-revenue
+            # (revenues = raw_prices × order_probability) which the MILP uses
+            # internally for optimisation but is far too low for customer-facing prices.
+            price = int(raw_prices[j])
             # Compute per-dish ingredient cost for logging
             dish_cost = sum(
                 BASE_BID_PRICES.get(ing, DEFAULT_BASE_BID) * qty
@@ -298,14 +301,17 @@ def solve_zone_ilp(
             })
 
     decision.total_bid_cost = float(bid_prices @ x_sol)
-    decision.expected_revenue = float(revenues @ y_sol)
+    # expected_revenue uses raw menu prices (what we actually charge)
+    decision.expected_revenue = float(raw_prices @ y_sol)
 
     net_profit = decision.expected_revenue - decision.total_bid_cost
+    prob_weighted_rev = float(revenues @ y_sol)
     logger.info(
         f"MILP [{zone}]: {len(decision.menu)} menu items, "
         f"{len(decision.bids)} bids (total_qty={sum(int(x) for x in x_sol)}), "
         f"cost={decision.total_bid_cost:.0f}/{budget:.0f} budget, "
-        f"expected_rev={decision.expected_revenue:.0f}, "
+        f"menu_rev={decision.expected_revenue:.0f}, "
+        f"prob_weighted_rev={prob_weighted_rev:.0f}, "
         f"NET PROFIT={net_profit:+.0f}"
     )
 
