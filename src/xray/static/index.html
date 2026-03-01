@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPAM! X-Ray — Agent Explainability Dashboard</title>
+<style>
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+    --bg: #0a0e17;
+    --bg2: #111827;
+    --bg3: #1a2235;
+    --border: #2d3748;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --accent: #60a5fa;
+    --accent2: #818cf8;
+    --green: #34d399;
+    --red: #f87171;
+    --orange: #fbbf24;
+    --purple: #a78bfa;
+    --cyan: #22d3ee;
+    --pink: #f472b6;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+}
+body { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+
+/* ── Header ── */
+.header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px; background: var(--bg2); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.header h1 { font-size: 16px; font-weight: 700; }
+.header h1 span { color: var(--accent); }
+.conn-status {
+    display: flex; align-items: center; gap: 6px; font-size: 12px;
+    color: var(--text-dim);
+}
+.conn-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--red);
+    transition: background 0.3s;
+}
+.conn-dot.connected { background: var(--green); }
+
+/* ── Main Layout ── */
+.main {
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    grid-template-rows: auto 1fr;
+    gap: 0;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* ── Phase / State Panel (left) ── */
+.left-panel {
+    grid-row: 1 / -1;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    background: var(--bg2);
+}
+
+/* ── Central Area ── */
+.center-top {
+    border-bottom: 1px solid var(--border);
+    padding: 0;
+}
+.center-main {
+    overflow-y: auto;
+}
+
+/* ── Right Panel ── */
+.right-panel {
+    grid-row: 1 / -1;
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    background: var(--bg2);
+}
+
+/* ── Panels ── */
+.panel {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+}
+.panel-title {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 8px;
+    display: flex; align-items: center; gap: 6px;
+}
+.panel-title .icon { font-size: 14px; }
+
+/* ── Phase Timeline ── */
+.phase-bar {
+    display: flex; gap: 2px; margin-bottom: 12px;
+}
+.phase-chip {
+    flex: 1; padding: 6px 4px; text-align: center; font-size: 10px;
+    font-weight: 600; border-radius: 4px; background: var(--bg3);
+    color: var(--text-dim); transition: all 0.3s;
+    text-transform: uppercase; letter-spacing: 0.04em;
+}
+.phase-chip.active {
+    background: var(--accent); color: #fff;
+    box-shadow: 0 0 12px rgba(96, 165, 250, 0.4);
+}
+.phase-chip.completed { background: #1e3a5f; color: var(--accent); }
+.phase-chip.skipped { background: var(--bg3); color: var(--red); text-decoration: line-through; }
+
+/* ── State Cards ── */
+.stat-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+}
+.stat-card {
+    background: var(--bg3); border-radius: 6px; padding: 8px 10px;
+}
+.stat-label { font-size: 10px; color: var(--text-dim); margin-bottom: 2px; }
+.stat-value { font-size: 18px; font-weight: 700; }
+.stat-value.balance { color: var(--green); }
+.stat-value.reputation { color: var(--orange); }
+.stat-value.zone { color: var(--purple); font-size: 11px; }
+
+/* ── Skill Pipeline ── */
+.skill-list { display: flex; flex-direction: column; gap: 4px; }
+.skill-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 8px; border-radius: 4px; background: var(--bg3);
+    font-size: 12px; transition: all 0.2s;
+}
+.skill-row.running { border-left: 3px solid var(--accent); background: #1a2744; }
+.skill-row.success { border-left: 3px solid var(--green); }
+.skill-row.failed { border-left: 3px solid var(--red); }
+.skill-name { flex: 1; font-weight: 600; }
+.skill-badge {
+    font-size: 9px; padding: 2px 6px; border-radius: 3px;
+    font-weight: 700; text-transform: uppercase;
+}
+.skill-badge.running { background: rgba(96,165,250,0.2); color: var(--accent); }
+.skill-badge.success { background: rgba(52,211,153,0.2); color: var(--green); }
+.skill-badge.failed { background: rgba(248,113,113,0.2); color: var(--red); }
+.skill-time { font-size: 10px; color: var(--text-dim); }
+
+/* ── Event Stream (center) ── */
+.event-stream { padding: 8px; }
+.event-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 4px 8px; border-radius: 3px; font-size: 12px;
+    transition: background 0.1s; border-bottom: 1px solid transparent;
+    animation: fadeIn 0.2s ease-out;
+}
+.event-row:hover { background: var(--bg3); }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+.event-time { color: var(--text-dim); font-size: 10px; white-space: nowrap; min-width: 70px; }
+.event-cat {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 700;
+    text-transform: uppercase; white-space: nowrap; min-width: 70px; text-align: center;
+}
+.event-cat.phase { background: rgba(96,165,250,0.2); color: var(--accent); }
+.event-cat.skill { background: rgba(129,140,248,0.2); color: var(--accent2); }
+.event-cat.decision { background: rgba(167,139,250,0.2); color: var(--purple); }
+.event-cat.intelligence { background: rgba(34,211,238,0.2); color: var(--cyan); }
+.event-cat.diplomacy { background: rgba(244,114,182,0.2); color: var(--pink); }
+.event-cat.serving { background: rgba(52,211,153,0.2); color: var(--green); }
+.event-cat.memory { background: rgba(251,191,36,0.2); color: var(--orange); }
+.event-cat.event { background: rgba(148,163,184,0.15); color: var(--text-dim); }
+.event-cat.warning { background: rgba(251,191,36,0.2); color: var(--orange); }
+.event-cat.error { background: rgba(248,113,113,0.2); color: var(--red); }
+.event-name { font-weight: 600; white-space: nowrap; }
+.event-detail { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.event-status { font-size: 9px; font-weight: 700; }
+.event-status.success { color: var(--green); }
+.event-status.failed { color: var(--red); }
+.event-status.running { color: var(--accent); }
+.event-status.warning { color: var(--orange); }
+
+/* ── Competitor Cards ── */
+.competitor-card {
+    background: var(--bg3); border-radius: 6px; padding: 8px 10px;
+    margin-bottom: 6px; transition: all 0.2s;
+}
+.competitor-card:hover { background: #1e2a3f; }
+.comp-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 4px;
+}
+.comp-name { font-weight: 700; font-size: 12px; }
+.comp-strategy {
+    font-size: 9px; padding: 2px 6px; border-radius: 3px;
+    text-transform: uppercase; font-weight: 700;
+}
+.comp-strategy.premium { background: rgba(167,139,250,0.2); color: var(--purple); }
+.comp-strategy.budget { background: rgba(52,211,153,0.2); color: var(--green); }
+.comp-strategy.aggressive { background: rgba(248,113,113,0.2); color: var(--red); }
+.comp-strategy.dormant { background: rgba(148,163,184,0.1); color: var(--text-dim); }
+.comp-stats {
+    display: flex; gap: 12px; font-size: 10px; color: var(--text-dim);
+}
+.comp-stat span { font-weight: 700; color: var(--text); }
+.comp-threat {
+    height: 3px; border-radius: 2px; background: var(--bg);
+    margin-top: 4px; overflow: hidden;
+}
+.comp-threat-fill {
+    height: 100%; border-radius: 2px; transition: width 0.5s;
+}
+
+/* ── Menu Items ── */
+.menu-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 8px; border-radius: 3px; font-size: 11px;
+    background: var(--bg3); margin-bottom: 3px;
+}
+.menu-item-name { font-weight: 600; }
+.menu-item-price { color: var(--green); font-weight: 700; }
+
+/* ── Inventory ── */
+.inv-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 2px 8px; font-size: 11px; border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.inv-name { color: var(--text-dim); }
+.inv-qty { font-weight: 700; }
+
+/* ── Filter Toolbar ── */
+.filter-bar {
+    display: flex; gap: 4px; padding: 6px 8px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--border); background: var(--bg2);
+}
+.filter-btn {
+    font-size: 10px; padding: 3px 8px; border-radius: 3px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-dim); cursor: pointer; transition: all 0.2s;
+    font-family: inherit;
+}
+.filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+.filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4a5568; }
+
+/* ── Decision Explanation Box ── */
+.decision-box {
+    background: var(--bg3); border-radius: 6px; padding: 10px;
+    margin-bottom: 6px; border-left: 3px solid var(--purple);
+}
+.decision-title { font-weight: 700; font-size: 12px; color: var(--purple); margin-bottom: 4px; }
+.decision-choice { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+.decision-reason { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+
+/* ── Serving Live ── */
+.serving-stat {
+    display: flex; justify-content: space-between; padding: 3px 0;
+    font-size: 12px; border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.serving-stat-label { color: var(--text-dim); }
+.serving-stat-value { font-weight: 700; }
+
+/* ── Empty State ── */
+.empty-state {
+    text-align: center; padding: 20px; color: var(--text-dim); font-size: 12px;
+}
+
+/* ── Responsive ── */
+@media (max-width: 1200px) {
+    .main { grid-template-columns: 240px 1fr 280px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div class="header">
+    <h1>🔬 <span>SPAM!</span> X-Ray — Agent Explainability</h1>
+    <div class="conn-status">
+        <div class="conn-dot" id="connDot"></div>
+        <span id="connText">Connecting...</span>
+        <span id="turnLabel" style="margin-left:12px; color: var(--accent); font-weight:700;"></span>
+    </div>
+</div>
+
+<!-- ── Main Grid ── -->
+<div class="main">
+
+    <!-- ═══ LEFT PANEL ═══ -->
+    <div class="left-panel">
+
+        <!-- Phase Timeline -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">⏱</span> Phase Timeline</div>
+            <div class="phase-bar" id="phaseBar">
+                <div class="phase-chip" data-phase="speaking">SPK</div>
+                <div class="phase-chip" data-phase="closed_bid">BID</div>
+                <div class="phase-chip" data-phase="waiting">WAIT</div>
+                <div class="phase-chip" data-phase="serving">SERV</div>
+                <div class="phase-chip" data-phase="stopped">STOP</div>
+            </div>
+        </div>
+
+        <!-- Game State -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">📊</span> Game State</div>
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Balance</div>
+                    <div class="stat-value balance" id="stBalance">—</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Reputation</div>
+                    <div class="stat-value reputation" id="stReputation">—</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Zone</div>
+                    <div class="stat-value zone" id="stZone">—</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Restaurant</div>
+                    <div class="stat-value" id="stOpen" style="font-size:13px;">—</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Skill Pipeline -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">⚡</span> Skill Pipeline</div>
+            <div class="skill-list" id="skillList">
+                <div class="empty-state">Waiting for skill execution...</div>
+            </div>
+        </div>
+
+        <!-- Current Menu -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">🍽</span> Menu (<span id="menuCount">0</span> items)</div>
+            <div id="menuList">
+                <div class="empty-state">No menu set</div>
+            </div>
+        </div>
+
+        <!-- Inventory -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">📦</span> Inventory (<span id="invCount">0</span>)</div>
+            <div id="invList" style="max-height:150px;overflow-y:auto;">
+                <div class="empty-state">Empty</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ CENTER TOP: Filters ═══ -->
+    <div class="center-top">
+        <div class="filter-bar" id="filterBar">
+            <button class="filter-btn active" data-cat="all">All</button>
+            <button class="filter-btn" data-cat="phase">Phase</button>
+            <button class="filter-btn" data-cat="skill">Skill</button>
+            <button class="filter-btn" data-cat="decision">Decision</button>
+            <button class="filter-btn" data-cat="intelligence">Intel</button>
+            <button class="filter-btn" data-cat="diplomacy">Diplomacy</button>
+            <button class="filter-btn" data-cat="serving">Serving</button>
+            <button class="filter-btn" data-cat="memory">Memory</button>
+            <button class="filter-btn" data-cat="event">SSE</button>
+        </div>
+    </div>
+
+    <!-- ═══ CENTER MAIN: Event Stream ═══ -->
+    <div class="center-main" id="centerMain">
+        <div class="event-stream" id="eventStream">
+            <div class="empty-state" id="streamEmpty">
+                Waiting for events... Connect the SPAM! agent to see real-time traces.
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ RIGHT PANEL ═══ -->
+    <div class="right-panel">
+
+        <!-- Latest Decision -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">🧠</span> Latest Decision</div>
+            <div id="decisionPanel">
+                <div class="empty-state">No decisions yet</div>
+            </div>
+        </div>
+
+        <!-- Competitors -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">🏴‍☠️</span> Competitors (<span id="compCount">0</span>)</div>
+            <div id="competitorList">
+                <div class="empty-state">No competitor data</div>
+            </div>
+        </div>
+
+        <!-- Serving Stats -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">🍳</span> Serving Stats</div>
+            <div id="servingStats">
+                <div class="empty-state">Waiting for serving phase...</div>
+            </div>
+        </div>
+
+        <!-- Diplomacy Log -->
+        <div class="panel">
+            <div class="panel-title"><span class="icon">🕵️</span> Diplomacy</div>
+            <div id="diplomacyLog" style="max-height:200px;overflow-y:auto;">
+                <div class="empty-state">No diplomacy events</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════════════════════════════
+const state = {
+    connected: false,
+    turnId: 0,
+    phase: '',
+    events: [],
+    filter: 'all',
+    skills: {},        // name → {status, duration_ms, ...}
+    gameState: {},
+    competitors: {},
+    decisions: [],
+    diplomacyEvents: [],
+    servingStats: {},
+    completedPhases: new Set(),
+    skippedPhases: new Set(),
+};
+
+const MAX_EVENTS = 500;
+const PHASES = ['speaking', 'closed_bid', 'waiting', 'serving', 'stopped'];
+
+// ══════════════════════════════════════════════════════════════
+//  WEBSOCKET CONNECTION
+// ══════════════════════════════════════════════════════════════
+let ws = null;
+let reconnectTimer = null;
+
+function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/ws`;
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+        state.connected = true;
+        updateConnectionStatus();
+    };
+
+    ws.onclose = () => {
+        state.connected = false;
+        updateConnectionStatus();
+        reconnectTimer = setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => {
+        state.connected = false;
+        updateConnectionStatus();
+    };
+
+    ws.onmessage = (msg) => {
+        try {
+            const data = JSON.parse(msg.data);
+            if (data.type === 'snapshot') {
+                handleSnapshot(data);
+            } else {
+                handleEvent(data);
+            }
+        } catch (e) {
+            console.warn('Failed to parse message:', e);
+        }
+    };
+}
+
+function handleSnapshot(snap) {
+    state.turnId = snap.turn_id || 0;
+    state.phase = snap.phase || '';
+    state.gameState = snap.game_state || {};
+    state.skills = snap.skill_states || {};
+    state.competitors = snap.competitors || {};
+    state.servingStats = snap.serving_stats || {};
+
+    // Load recent events
+    if (snap.recent_events) {
+        for (const evt of snap.recent_events) {
+            addEvent(evt, false);
+        }
+    }
+
+    renderAll();
+}
+
+function handleEvent(evt) {
+    addEvent(evt, true);
+
+    // Update state based on event category
+    switch (evt.category) {
+        case 'phase':
+            state.phase = evt.name;
+            if (evt.data?.turn_id) state.turnId = evt.data.turn_id;
+            // Mark completed phases
+            const idx = PHASES.indexOf(evt.name);
+            if (idx >= 0) {
+                for (let i = 0; i < idx; i++) {
+                    state.completedPhases.add(PHASES[i]);
+                }
+            }
+            if (evt.name === 'speaking') {
+                state.completedPhases.clear();
+                state.skippedPhases.clear();
+                state.skills = {};
+            }
+            if (evt.data?.skipped_phases) {
+                evt.data.skipped_phases.forEach(p => state.skippedPhases.add(p));
+            }
+            updatePhaseBar();
+            updateTurnLabel();
+            break;
+
+        case 'skill':
+            state.skills[evt.name] = {
+                status: evt.status,
+                ...evt.data,
+            };
+            renderSkillList();
+            break;
+
+        case 'decision':
+            state.decisions.unshift(evt);
+            if (state.decisions.length > 20) state.decisions.pop();
+            renderDecisionPanel();
+            break;
+
+        case 'intelligence':
+            if (evt.data?.competitors) {
+                state.competitors = evt.data.competitors;
+                renderCompetitors();
+            }
+            break;
+
+        case 'memory':
+            if (evt.name === 'game_state') {
+                state.gameState = evt.data;
+                renderGameState();
+            }
+            break;
+
+        case 'diplomacy':
+            state.diplomacyEvents.unshift(evt);
+            if (state.diplomacyEvents.length > 30) state.diplomacyEvents.pop();
+            renderDiplomacyLog();
+            break;
+
+        case 'serving':
+            if (evt.name === 'stats') {
+                Object.assign(state.servingStats, evt.data);
+            }
+            state.servingStats._lastEvent = {name: evt.name, status: evt.status, ...evt.data};
+            renderServingStats();
+            if (evt.name === 'menu_set') {
+                renderMenuAndInventory();
+            }
+            break;
+    }
+}
+
+function addEvent(evt, render) {
+    state.events.push(evt);
+    if (state.events.length > MAX_EVENTS) {
+        state.events = state.events.slice(-MAX_EVENTS);
+    }
+    if (render) renderNewEvent(evt);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  RENDERS
+// ══════════════════════════════════════════════════════════════
+
+function renderAll() {
+    updateConnectionStatus();
+    updatePhaseBar();
+    updateTurnLabel();
+    renderGameState();
+    renderSkillList();
+    renderMenuAndInventory();
+    renderEventStream();
+    renderDecisionPanel();
+    renderCompetitors();
+    renderServingStats();
+    renderDiplomacyLog();
+}
+
+function updateConnectionStatus() {
+    const dot = document.getElementById('connDot');
+    const text = document.getElementById('connText');
+    dot.className = state.connected ? 'conn-dot connected' : 'conn-dot';
+    text.textContent = state.connected ? 'Connected' : 'Disconnected';
+}
+
+function updateTurnLabel() {
+    document.getElementById('turnLabel').textContent =
+        state.turnId ? `Turn ${state.turnId} • ${(state.phase || '—').toUpperCase()}` : '';
+}
+
+function updatePhaseBar() {
+    const chips = document.querySelectorAll('.phase-chip');
+    chips.forEach(chip => {
+        const phase = chip.dataset.phase;
+        chip.className = 'phase-chip';
+        if (phase === state.phase) {
+            chip.classList.add('active');
+        } else if (state.skippedPhases.has(phase)) {
+            chip.classList.add('skipped');
+        } else if (state.completedPhases.has(phase)) {
+            chip.classList.add('completed');
+        }
+    });
+}
+
+function renderGameState() {
+    const gs = state.gameState;
+    document.getElementById('stBalance').textContent =
+        gs.balance !== undefined ? `${Number(gs.balance).toLocaleString()}` : '—';
+    document.getElementById('stReputation').textContent =
+        gs.reputation !== undefined ? Number(gs.reputation).toFixed(1) : '—';
+    document.getElementById('stZone').textContent =
+        gs.zone || '—';
+    const openEl = document.getElementById('stOpen');
+    if (gs.is_open !== undefined) {
+        openEl.textContent = gs.is_open ? '🟢 OPEN' : '🔴 CLOSED';
+        openEl.style.color = gs.is_open ? 'var(--green)' : 'var(--red)';
+    }
+}
+
+function renderSkillList() {
+    const el = document.getElementById('skillList');
+    const entries = Object.entries(state.skills);
+    if (entries.length === 0) {
+        el.innerHTML = '<div class="empty-state">Waiting for skill execution...</div>';
+        return;
+    }
+    el.innerHTML = entries.map(([name, info]) => {
+        const st = info.status || 'info';
+        const dur = info.duration_ms ? `${info.duration_ms.toFixed(0)}ms` : '';
+        return `<div class="skill-row ${st}">
+            <span class="skill-name">${name.replace(/_/g, ' ')}</span>
+            <span class="skill-badge ${st}">${st}</span>
+            ${dur ? `<span class="skill-time">${dur}</span>` : ''}
+        </div>`;
+    }).join('');
+}
+
+function renderMenuAndInventory() {
+    const gs = state.gameState;
+    // Menu
+    const menuEl = document.getElementById('menuList');
+    const menuCount = document.getElementById('menuCount');
+    const menu = gs.menu || [];
+    menuCount.textContent = menu.length;
+    if (menu.length === 0) {
+        menuEl.innerHTML = '<div class="empty-state">No menu set</div>';
+    } else {
+        menuEl.innerHTML = menu.map(m => {
+            const name = typeof m === 'string' ? m : (m.name || '?');
+            const price = typeof m === 'object' ? m.price : '';
+            return `<div class="menu-item">
+                <span class="menu-item-name">${escapeHtml(name)}</span>
+                ${price ? `<span class="menu-item-price">$${price}</span>` : ''}
+            </div>`;
+        }).join('');
+    }
+
+    // Inventory
+    const invEl = document.getElementById('invList');
+    const invCount = document.getElementById('invCount');
+    const inv = gs.inventory || {};
+    const invEntries = Object.entries(inv);
+    invCount.textContent = gs.inventory_total || invEntries.reduce((s, [, v]) => s + v, 0);
+    if (invEntries.length === 0) {
+        invEl.innerHTML = '<div class="empty-state">Empty</div>';
+    } else {
+        invEl.innerHTML = invEntries
+            .sort((a, b) => b[1] - a[1])
+            .map(([name, qty]) =>
+                `<div class="inv-row">
+                    <span class="inv-name">${escapeHtml(name)}</span>
+                    <span class="inv-qty">${qty}</span>
+                </div>`
+            ).join('');
+    }
+}
+
+function renderEventStream() {
+    const el = document.getElementById('eventStream');
+    const empty = document.getElementById('streamEmpty');
+    const filtered = filterEvents();
+
+    if (filtered.length === 0) {
+        el.innerHTML = '<div class="empty-state" id="streamEmpty">No events to display</div>';
+        return;
+    }
+
+    if (empty) empty.remove();
+    el.innerHTML = filtered.slice(-200).map(evt => renderEventRow(evt)).join('');
+    scrollToBottom();
+}
+
+function renderNewEvent(evt) {
+    if (state.filter !== 'all' && evt.category !== state.filter) return;
+
+    const el = document.getElementById('eventStream');
+    const empty = document.getElementById('streamEmpty');
+    if (empty) empty.remove();
+
+    el.insertAdjacentHTML('beforeend', renderEventRow(evt));
+
+    // Trim old events from DOM
+    while (el.children.length > 300) {
+        el.removeChild(el.firstChild);
+    }
+
+    scrollToBottom();
+}
+
+function renderEventRow(evt) {
+    const time = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString('en', {hour12: false}) : '';
+    const cat = evt.category || 'event';
+    const name = evt.name || '';
+    const status = evt.status || '';
+    const detail = formatEventDetail(evt);
+    const durStr = evt.duration_ms ? `<span style="color:var(--text-dim);font-size:10px;">${evt.duration_ms.toFixed(0)}ms</span>` : '';
+
+    return `<div class="event-row">
+        <span class="event-time">${time}</span>
+        <span class="event-cat ${cat}">${cat}</span>
+        <span class="event-name">${escapeHtml(name.replace(/_/g, ' '))}</span>
+        <span class="event-status ${status}">${status !== 'info' ? status : ''}</span>
+        ${durStr}
+        <span class="event-detail">${detail}</span>
+    </div>`;
+}
+
+function formatEventDetail(evt) {
+    const d = evt.data || {};
+    const parts = [];
+
+    // Special formatting per category
+    if (evt.category === 'decision') {
+        if (d.choice) parts.push(`→ <b>${escapeHtml(d.choice)}</b>`);
+        if (d.reason) parts.push(escapeHtml(d.reason.substring(0, 80)));
+    } else if (evt.category === 'skill') {
+        if (d.error) parts.push(`⛔ ${escapeHtml(d.error.substring(0, 60))}`);
+        if (d.menu_size !== undefined) parts.push(`menu: ${d.menu_size} items`);
+        if (d.submitted !== undefined) parts.push(`submitted: ${d.submitted}`);
+        if (d.zone) parts.push(`zone: ${d.zone}`);
+        if (d.competitors_seen !== undefined) parts.push(`competitors: ${d.competitors_seen}`);
+    } else if (evt.category === 'intelligence') {
+        if (d.briefing_count !== undefined) parts.push(`${d.briefing_count} briefings`);
+        if (d.connected_competitors !== undefined) parts.push(`${d.connected_competitors} connected`);
+    } else if (evt.category === 'diplomacy') {
+        if (d.messages_sent !== undefined) parts.push(`${d.messages_sent} msgs`);
+        if (d.sender) parts.push(`from: ${escapeHtml(d.sender)}`);
+        if (d.text_preview) parts.push(`"${escapeHtml(d.text_preview)}"`);
+    } else if (evt.category === 'serving') {
+        if (d.client_name) parts.push(escapeHtml(d.client_name));
+        if (d.dish) parts.push(escapeHtml(d.dish));
+        if (d.total_served !== undefined) parts.push(`served: ${d.total_served}`);
+        if (d.menu_count !== undefined) parts.push(`${d.menu_count} items`);
+    } else {
+        // Generic: show up to 3 key-value pairs
+        const entries = Object.entries(d).slice(0, 3);
+        for (const [k, v] of entries) {
+            if (typeof v === 'object') continue;
+            parts.push(`${k}: ${v}`);
+        }
+    }
+
+    return parts.join(' · ');
+}
+
+function renderDecisionPanel() {
+    const el = document.getElementById('decisionPanel');
+    if (state.decisions.length === 0) {
+        el.innerHTML = '<div class="empty-state">No decisions yet</div>';
+        return;
+    }
+    el.innerHTML = state.decisions.slice(0, 5).map(d => {
+        const data = d.data || {};
+        return `<div class="decision-box">
+            <div class="decision-title">${escapeHtml(d.name.replace(/_/g, ' ').toUpperCase())}</div>
+            <div class="decision-choice">${escapeHtml(data.choice || '—')}</div>
+            <div class="decision-reason">${escapeHtml(data.reason || '')}</div>
+            ${data.duration_ms ? `<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">${data.duration_ms.toFixed(0)}ms</div>` : ''}
+        </div>`;
+    }).join('');
+}
+
+function renderCompetitors() {
+    const el = document.getElementById('competitorList');
+    const cCount = document.getElementById('compCount');
+    const entries = Object.entries(state.competitors);
+    cCount.textContent = entries.length;
+
+    if (entries.length === 0) {
+        el.innerHTML = '<div class="empty-state">No competitor data</div>';
+        return;
+    }
+
+    el.innerHTML = entries.map(([rid, c]) => {
+        const strat = (c.strategy || 'UNKNOWN').toLowerCase();
+        let stratClass = 'dormant';
+        if (strat.includes('premium') || strat.includes('monopol')) stratClass = 'premium';
+        else if (strat.includes('budget') || strat.includes('speed')) stratClass = 'budget';
+        else if (strat.includes('aggress') || strat.includes('hoard')) stratClass = 'aggressive';
+
+        const threat = c.threat_level || 0;
+        const threatColor = threat > 0.7 ? 'var(--red)' : threat > 0.4 ? 'var(--orange)' : 'var(--green)';
+
+        return `<div class="competitor-card">
+            <div class="comp-header">
+                <span class="comp-name">${escapeHtml(c.name || `Team ${rid}`)}</span>
+                <span class="comp-strategy ${stratClass}">${escapeHtml(c.strategy || 'UNKNOWN')}</span>
+            </div>
+            <div class="comp-stats">
+                <span>Menu: <span>${c.menu_size || 0}</span></span>
+                <span>Avg$: <span>${c.menu_price_avg || 0}</span></span>
+                <span>Rep: <span>${c.reputation || 0}</span></span>
+                ${c.is_connected ? '<span style="color:var(--green)">● Online</span>' : '<span style="color:var(--text-dim)">○ Offline</span>'}
+            </div>
+            <div class="comp-threat">
+                <div class="comp-threat-fill" style="width:${threat * 100}%; background:${threatColor};"></div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderServingStats() {
+    const el = document.getElementById('servingStats');
+    const ss = state.servingStats;
+    if (!ss || Object.keys(ss).length === 0) {
+        el.innerHTML = '<div class="empty-state">Waiting for serving phase...</div>';
+        return;
+    }
+
+    const rows = [];
+    if (ss.total_served !== undefined) rows.push(['Clients Served', ss.total_served]);
+    if (ss.serving_active !== undefined) rows.push(['Active', ss.serving_active ? '🟢 Yes' : '🔴 No']);
+    if (ss._lastEvent) {
+        const le = ss._lastEvent;
+        if (le.client_name) rows.push(['Last Client', le.client_name]);
+        if (le.dish) rows.push(['Last Dish', le.dish]);
+    }
+
+    if (rows.length === 0) {
+        el.innerHTML = '<div class="empty-state">No serving data</div>';
+        return;
+    }
+
+    el.innerHTML = rows.map(([label, value]) =>
+        `<div class="serving-stat">
+            <span class="serving-stat-label">${escapeHtml(label)}</span>
+            <span class="serving-stat-value">${escapeHtml(String(value))}</span>
+        </div>`
+    ).join('');
+}
+
+function renderDiplomacyLog() {
+    const el = document.getElementById('diplomacyLog');
+    if (state.diplomacyEvents.length === 0) {
+        el.innerHTML = '<div class="empty-state">No diplomacy events</div>';
+        return;
+    }
+
+    el.innerHTML = state.diplomacyEvents.slice(0, 15).map(evt => {
+        const d = evt.data || {};
+        const icon = evt.name.includes('received') ? '📩' : evt.name.includes('sent') || evt.name.includes('complete') ? '📤' : '🕵️';
+        let detail = '';
+        if (d.messages_sent !== undefined) detail = `${d.messages_sent} messages sent`;
+        if (d.sender) detail = `From: ${d.sender} (cred: ${d.credibility || '?'})`;
+        if (d.text_preview) detail += ` "${d.text_preview}"`;
+        if (d.strategies) detail = `Strategies: ${d.strategies.join(', ')}`;
+
+        return `<div style="font-size:11px; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.03);">
+            ${icon} <b>${escapeHtml(evt.name.replace(/_/g, ' '))}</b>
+            <span style="color:var(--text-dim);">${escapeHtml(detail)}</span>
+        </div>`;
+    }).join('');
+}
+
+// ══════════════════════════════════════════════════════════════
+//  FILTERING
+// ══════════════════════════════════════════════════════════════
+
+function filterEvents() {
+    if (state.filter === 'all') return state.events;
+    return state.events.filter(e => e.category === state.filter);
+}
+
+document.getElementById('filterBar').addEventListener('click', (e) => {
+    const btn = e.target.closest('.filter-btn');
+    if (!btn) return;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.filter = btn.dataset.cat;
+    renderEventStream();
+});
+
+// ══════════════════════════════════════════════════════════════
+//  HELPERS
+// ══════════════════════════════════════════════════════════════
+
+function scrollToBottom() {
+    const el = document.getElementById('centerMain');
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ══════════════════════════════════════════════════════════════
+//  BOOT
+// ══════════════════════════════════════════════════════════════
+connect();
+</script>
+</body>
+</html>
