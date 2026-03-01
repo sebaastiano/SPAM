@@ -551,8 +551,8 @@ def compute_menu_price(
 
     # ── 4. Hard floor and ceiling ──
     # Floor: cost_floor or 20 credits minimum
-    # Ceiling: 400 credits max (stay under Astrobarone/Saggi limits)
-    price = max(max(cost_floor, 20), min(price, 400))
+    # Ceiling: 550 credits (stay under Saggi 600 ceiling with margin)
+    price = max(max(cost_floor, 20), min(price, 550))
 
     return price
 

@@ -61,20 +61,19 @@ ARCHETYPE_CEILINGS = {
 # CRITICAL CONSTRAINT: price MUST exceed ingredient cost per serving.
 # Typical dish needs 3-10 ingredient units at 15-18 each = 45-180 cost.
 # Prices are further adjusted UP by cost-floor logic in compute_menu_price.
-# We still stay BELOW archetype ceilings to get volume:
-#   Esploratore Galattico: ≤60   → target 35-55
-#   Famiglie Orbitali:     ≤150  → target 50-120
-#   Saggi del Cosmo:       ≤600  → target 80-250
-#   Astrobarone:           ≤500  → target 80-250
+# LOW tiers: keep cheap to attract volume (Esploratori, Famiglie)
+# HIGH tiers: price AGGRESSIVELY — Saggi (≤600) and Astrobaroni (≤500)
+#   will pay handsomely. If they don't come, we still have cheap dishes.
+#   1000 credits for closing restaurant = we MUST beat that with serving.
 PRICE_TIERS = {
     "ultra_bargain": (0,  20,  30),   # (prestige_min, prestige_max, base_price)
-    "bargain":       (21, 35,  38),
-    "budget":        (36, 50,  48),
-    "mid_low":       (51, 60,  55),
-    "mid":           (61, 70,  65),
-    "mid_high":      (71, 80,  80),
-    "premium":       (81, 90,  100),
-    "luxury":        (91, 100, 130),
+    "bargain":       (21, 35,  40),
+    "budget":        (36, 50,  50),
+    "mid_low":       (51, 60,  65),
+    "mid":           (61, 70,  90),
+    "mid_high":      (71, 80,  140),
+    "premium":       (81, 90,  220),  # Astrobaroni territory (ceiling 500)
+    "luxury":        (91, 100, 320),  # Saggi territory (ceiling 600)
 }
 
 # ── Known archetypes ──
