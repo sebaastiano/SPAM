@@ -592,6 +592,17 @@ class GameOrchestrator:
             turn_id = await self._discover_turn_id()
             logger.info(f"game_started had no turn_id — discovered turn_id={turn_id}")
         else:
+            # ALWAYS validate the SSE turn_id against the server.
+            # The SSE can report turn_id=1 even when the game is on turn 15+,
+            # which makes every subsequent /meals request fail with 400.
+            self._discovered_turn = None  # force fresh probe
+            validated = await self._discover_turn_id()
+            if validated and validated > turn_id:
+                logger.warning(
+                    f"SSE turn_id={turn_id} is stale — "
+                    f"server probe says turn_id={validated}"
+                )
+                turn_id = validated
             self._discovered_turn = turn_id  # cache the known turn
         self.phase_router.current_turn = turn_id
         self.phase_router.current_phase = "speaking"

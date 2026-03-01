@@ -176,9 +176,14 @@ class ServingPipeline:
         logger.info(f"Inventory snapshot: {sum(inventory.values())} total items")
 
     async def start_serving(self, turn_id: int):
-        """Called at the start of serving phase."""
+        """Called at the start of serving phase.
+
+        Validates the turn_id against the server before starting the
+        polling loop.  If the SSE-provided turn_id is stale, probes
+        for the correct one so /meals polling works from the first request.
+        """
         if turn_id <= 0:
-            logger.error(f"start_serving called with invalid turn_id={turn_id} — polling will be skipped")
+            logger.error(f"start_serving called with invalid turn_id={turn_id} — will probe")
         self.current_turn = turn_id
         self.preparing.clear()
         self.served_this_turn.clear()
@@ -193,6 +198,17 @@ class ServingPipeline:
         # Create shared session
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
+
+        # ── Validate turn_id before starting the polling loop ──
+        # The SSE turn_id can be stale (e.g. reports turn 1 when game is
+        # actually on turn 15).  A single probe catches this early instead
+        # of failing every poll for the entire serving phase.
+        validated = await self._validate_turn_id(turn_id)
+        if validated and validated != turn_id:
+            logger.warning(
+                f"start_serving: turn_id corrected {turn_id} → {validated}"
+            )
+            self.current_turn = validated
 
         # Start the polling loop
         self._poll_task = asyncio.create_task(self._meals_polling_loop())
@@ -545,7 +561,11 @@ class ServingPipeline:
     # ══════════════════════════════════════════════════════════════
 
     async def _fetch_meals(self) -> list[dict] | None:
-        """Fetch current meals from GET /meals."""
+        """Fetch current meals from GET /meals.
+
+        If the server returns 400 ("turn_id too old"), probe for the
+        correct turn_id, update self.current_turn, and retry once.
+        """
         if self.current_turn <= 0:
             logger.warning(f"GET /meals skipped — current_turn={self.current_turn} (not set)")
             return None
@@ -558,10 +578,35 @@ class ServingPipeline:
             async with self._session.get(url, headers=HEADERS) as resp:
                 if resp.status == 400:
                     body = await resp.text()
-                    logger.error(
-                        f"GET /meals returned 400 (turn_id={self.current_turn}): {body}"
-                    )
-                    return None
+                    if "too old" in body:
+                        # turn_id is stale — probe for the correct one
+                        corrected = await self._probe_correct_turn_id()
+                        if corrected and corrected != self.current_turn:
+                            logger.warning(
+                                f"turn_id auto-corrected: {self.current_turn} → {corrected}"
+                            )
+                            self.current_turn = corrected
+                            # Retry with corrected turn_id
+                            retry_url = f"{BASE_URL}/meals?turn_id={corrected}&restaurant_id={TEAM_ID}"
+                            async with self._session.get(retry_url, headers=HEADERS) as retry_resp:
+                                if retry_resp.status == 200:
+                                    return await retry_resp.json()
+                                logger.error(
+                                    f"GET /meals retry returned {retry_resp.status} "
+                                    f"(corrected turn_id={corrected})"
+                                )
+                                return None
+                        else:
+                            logger.error(
+                                f"GET /meals returned 400 (turn_id={self.current_turn}): "
+                                f"{body} — probe could not find valid turn_id"
+                            )
+                            return None
+                    else:
+                        logger.error(
+                            f"GET /meals returned 400 (turn_id={self.current_turn}): {body}"
+                        )
+                        return None
                 if resp.status != 200:
                     logger.error(f"GET /meals returned {resp.status}")
                     return None
@@ -569,6 +614,86 @@ class ServingPipeline:
         except Exception as e:
             logger.error(f"GET /meals failed: {e}")
             return None
+
+    async def _probe_correct_turn_id(self) -> int | None:
+        """Probe the server to discover the correct turn_id.
+
+        The /meals endpoint only accepts the current turn and the previous 2.
+        Binary-search from our current guess upward to find the highest turn_id
+        that returns 200.
+        """
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+
+        logger.info(f"Probing for correct turn_id (current guess: {self.current_turn})...")
+
+        # Phase 1: exponential search upward to find a valid turn_id
+        lo = max(1, self.current_turn)
+        hi = lo
+        found_any_valid = False
+        while hi <= 200:  # safety cap
+            url = f"{BASE_URL}/meals?turn_id={hi}&restaurant_id={TEAM_ID}"
+            try:
+                async with self._session.get(url, headers=HEADERS) as resp:
+                    if resp.status == 200:
+                        lo = hi
+                        found_any_valid = True
+                        hi *= 2
+                    else:
+                        if not found_any_valid:
+                            # Haven't found anything valid yet — keep searching up
+                            hi = hi + 1 if hi < 10 else hi * 2
+                        else:
+                            break
+            except Exception:
+                break
+
+        if not found_any_valid:
+            logger.error("turn_id probe: no valid turn_id found in range 1-200")
+            return None
+
+        # Phase 2: binary search between lo and hi for the highest valid turn_id
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            url = f"{BASE_URL}/meals?turn_id={mid}&restaurant_id={TEAM_ID}"
+            try:
+                async with self._session.get(url, headers=HEADERS) as resp:
+                    if resp.status == 200:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+            except Exception:
+                hi = mid - 1
+
+        logger.info(f"turn_id probe result: {lo}")
+        return lo
+
+    async def _validate_turn_id(self, turn_id: int) -> int | None:
+        """Quick validation of a turn_id against the server.
+
+        Makes a single GET /meals request. If it returns 200, the turn_id
+        is valid. If 400, probes for the correct one.
+        Returns the correct turn_id (may be the same as input).
+        """
+        if turn_id <= 0:
+            return await self._probe_correct_turn_id()
+
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+
+        url = f"{BASE_URL}/meals?turn_id={turn_id}&restaurant_id={TEAM_ID}"
+        try:
+            async with self._session.get(url, headers=HEADERS) as resp:
+                if resp.status == 200:
+                    return turn_id  # valid
+                if resp.status == 400:
+                    logger.warning(
+                        f"turn_id={turn_id} rejected by server — probing for correct one"
+                    )
+                    return await self._probe_correct_turn_id()
+        except Exception as e:
+            logger.warning(f"turn_id validation failed: {e}")
+        return turn_id  # fallback: keep the original
 
     @staticmethod
     def _extract_client_id(meal: dict) -> str | None:
