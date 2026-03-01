@@ -1,4 +1,4 @@
-# SPAM! — Restaurant Strategy AI (Team 17)
+# SPAM!
 
 Autonomous agent system for a competitive restaurant simulation game. Each turn the system reasons about zone placement, menu composition, ingredient bidding, pricing, and diplomatic manipulation.
 
