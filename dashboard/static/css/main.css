@@ -1,0 +1,161 @@
+/* SPAM! Dashboard — Main Stylesheet */
+
+:root {
+  --spam-yellow: #ffc107;
+  --spam-bg: #0d1117;
+  --spam-card: #161b22;
+  --spam-border: #30363d;
+}
+
+body {
+  background-color: var(--spam-bg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+  color: #c9d1d9;
+  font-size: 0.9rem;
+}
+
+.navbar-brand {
+  font-size: 1.3rem;
+  letter-spacing: 1px;
+}
+
+.card {
+  background-color: var(--spam-card) !important;
+  border-radius: 8px;
+}
+
+.card-header {
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background-color: rgba(255,255,255,0.03) !important;
+  border-bottom: 1px solid var(--spam-border);
+}
+
+/* KPI cards */
+.display-6 {
+  font-size: 1.8rem;
+}
+
+/* Tables */
+.table-dark {
+  --bs-table-bg: transparent;
+}
+.table-dark thead th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #8b949e;
+  border-bottom: 2px solid var(--spam-border);
+  position: sticky;
+  top: 0;
+  background-color: var(--spam-card);
+  z-index: 1;
+}
+.table-dark td {
+  font-size: 0.82rem;
+  vertical-align: middle;
+  border-color: var(--spam-border);
+}
+.table-hover > tbody > tr:hover {
+  background-color: rgba(255, 193, 7, 0.06) !important;
+}
+
+/* Leaderboard highlight for our team */
+tr.our-team {
+  background-color: rgba(255, 193, 7, 0.12) !important;
+  font-weight: 600;
+}
+tr.our-team td {
+  color: var(--spam-yellow) !important;
+}
+
+/* Heatmap cells */
+.heatmap-cell {
+  text-align: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+  min-width: 50px;
+}
+
+/* Threat badges */
+.threat-HIGH   { color: #f85149; }
+.threat-MEDIUM { color: #d29922; }
+.threat-LOW    { color: #3fb950; }
+
+.badge-threat-HIGH   { background-color: #f85149 !important; }
+.badge-threat-MEDIUM { background-color: #d29922 !important; }
+.badge-threat-LOW    { background-color: #3fb950 !important; }
+
+/* Competitor cards */
+.competitor-card {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.competitor-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+.competitor-card .card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Message feed */
+.msg-item {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--spam-border);
+}
+.msg-item:last-child {
+  border-bottom: none;
+}
+.msg-sender {
+  font-weight: 600;
+  color: var(--spam-yellow);
+}
+.msg-time {
+  font-size: 0.7rem;
+  color: #8b949e;
+}
+.msg-text {
+  margin-top: 0.2rem;
+}
+
+/* Tracker status */
+#tracker-status.online  { background-color: #3fb950 !important; }
+#tracker-status.offline { background-color: #f85149 !important; }
+#tracker-status.loading { background-color: #d29922 !important; }
+
+/* Stat row in Our Performance */
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--spam-border);
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-label { color: #8b949e; }
+.stat-value { font-weight: 600; }
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--spam-bg); }
+::-webkit-scrollbar-thumb { background: var(--spam-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+/* Animate number changes */
+@keyframes flash-update {
+  0% { background-color: rgba(255, 193, 7, 0.2); }
+  100% { background-color: transparent; }
+}
+.flash {
+  animation: flash-update 0.8s ease;
+}
+
+/* Phase badges */
+.phase-speaking    { background-color: #58a6ff !important; }
+.phase-closed_bid  { background-color: #d29922 !important; }
+.phase-waiting     { background-color: #8b949e !important; }
+.phase-serving     { background-color: #3fb950 !important; }
+.phase-stopped     { background-color: #f85149 !important; }

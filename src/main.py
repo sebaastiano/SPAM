@@ -1632,6 +1632,8 @@ async def main():
     # Start (or reuse) the tracker sidecar before anything else.
     # Blocks until tracker is ready or all retries are exhausted.
     _start_tracker()
+    # Start (or reuse) the dashboard sidecar (non-fatal).
+    _start_dashboard()
 
     orchestrator = GameOrchestrator()
 
@@ -1670,11 +1672,23 @@ async def _shutdown(orchestrator: GameOrchestrator):
         except subprocess.TimeoutExpired:
             _tracker_proc.kill()
         _tracker_proc = None
+    # Terminate dashboard if we launched it
+    if _dashboard_proc is not None and _dashboard_proc.poll() is None:
+        logger.info(f"Terminating dashboard (pid={_dashboard_proc.pid})")
+        _dashboard_proc.terminate()
+        try:
+            _dashboard_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _dashboard_proc.kill()
+        _dashboard_proc = None
     sys.exit(0)
 
 
 # ── Tracker sidecar process (set by _start_tracker, torn down by _shutdown) ──
 _tracker_proc: subprocess.Popen | None = None
+
+# ── Dashboard sidecar process (set by _start_dashboard, torn down by _shutdown) ──
+_dashboard_proc: subprocess.Popen | None = None
 
 # ── Tracker startup constants ──
 _TRACKER_PORT = 5555
@@ -1776,6 +1790,56 @@ def _start_tracker() -> bool:
         "  Serving, bidding and menu logic are unaffected.\n"
         + "=" * 60
     )
+    return False
+
+
+# ── Dashboard startup constants ──
+_DASHBOARD_PORT = 5556
+_DASHBOARD_SCRIPT_DIR = Path(__file__).parent.parent  # SPAM/SPAM/
+
+
+def _start_dashboard() -> bool:
+    """
+    Ensure the SPAM! dashboard is running on port 5556.
+
+    Launches dashboard/app.py as a subprocess (reads from tracker on 5555).
+    Non-fatal: if it fails, the agent continues normally.
+    """
+    global _dashboard_proc
+
+    if _is_port_open(_DASHBOARD_PORT):
+        logger.info(
+            f"Dashboard already running on port {_DASHBOARD_PORT} — reusing"
+        )
+        return True
+
+    log_path = Path("dashboard.log")
+    logger.info(f"Starting dashboard — log → {log_path.resolve()}")
+    try:
+        import os
+        env = {**os.environ, "PYTHONPATH": str(_DASHBOARD_SCRIPT_DIR)}
+        log_file = open(log_path, "a")
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "dashboard.app"],
+            cwd=str(_DASHBOARD_SCRIPT_DIR),
+            stdout=log_file,
+            stderr=log_file,
+            env=env,
+            start_new_session=True,
+        )
+        ready = _wait_for_port(_DASHBOARD_PORT, timeout=10)
+        if ready:
+            _dashboard_proc = proc
+            logger.info(
+                f"Dashboard ready at http://localhost:{_DASHBOARD_PORT} "
+                f"(pid={proc.pid})"
+            )
+            return True
+        logger.warning("Dashboard did not start in time — continuing without it")
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception as exc:
+        logger.warning(f"Dashboard launch failed: {exc}")
     return False
 
 

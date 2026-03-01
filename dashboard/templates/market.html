@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% set active_page = "market" %}
+{% block title %}SPAM! — Market Intelligence{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-3">
+  <div class="col-md-3">
+    <div class="card bg-dark border-success h-100">
+      <div class="card-body text-center">
+        <div class="text-muted small">Open Sells</div>
+        <div class="h4 fw-bold text-success" id="mkt-sells">—</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card bg-dark border-warning h-100">
+      <div class="card-body text-center">
+        <div class="text-muted small">Open Buys</div>
+        <div class="h4 fw-bold text-warning" id="mkt-buys">—</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card bg-dark border-info h-100">
+      <div class="card-body text-center">
+        <div class="text-muted small">Completed Trades</div>
+        <div class="h4 fw-bold text-info" id="mkt-trades">—</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card bg-dark border-danger h-100">
+      <div class="card-body text-center">
+        <div class="text-muted small">Arbitrage Opportunities</div>
+        <div class="h4 fw-bold text-danger" id="mkt-arb">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Arbitrage Opportunities -->
+<div class="row g-3 mb-3" id="arb-section" style="display: none;">
+  <div class="col-12">
+    <div class="card bg-dark border-danger">
+      <div class="card-header"><i class="bi bi-lightning-charge-fill text-danger me-2"></i>Arbitrage Opportunities</div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-dark table-hover table-sm mb-0">
+            <thead>
+              <tr>
+                <th>Ingredient</th>
+                <th class="text-end">Buy @</th>
+                <th class="text-end">Sell @</th>
+                <th class="text-end">Spread</th>
+                <th>Seller</th>
+                <th>Buyer</th>
+              </tr>
+            </thead>
+            <tbody id="arb-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <!-- Active Sell Listings -->
+  <div class="col-lg-6">
+    <div class="card bg-dark border-secondary h-100">
+      <div class="card-header"><i class="bi bi-tag-fill text-success me-2"></i>Sell Listings</div>
+      <div class="card-body p-0">
+        <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+          <table class="table table-dark table-hover table-sm mb-0">
+            <thead>
+              <tr>
+                <th>Ingredient</th>
+                <th class="text-end">Qty</th>
+                <th class="text-end">Unit $</th>
+                <th class="text-end">Total $</th>
+                <th>Seller</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="sell-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Active Buy Listings -->
+  <div class="col-lg-6">
+    <div class="card bg-dark border-secondary h-100">
+      <div class="card-header"><i class="bi bi-cart-fill text-warning me-2"></i>Buy Listings</div>
+      <div class="card-body p-0">
+        <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+          <table class="table table-dark table-hover table-sm mb-0">
+            <thead>
+              <tr>
+                <th>Ingredient</th>
+                <th class="text-end">Qty</th>
+                <th class="text-end">Unit $</th>
+                <th class="text-end">Total $</th>
+                <th>Buyer</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="buy-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <!-- Completed Trades -->
+  <div class="col-12">
+    <div class="card bg-dark border-secondary">
+      <div class="card-header"><i class="bi bi-check-circle-fill text-info me-2"></i>Completed Trades</div>
+      <div class="card-body p-0">
+        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+          <table class="table table-dark table-hover table-sm mb-0">
+            <thead>
+              <tr>
+                <th>Ingredient</th>
+                <th class="text-end">Qty</th>
+                <th class="text-end">Unit $</th>
+                <th class="text-end">Total $</th>
+                <th>Seller</th>
+                <th>Buyer</th>
+              </tr>
+            </thead>
+            <tbody id="trades-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/market.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% set active_page = "competitors" %}
+{% block title %}SPAM! — Competitor Intelligence{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-3">
+  <div class="col-12">
+    <div class="card bg-dark border-secondary">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-people-fill text-warning me-2"></i>Competitor Profiles</span>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-danger active" data-filter="ALL" onclick="filterThreat(this)">All</button>
+          <button class="btn btn-sm btn-outline-danger" data-filter="HIGH" onclick="filterThreat(this)">High Threat</button>
+          <button class="btn btn-sm btn-outline-warning" data-filter="MEDIUM" onclick="filterThreat(this)">Medium</button>
+          <button class="btn btn-sm btn-outline-success" data-filter="LOW" onclick="filterThreat(this)">Low</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3" id="competitor-cards">
+  <div class="col-12 text-muted">Loading competitor data…</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/competitors.js') }}"></script>
+{% endblock %}
