@@ -234,12 +234,12 @@ ZONE_PRESTIGE_RANGE = {
 # Bigger menus attract more archetypes and serve more clients.
 # DIVERSIFIED has the largest menu to cover all price/prestige points.
 ZONE_MENU_SIZE = {
-    "DIVERSIFIED": (14, 26),
-    "PREMIUM_MONOPOLIST": (10, 20),
-    "BUDGET_OPPORTUNIST": (12, 24),
-    "NICHE_SPECIALIST": (10, 20),
-    "SPEED_CONTENDER": (12, 24),
-    "MARKET_ARBITRAGEUR": (5, 12),
+    "DIVERSIFIED": (16, 30),
+    "PREMIUM_MONOPOLIST": (14, 26),
+    "BUDGET_OPPORTUNIST": (16, 28),
+    "NICHE_SPECIALIST": (12, 24),
+    "SPEED_CONTENDER": (14, 28),
+    "MARKET_ARBITRAGEUR": (7, 14),
 }
 
 # ── Max prep time per zone (seconds) ──
@@ -299,12 +299,12 @@ MINIMUM_PROFIT_MARGIN = 1.5
 # The real money comes from SELLING dishes, not winning auctions.
 # Lowest viable bids — we'd rather lose a bid than overpay.
 BASE_BID_PRICES = {
-    "Polvere di Crononite": 32,
-    "Shard di Prisma Stellare": 30,
-    "Lacrime di Andromeda": 28,
-    "Essenza di Tachioni": 26,
-    "Frutti del Diavolo": 20,
-    "Gnocchi del Crepuscolo": 18,
-    "Polvere di Stelle": 18,
+    "Polvere di Crononite": 26,
+    "Shard di Prisma Stellare": 25,
+    "Lacrime di Andromeda": 23,
+    "Essenza di Tachioni": 21,
+    "Frutti del Diavolo": 16,
+    "Gnocchi del Crepuscolo": 15,
+    "Polvere di Stelle": 15,
 }
-DEFAULT_BASE_BID = 12
+DEFAULT_BASE_BID = 10
