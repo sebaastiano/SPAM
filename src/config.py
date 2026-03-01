@@ -59,16 +59,18 @@ ARCHETYPE_CEILINGS = {
 # ── ACTUAL target prices per tier (volume-first mixed pricing) ──
 # These are what we CHARGE — well below ceilings to attract customers.
 # Mixed tiers ensure we appeal to ALL archetypes simultaneously.
-# More granular tiers = better coverage of the full prestige spectrum.
+# KEY INSIGHT: 20 customers × 30 credits = 600 revenue
+#              0 customers × 150 credits = 0 revenue
+# Granular tiers = better coverage of the full prestige spectrum.
 PRICE_TIERS = {
-    "ultra_bargain": (0,  20,  15),   # (prestige_min, prestige_max, base_price)
-    "bargain":       (21, 35,  22),
-    "budget":        (36, 50,  35),
-    "mid_low":       (51, 60,  48),
-    "mid":           (61, 70,  62),
-    "mid_high":      (71, 80,  80),
-    "premium":       (81, 90,  105),
-    "luxury":        (91, 100, 140),
+    "ultra_bargain": (0,  20,  12),   # (prestige_min, prestige_max, base_price)
+    "bargain":       (21, 35,  18),
+    "budget":        (36, 50,  25),
+    "mid_low":       (51, 60,  32),
+    "mid":           (61, 70,  40),
+    "mid_high":      (71, 80,  50),
+    "premium":       (81, 90,  62),
+    "luxury":        (91, 100, 80),
 }
 
 # ── Known archetypes ──
@@ -110,16 +112,16 @@ NEGATIVE_DELTA_INGREDIENTS = [
 ]
 
 # ── Zone-specific price factors ──
-# VOLUME-FIRST: price attractively across all zones.
-# Even premium zone uses moderate factor — we need customers!
-# DIVERSIFIED uses a balanced factor to serve all archetypes.
+# VOLUME-FIRST: price LOW across all zones.
+# Even premium zone keeps prices accessible — we NEED customers!
+# Revenue = price × volume. Volume is king.
 ZONE_PRICE_FACTORS = {
-    "DIVERSIFIED": 0.70,
-    "PREMIUM_MONOPOLIST": 0.85,
-    "BUDGET_OPPORTUNIST": 0.50,
-    "NICHE_SPECIALIST": 0.75,
-    "SPEED_CONTENDER": 0.65,
-    "MARKET_ARBITRAGEUR": 0.55,
+    "DIVERSIFIED": 0.65,
+    "PREMIUM_MONOPOLIST": 0.70,
+    "BUDGET_OPPORTUNIST": 0.45,
+    "NICHE_SPECIALIST": 0.60,
+    "SPEED_CONTENDER": 0.55,
+    "MARKET_ARBITRAGEUR": 0.50,
 }
 
 # ── Zone-specific system prompts ──
@@ -198,13 +200,14 @@ ZONE_TARGET_ARCHETYPES = {
 # ── Zone prestige ranges ──
 # WIDER ranges = more eligible recipes = bigger menus = more customers.
 # Mixed prestige naturally creates mixed prices (the core strategy).
+# CRITICAL: Include LOW-prestige dishes in EVERY zone to attract budget customers!
 # DIVERSIFIED uses the FULL spectrum to attract every archetype.
 ZONE_PRESTIGE_RANGE = {
     "DIVERSIFIED": (10, 100),
-    "PREMIUM_MONOPOLIST": (50, 100),
+    "PREMIUM_MONOPOLIST": (23, 100),
     "BUDGET_OPPORTUNIST": (10, 75),
-    "NICHE_SPECIALIST": (30, 100),
-    "SPEED_CONTENDER": (15, 95),
+    "NICHE_SPECIALIST": (23, 100),
+    "SPEED_CONTENDER": (15, 90),
     "MARKET_ARBITRAGEUR": (10, 100),
 }
 

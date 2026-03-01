@@ -271,11 +271,11 @@ class TestDiplomacyAgent:
         assert self.agent.pseudo_gan.craft_message.call_count > 0
         assert self.mcp_client.call_tool.call_count > 0
 
-        # Check MCP was called with correct tool name
+        # Check MCP was called with correct tool name and params
         for call in self.mcp_client.call_tool.call_args_list:
             assert call[0][0] == "send_message"
-            assert "restaurantId" in call[0][1]
-            assert "message" in call[0][1]
+            assert "recipient_id" in call[0][1]
+            assert "text" in call[0][1]
 
     @pytest.mark.asyncio
     async def test_message_recorded_in_log(self):

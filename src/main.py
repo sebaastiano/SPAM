@@ -75,6 +75,19 @@ from src.skills import (
     compute_skipped_phases,
 )
 
+
+async def _checked_mcp_call(mcp_client, tool_name: str, arguments: dict, logger=None) -> bool:
+    """Call an MCP tool and check for isError. Returns True on success."""
+    result = await mcp_client.call_tool(tool_name, arguments)
+    if result.isError:
+        error_text = ""
+        for c in result.content:
+            error_text += getattr(c, "text", str(c))
+        if logger:
+            logger.error(f"MCP {tool_name} FAILED: {error_text}")
+        raise RuntimeError(f"MCP {tool_name} failed: {error_text}")
+    return True
+
 # ── Logging ──
 logging.basicConfig(
     level=logging.INFO,
@@ -541,11 +554,19 @@ class GameOrchestrator:
         reputation = our_state.get("reputation", 50)
 
         # Check if restaurant has a menu set
-        menu_items = our_state.get("menu", [])
+        # Server returns menu as {"items": [...]}, NOT a bare list
+        raw_menu = our_state.get("menu", {})
+        if isinstance(raw_menu, dict):
+            menu_items = raw_menu.get("items", [])
+        elif isinstance(raw_menu, list):
+            menu_items = raw_menu
+        else:
+            menu_items = []
         menu_set = len(menu_items) > 0
 
         # Check if restaurant is open
-        restaurant_open = our_state.get("is_open", False)
+        # Server returns "isOpen" (camelCase), NOT "is_open"
+        restaurant_open = our_state.get("isOpen", our_state.get("is_open", False))
 
         logger.info(
             f"Context built: turn={turn_id}, phase={phase}, "
@@ -1170,9 +1191,13 @@ class GameOrchestrator:
             )
 
         try:
-            await self.mcp_client.call_tool("save_menu", {"items": menu})
+            await _checked_mcp_call(
+                self.mcp_client, "save_menu", {"items": menu}, logger=logger
+            )
             self.serving.set_menu(menu)
             logger.info(f"Menu saved: {len(menu)} items")
+            for item in menu:
+                logger.info(f"  Menu item: {item['name'][:50]} @ {item['price']}")
             return SkillResult(
                 skill_name="menu_save", success=True,
                 data={"menu_size": len(menu)},
@@ -1323,7 +1348,9 @@ class GameOrchestrator:
             )
 
         try:
-            await self.mcp_client.call_tool("closed_bid", {"bids": bids})
+            await _checked_mcp_call(
+                self.mcp_client, "closed_bid", {"bids": bids}, logger=logger
+            )
             total_cost = bid_result.data.get("total_cost", 0) if bid_result else 0
             logger.info(
                 f"Bids submitted: {len(bids)} items, "
@@ -1439,10 +1466,13 @@ class GameOrchestrator:
             )
 
         try:
-            await self.mcp_client.call_tool(
-                "update_restaurant_is_open", {"is_open": True}
+            await _checked_mcp_call(
+                self.mcp_client,
+                "update_restaurant_is_open",
+                {"is_open": True},
+                logger=logger,
             )
-            logger.info("Restaurant opened")
+            logger.info("Restaurant opened (server confirmed)")
             return SkillResult(skill_name="restaurant_open", success=True)
         except Exception as e:
             logger.error(f"Failed to open restaurant: {e}")
@@ -1581,8 +1611,11 @@ class GameOrchestrator:
         if should_close:
             logger.warning(f"Closing restaurant: {reason}")
             try:
-                await self.mcp_client.call_tool(
-                    "update_restaurant_is_open", {"is_open": False}
+                await _checked_mcp_call(
+                    self.mcp_client,
+                    "update_restaurant_is_open",
+                    {"is_open": False},
+                    logger=logger,
                 )
                 return SkillResult(
                     skill_name="close_decision", success=True,
@@ -1741,7 +1774,7 @@ class GameOrchestrator:
                 buy_price = max(8, min(buy_price, 100))  # tight cap
 
                 try:
-                    await self.mcp_client.call_tool(
+                    result = await self.mcp_client.call_tool(
                         "create_market_entry",
                         {
                             "side": "BUY",
@@ -1750,7 +1783,11 @@ class GameOrchestrator:
                             "price": buy_price,
                         },
                     )
-                    logger.info(f"Market BUY: {deficit}x {ing} @ {buy_price}")
+                    if result.isError:
+                        err = "".join(getattr(c, "text", str(c)) for c in result.content)
+                        logger.warning(f"Market BUY error for {ing}: {err}")
+                    else:
+                        logger.info(f"Market BUY: {deficit}x {ing} @ {buy_price}")
                 except Exception as e:
                     logger.warning(f"Market BUY failed for {ing}: {e}")
 
@@ -1763,7 +1800,7 @@ class GameOrchestrator:
                 # Higher prices when competition exists (others need ingredients)
                 sell_price = max(40, int(60 * (1 + competition_level * 1.5)))
                 try:
-                    await self.mcp_client.call_tool(
+                    result = await self.mcp_client.call_tool(
                         "create_market_entry",
                         {
                             "side": "SELL",
@@ -1772,7 +1809,11 @@ class GameOrchestrator:
                             "price": sell_price,
                         },
                     )
-                    logger.info(f"Market SELL: {qty}x {ing} @ {sell_price}")
+                    if result.isError:
+                        err = "".join(getattr(c, "text", str(c)) for c in result.content)
+                        logger.warning(f"Market SELL error for {ing}: {err}")
+                    else:
+                        logger.info(f"Market SELL: {qty}x {ing} @ {sell_price}")
                 except Exception as e:
                     logger.warning(f"Market SELL failed for {ing}: {e}")
 

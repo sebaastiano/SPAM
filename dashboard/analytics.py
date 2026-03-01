@@ -53,7 +53,7 @@ def analyse_bids(bid_history: list[dict], restaurant_names: dict[int, str]) -> d
             if isinstance(bid.get("ingredient"), dict)
             else bid.get("ingredient") or bid.get("ingredient_name")
         )
-        amount = bid.get("bid") or bid.get("amount") or bid.get("price") or 0
+        amount = bid.get("priceForEach") or bid.get("bid") or bid.get("amount") or bid.get("price") or 0
         qty = bid.get("quantity") or 1
 
         if not rid or not ingredient:

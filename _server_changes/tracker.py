@@ -1,19 +1,23 @@
 """
-Hackapizza Server Tracker
-=========================
-Tracks ALL server changes in real-time:
-  - SSE events from the game stream (/events/17)
-  - REST polling: restaurants, market, meals, bid history
-Serves a minimal live web UI at http://localhost:5555
+Hackapizza Server Tracker  (data sidecar)
+==========================================
+Polls the game server REST API every 5s and caches state in memory.
+Exposes JSON API endpoints at localhost:5555/api/* for:
+  - Intelligence pipeline (tracker_bridge.py)
+  - SPAM! Dashboard (port 5556)
+
+NO browser UI — all visualisation lives in dashboard/.
 """
 
 import json
+import os
 import threading
 import time
 import copy
 import queue
 import requests
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response
+from flask import request as flask_request
 from datetime import datetime
 
 # ──────────────────────────────────────────────
@@ -44,6 +48,7 @@ state = {
     "meals": {},            # (turn_id, restaurant_id, meal_id) -> dict
     "bid_history": {},      # (turn_id, entry_id) -> dict
     "messages": [],         # recent broadcast messages
+    "_seen_message_ids": set(),  # dedup across polls
 }
 state_lock = threading.Lock()
 
@@ -110,18 +115,22 @@ def sse_relay_thread():
                                 state["phase"] = "reset"
                                 state["turn_id"] = None
                             elif event_name == "new_message":
-                                msg_entry = {
-                                    "ts": now_ts(),
-                                    "sender_id": parsed.get("sender_id"),
-                                    "sender_name": parsed.get("sender_name", "?"),
-                                    "recipient_id": parsed.get("recipient_id"),
-                                    "recipient_name": parsed.get("recipient_name", "?"),
-                                    "text": parsed.get("text") or parsed.get("content") or str(parsed),
-                                    "turn_id": state.get("turn_id"),
-                                }
-                                state["messages"].append(msg_entry)
-                                if len(state["messages"]) > 200:
-                                    state["messages"].pop(0)
+                                mid = parsed.get("messageId") or parsed.get("message_id") or id(parsed)
+                                if mid not in state["_seen_message_ids"]:
+                                    state["_seen_message_ids"].add(mid)
+                                    msg_entry = {
+                                        "ts": now_ts(),
+                                        "sender_id": parsed.get("senderId") or parsed.get("sender_id"),
+                                        "sender_name": parsed.get("senderName") or parsed.get("sender_name", "?"),
+                                        "recipient_id": parsed.get("recipientId") or parsed.get("recipient_id"),
+                                        "recipient_name": parsed.get("recipientName") or parsed.get("recipient_name", "?"),
+                                        "text": parsed.get("text") or parsed.get("content") or str(parsed),
+                                        "turn_id": state.get("turn_id"),
+                                        "direction": "received",
+                                    }
+                                    state["messages"].append(msg_entry)
+                                    if len(state["messages"]) > 200:
+                                        state["messages"].pop(0)
 
                         push_event("sse_event", {
                             "event": event_name,
@@ -251,30 +260,85 @@ def flatten_market_entry(e: dict) -> dict:
 # Polling thread
 # ──────────────────────────────────────────────
 
-def _poll_game_state():
-    """Infer turn_id from our own restaurant data (no dedicated game-state endpoint)."""
-    # Try /restaurant/{TEAM_ID} — our own record often contains turnId / currentTurn
-    data = api_get(f"/restaurant/{TEAM_ID}", silent_404=True)
-    if data:
-        turn = (data.get("turn_id") or data.get("turnId") or
-                data.get("currentTurn") or data.get("current_turn"))
-        if turn:
-            with state_lock:
-                if state["turn_id"] != turn:
-                    state["turn_id"] = turn
-                    push_event("system", {"msg": f"turn_id detected from restaurant data: {turn}"})
-            return
+GAME_EVENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "game_events.jsonl")
 
-    # Fallback: scan the last polled raw restaurant snapshots for any turnId field
+
+def _poll_game_state():
+    """Infer turn_id, phase, and messages from game_events.jsonl written by the bot's SSE connection."""
+    best_turn_id = None
+    best_phase = None
+    new_messages = []
+    try:
+        with state_lock:
+            seen_ids = set(state["_seen_message_ids"])
+            current_turn = state.get("turn_id")
+
+        with open(GAME_EVENTS_PATH, "r") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    evt = json.loads(raw)
+                except Exception:
+                    continue
+                etype = evt.get("type")
+                data = evt.get("data") or {}
+                ts = evt.get("ts", "")
+                if etype == "game_started":
+                    tid = data.get("turn_id")
+                    if tid is not None:
+                        best_turn_id = tid
+                        best_phase = "speaking"
+                        current_turn = tid
+                elif etype == "game_phase_changed":
+                    ph = data.get("phase")
+                    if ph:
+                        best_phase = ph
+                elif etype == "game_reset":
+                    best_turn_id = None
+                    best_phase = "reset"
+                    current_turn = None
+                elif etype == "new_message":
+                    # API sends camelCase: messageId, senderId, senderName, text, datetime
+                    mid = (
+                        data.get("messageId")
+                        or data.get("message_id")
+                        or data.get("id")
+                        or f"{ts}_{data.get('senderId', data.get('sender_id', '?'))}"
+                    )
+                    if mid not in seen_ids:
+                        seen_ids.add(mid)
+                        new_messages.append({
+                            "ts": ts or now_ts(),
+                            "sender_id": data.get("senderId") or data.get("sender_id"),
+                            "sender_name": data.get("senderName") or data.get("sender_name", "?"),
+                            "recipient_id": data.get("recipientId") or data.get("recipient_id"),
+                            "recipient_name": data.get("recipientName") or data.get("recipient_name", "?"),
+                            "text": data.get("text") or data.get("content") or str(data),
+                            "turn_id": current_turn,
+                            "message_id": mid,
+                        })
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        push_event("system", {"msg": f"game_events.jsonl read error: {e}"})
+
     with state_lock:
-        for r in state["restaurants_raw"].values():
-            turn = (r.get("turn_id") or r.get("turnId") or
-                    r.get("currentTurn") or r.get("current_turn"))
-            if turn:
-                if state["turn_id"] != turn:
-                    state["turn_id"] = turn
-                    push_event("system", {"msg": f"turn_id inferred from restaurants: {turn}"})
-                break
+        if best_turn_id is not None and state["turn_id"] != best_turn_id:
+            state["turn_id"] = best_turn_id
+            push_event("system", {"msg": f"turn_id from game_events.jsonl: {best_turn_id}"})
+        if best_phase is not None and state["phase"] != best_phase:
+            state["phase"] = best_phase
+            push_event("system", {"msg": f"phase from game_events.jsonl: {best_phase}"})
+        for msg in new_messages:
+            state["_seen_message_ids"].add(msg["message_id"])
+            state["messages"].append(msg)
+            if len(state["messages"]) > 200:
+                state["messages"].pop(0)
+            push_event("new_message", msg)
+    if new_messages:
+        push_event("system", {"msg": f"Loaded {len(new_messages)} new message(s) from game_events.jsonl"})
 
 
 def polling_thread():
@@ -436,1750 +500,12 @@ def _poll_bid_history():
 # Flask routes
 # ──────────────────────────────────────────────
 
-WAITING_MARKET_TEMPLATE = r"""<!DOCTYPE html>
-<!-- REDESIGNED v2 — uses correct API field names -->
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>🍕 Market & Menus</title>
-<style>
-  :root {
-    --bg:#0a0a0f; --panel:#12121a; --border:#1e1e30;
-    --accent:#e85d04; --accent2:#ff9f1c;
-    --green:#2ecc71; --red:#e74c3c; --yellow:#f39c12;
-    --blue:#3d9eff; --purple:#a855f7; --cyan:#06b6d4;
-    --text:#e0e0e0; --muted:#666;
-    --font:'Segoe UI',system-ui,sans-serif; --mono:'Courier New',monospace;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  html,body{min-height:100vh;background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px}
-  header{height:52px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;position:sticky;top:0;z-index:100}
-  .logo{font-size:18px;color:var(--accent);font-weight:700;text-decoration:none}
-  .logo span{color:var(--accent2)}
-  .badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.5px;border:1px solid}
-  #phase-badge{border-color:var(--yellow);color:var(--yellow);background:rgba(243,156,18,.1)}
-  #turn-badge{border-color:var(--blue);color:var(--blue);background:rgba(61,158,255,.1)}
-  .spacer{flex:1}
-  .nav-btn{padding:4px 12px;border-radius:6px;border:1px solid var(--border);color:var(--muted);font-size:12px;text-decoration:none;transition:border-color .15s,color .15s}
-  .nav-btn:hover{border-color:var(--accent);color:var(--accent)}
-  #refresh-btn{padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font)}
-  #refresh-btn:hover{border-color:var(--blue);color:var(--blue)}
-  #last-refresh{font-size:11px;color:var(--muted)}
-
-  .page{padding:20px;display:flex;flex-direction:column;gap:28px;max-width:1600px;margin:0 auto}
-
-  .sec-title{font-size:12px;font-weight:700;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-  .sec-title .cnt{background:var(--accent);color:#fff;border-radius:20px;padding:1px 8px;font-size:10px}
-
-  /* Ingredient board */
-  .ing-board{display:flex;flex-direction:column;gap:8px}
-  .ing-row{background:var(--panel);border:1px solid var(--border);border-radius:10px;display:flex;align-items:center;overflow:hidden}
-  .ing-row.has-sell{border-left:3px solid var(--red)}
-  .ing-row.has-buy{border-left:3px solid var(--green)}
-  .ing-name{width:250px;padding:10px 14px;font-weight:600;font-size:13px;flex-shrink:0;border-right:1px solid var(--border)}
-  .ing-offers{flex:1;padding:6px 12px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-  .offer-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;font-size:12px;border:1px solid;cursor:default}
-  .offer-chip.sell-open{border-color:var(--red);background:rgba(231,76,60,.15);color:var(--red)}
-  .offer-chip.sell-done{border-color:#333;background:transparent;color:var(--muted);opacity:.6}
-  .offer-chip.buy-open{border-color:var(--green);background:rgba(46,204,113,.15);color:var(--green)}
-  .offer-chip.buy-done{border-color:#333;background:transparent;color:var(--muted);opacity:.6}
-  .chip-seller{font-weight:700;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .chip-qty{font-family:var(--mono);font-size:11px}
-  .chip-price{font-family:var(--mono);font-size:11px;opacity:.8}
-
-  /* Completed trades */
-  .trades-list{display:flex;flex-direction:column;gap:6px}
-  .trade-row{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--cyan);border-radius:8px;padding:8px 14px;display:flex;align-items:center;gap:12px;font-size:12px;flex-wrap:wrap}
-  .trade-ing{font-weight:700;font-size:13px;min-width:180px}
-  .trade-qty{font-family:var(--mono);color:var(--muted)}
-  .trade-price{font-family:var(--mono);color:var(--accent2)}
-  .trade-seller{color:var(--red);font-weight:600}
-  .trade-buyer{color:var(--green);font-weight:600}
-  .trade-arrow{color:var(--muted)}
-
-  /* Menu cards */
-  .cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
-  .menu-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
-  .menu-card.our-team{border-color:var(--purple)}
-  .menu-card.is-open{border-color:var(--green)}
-  .mc-head{padding:10px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border)}
-  .mc-avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;flex-shrink:0}
-  .mc-name{font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .mc-meta{font-size:10px;color:var(--muted);margin-top:2px;display:flex;gap:8px}
-  .mc-meta .v{color:var(--text);font-family:var(--mono)}
-  .open-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-  .open-dot.open{background:var(--green);box-shadow:0 0 5px var(--green)}
-  .open-dot.closed{background:#333}
-  .mc-body{padding:8px 14px}
-  .mc-empty{color:var(--muted);font-size:12px;padding:4px 0}
-  .mc-item{display:flex;justify-content:space-between;align-items:baseline;padding:3px 0;border-bottom:1px solid #1a1a24;font-size:12px}
-  .mc-item:last-child{border-bottom:none}
-  .mc-item-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .mc-item-price{font-family:var(--mono);color:var(--green);font-size:12px;flex-shrink:0;margin-left:6px}
-
-  .tab-bar{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
-  .tab-btn{padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font);transition:all .15s}
-  .tab-btn.on{border-color:var(--accent);color:var(--accent);background:rgba(232,93,4,.1)}
-
-  ::-webkit-scrollbar{width:5px}
-  ::-webkit-scrollbar-track{background:transparent}
-  ::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:3px}
-  .empty{padding:20px;text-align:center;color:var(--muted);font-size:13px}
-  .loading{padding:30px;text-align:center;color:var(--muted);font-size:13px}
-</style>
-</head>
-<body>
-
-<header>
-  <a class="logo" href="/">🍕 SPAM!<span>TRACKER</span></a>
-  <div id="phase-badge" class="badge">—</div>
-  <div id="turn-badge" class="badge">Turn —</div>
-  <div class="spacer"></div>
-  <span id="last-refresh"></span>
-  <button id="refresh-btn" onclick="loadData()">⟳ Refresh</button>
-  <a class="nav-btn" href="/social">📡 Social</a>
-</header>
-
-<div class="page">
-
-  <div id="sell-section">
-    <div class="sec-title">📤 SELL Listings — Who is selling what <span class="cnt" id="sell-cnt">…</span></div>
-    <div id="sell-board"><div class="loading">Loading…</div></div>
-  </div>
-
-  <div id="buy-section">
-    <div class="sec-title">📥 BUY Requests — Who wants to buy <span class="cnt" id="buy-cnt">…</span></div>
-    <div id="buy-board"><div class="loading">Loading…</div></div>
-  </div>
-
-  <div id="trades-section">
-    <div class="sec-title">✅ Completed Trades <span class="cnt" id="trade-cnt">…</span></div>
-    <div id="trades-board"><div class="loading">Loading…</div></div>
-  </div>
-
-  <div id="menus-section">
-    <div class="sec-title">🍽️ Restaurant Menus <span class="cnt" id="menu-cnt">…</span></div>
-    <div class="tab-bar">
-      <button class="tab-btn on" data-t="all"  onclick="setMenuTab('all')">All</button>
-      <button class="tab-btn"   data-t="open" onclick="setMenuTab('open')">🟢 Open only</button>
-    </div>
-    <div class="cards-grid" id="menus-grid"><div class="loading">Loading…</div></div>
-  </div>
-
-</div>
-
-<script>
-const TEAM_ID = 17;
-const COLORS=['#e85d04','#ff9f1c','#2ecc71','#3d9eff','#a855f7','#ec4899','#06b6d4','#84cc16','#f59e0b','#8b5cf6','#10b981','#ef4444','#6366f1','#14b8a6','#f97316'];
-const PHASE_COLORS={speaking:'#f39c12',closed_bid:'#e85d04',waiting:'#3d9eff',serving:'#2ecc71',stopped:'#e74c3c',reset:'#9b59b6'};
-function ac(id){return COLORS[Math.abs(parseInt(id)||0)%COLORS.length]}
-function al(n){return(n||'?')[0].toUpperCase()}
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-function fmtNum(n){return n!=null&&n!==''?Number(n).toLocaleString('it-IT'):'—'}
-
-let menuTab='all';
-let allData={market_entries:[],menus:{},turn_id:null};
-
-async function loadData(){
-  try{
-    const[mr,gr]=await Promise.all([fetch('/api/waiting_market'),fetch('/api/game_state')]);
-    if(mr.ok) allData=await mr.json();
-    if(gr.ok){const g=await gr.json();updateHeader(g.phase,g.turn_id);}
-    render();
-    document.getElementById('last-refresh').textContent='Updated '+new Date().toLocaleTimeString();
-  }catch(e){console.error('loadData:',e)}
-}
-
-function updateHeader(phase,turnId){
-  if(phase){
-    const pb=document.getElementById('phase-badge');
-    pb.textContent=phase.toUpperCase();
-    const c=PHASE_COLORS[phase]||'#aaa';
-    pb.style.cssText=`border-color:${c};color:${c};background:${c}19`;
-  }
-  if(turnId) document.getElementById('turn-badge').textContent='Turn '+turnId;
-}
-
-/* SSE live refresh */
-try{
-  const es=new EventSource('/stream');
-  es.onmessage=ev=>{
-    let e; try{e=JSON.parse(ev.data)}catch{return}
-    const{type,data:d}=e;
-    if(type==='sse_event'){
-      const p=d.payload||{};
-      if(d.event==='game_phase_changed') updateHeader(p.phase,null);
-      else if(d.event==='game_started') updateHeader('speaking',p.turn_id);
-    }
-    if(['market_new_entry','market_changed','market_removed','restaurant_changed','restaurant_snapshot'].includes(type)){
-      clearTimeout(window._rt);
-      window._rt=setTimeout(loadData,800);
-    }
-  };
-}catch(e){}
-
-function render(){
-  renderSell();
-  renderBuy();
-  renderTrades();
-  renderMenus();
-}
-
-function setMenuTab(t){
-  menuTab=t;
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
-  renderMenus();
-}
-
-/* ── SELL board ── */
-function renderSell(){
-  const sells=(allData.market_entries||[]).filter(e=>e.side==='SELL');
-  const openSells=sells.filter(e=>e.status==='open'||e.status==null);
-  document.getElementById('sell-cnt').textContent=openSells.length+' active / '+sells.length+' total';
-
-  if(sells.length===0){
-    document.getElementById('sell-board').innerHTML='<div class="empty">No sell listings in market data.</div>';
-    return;
-  }
-
-  /* group by ingredient */
-  const byIng={};
-  for(const e of sells){
-    const k=e.ingredient_name||'Unknown ingredient';
-    if(!byIng[k]){byIng[k]={open:[],closed:[],cancelled:[]};}
-    const bucket=e.status==='closed'?'closed':e.status==='cancelled'?'cancelled':'open';
-    byIng[k][bucket].push(e);
-  }
-
-  /* sort: ingredients with open offers first */
-  const keys=Object.keys(byIng).sort((a,b)=>{
-    const ao=byIng[a].open.length>0?1:0, bo=byIng[b].open.length>0?1:0;
-    if(ao!==bo) return bo-ao;
-    return a.localeCompare(b);
-  });
-
-  const rows=keys.map(ing=>{
-    const g=byIng[ing];
-    const allE=[...g.open,...g.closed,...g.cancelled];
-    const chips=allE.map(e=>{
-      const isOpen=e.status==='open'||e.status==null;
-      const isClosed=e.status==='closed';
-      const cls=isOpen?'offer-chip sell-open':(isClosed?'offer-chip sell-done':'offer-chip sell-done');
-      const unitP=e.unit_price!=null?' @ '+fmtNum(e.unit_price)+'/u':'';
-      const icon=isClosed?'✅ ':e.status==='cancelled'?'✗ ':'';
-      return `<span class="${cls}" title="seller ID:${e.seller_id||'?'} | status:${e.status||'open'} | total:${fmtNum(e.total_price)}">
-        <span class="chip-seller">${esc(e.seller_name||'Team ?')}</span>
-        <span class="chip-qty"> ×${e.quantity||'?'}</span>
-        <span class="chip-price">${unitP}</span>
-        ${icon?`<span>${icon}</span>`:''}
-      </span>`;
-    }).join('');
-    const rowCls=g.open.length>0?'ing-row has-sell':'ing-row';
-    return `<div class="${rowCls}">
-      <div class="ing-name">🧪 ${esc(ing)}</div>
-      <div class="ing-offers">${chips}</div>
-    </div>`;
-  }).join('');
-
-  document.getElementById('sell-board').innerHTML=`<div class="ing-board">${rows}</div>`;
-}
-
-/* ── BUY board ── */
-function renderBuy(){
-  const buys=(allData.market_entries||[]).filter(e=>e.side==='BUY');
-  const openBuys=buys.filter(e=>e.status==='open'||e.status==null);
-  document.getElementById('buy-cnt').textContent=openBuys.length+' active / '+buys.length+' total';
-
-  if(buys.length===0){
-    document.getElementById('buy-board').innerHTML='<div class="empty">No buy requests.</div>';
-    return;
-  }
-
-  const byIng={};
-  for(const e of buys){
-    const k=e.ingredient_name||'Unknown ingredient';
-    if(!byIng[k]) byIng[k]=[];
-    byIng[k].push(e);
-  }
-
-  const keys=Object.keys(byIng).sort((a,b)=>{
-    const ao=byIng[a].some(e=>e.status==='open'||!e.status)?1:0;
-    const bo=byIng[b].some(e=>e.status==='open'||!e.status)?1:0;
-    return bo-ao||a.localeCompare(b);
-  });
-
-  const rows=keys.map(ing=>{
-    const list=byIng[ing];
-    const chips=list.map(e=>{
-      const isOpen=e.status==='open'||e.status==null;
-      const cls=isOpen?'offer-chip buy-open':'offer-chip buy-done';
-      const unitP=e.unit_price!=null?' @ '+fmtNum(e.unit_price)+'/u':'';
-      return `<span class="${cls}" title="buyer ID:${e.seller_id||'?'} | status:${e.status||'open'}">
-        <span class="chip-seller">${esc(e.seller_name||'Team ?')}</span>
-        <span class="chip-qty"> ×${e.quantity||'?'}</span>
-        <span class="chip-price">${unitP}</span>
-      </span>`;
-    }).join('');
-    const hasOpen=list.some(e=>e.status==='open'||!e.status);
-    return `<div class="ing-row${hasOpen?' has-buy':''}">
-      <div class="ing-name">🛒 ${esc(ing)}</div>
-      <div class="ing-offers">${chips}</div>
-    </div>`;
-  }).join('');
-
-  document.getElementById('buy-board').innerHTML=`<div class="ing-board">${rows}</div>`;
-}
-
-/* ── Completed trades ── */
-function renderTrades(){
-  const closed=(allData.market_entries||[]).filter(e=>e.status==='closed');
-  document.getElementById('trade-cnt').textContent=closed.length;
-
-  if(closed.length===0){
-    document.getElementById('trades-board').innerHTML='<div class="empty">No completed trades yet this turn.</div>';
-    return;
-  }
-
-  const rows=closed.map(e=>{
-    const unitP=e.unit_price!=null?fmtNum(e.unit_price)+' /u':'—';
-    const total=e.total_price!=null?'(total '+fmtNum(e.total_price)+')':'';
-    const buyer=e.buyer_name&&e.buyer_name!=='—'?e.buyer_name:'unknown buyer';
-    return `<div class="trade-row">
-      <span class="trade-ing">${esc(e.ingredient_name||'?')}</span>
-      <span class="trade-qty">×${e.quantity||'?'}</span>
-      <span class="trade-price">${unitP} ${total}</span>
-      <span class="trade-seller">📤 ${esc(e.seller_name||'?')}</span>
-      <span class="trade-arrow">→</span>
-      <span class="trade-buyer">📥 ${esc(buyer)}</span>
-    </div>`;
-  }).join('');
-
-  document.getElementById('trades-board').innerHTML=`<div class="trades-list">${rows}</div>`;
-}
-
-/* ── Menus ── */
-function renderMenus(){
-  let entries=Object.entries(allData.menus||{});
-  if(menuTab==='open') entries=entries.filter(([,m])=>m.is_open);
-  entries.sort(([aId,a],[bId,b])=>{
-    if(String(aId)===String(TEAM_ID)) return -1;
-    if(String(bId)===String(TEAM_ID)) return 1;
-    return (b.items||[]).length-(a.items||[]).length;
-  });
-  document.getElementById('menu-cnt').textContent=entries.length;
-  if(entries.length===0){
-    document.getElementById('menus-grid').innerHTML='<div class="empty">No menu data.</div>';
-    return;
-  }
-  document.getElementById('menus-grid').innerHTML=entries.map(([rid,m])=>{
-    const isUs=String(rid)===String(TEAM_ID);
-    const c=ac(rid); const l=al(m.name);
-    const items=m.items||[];
-    const bal=m.balance!=null?'€'+Math.round(m.balance).toLocaleString():'—';
-    const rep=m.reputation!=null?m.reputation:'—';
-    const itemsHtml=items.length===0
-      ?'<div class="mc-empty">No menu set</div>'
-      :items.map(it=>{
-        const nm=it.name||it.Name||'?';
-        const pr=it.price!=null&&it.price!=='—'?it.price+'c':'—';
-        return `<div class="mc-item"><span class="mc-item-name">${esc(String(nm))}</span><span class="mc-item-price">${pr}</span></div>`;
-      }).join('');
-    const cls=['menu-card',isUs?'our-team':'',m.is_open&&!isUs?'is-open':''].filter(Boolean).join(' ');
-    return `<div class="${cls}">
-      <div class="mc-head">
-        <div class="mc-avatar" style="background:${c}">${l}</div>
-        <div style="flex:1;min-width:0">
-          <div class="mc-name">${esc(m.name)}</div>
-          <div class="mc-meta"><span>💰 <span class="v">${bal}</span></span><span>⭐ <span class="v">${rep}</span></span><span>📋 <span class="v">${items.length} items</span></span></div>
-        </div>
-        <div class="open-dot ${m.is_open?'open':'closed'}" title="${m.is_open?'Open':'Closed'}"></div>
-      </div>
-      <div class="mc-body">${itemsHtml}</div>
-    </div>`;
-  }).join('');
-}
-
-loadData();
-setInterval(loadData,15000);
-</script>
-</body>
-</html>
-"""  # end WAITING_MARKET_TEMPLATE
-
-
-SOCIAL_TEMPLATE = r"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>🍕 Agent Social — SPAM!</title>
-<style>
-  :root {
-    --bg: #0a0a0f;
-    --panel: #12121a;
-    --border: #1e1e30;
-    --accent: #e85d04;
-    --accent2: #ff9f1c;
-    --green: #2ecc71;
-    --red: #e74c3c;
-    --yellow: #f39c12;
-    --blue: #3d9eff;
-    --purple: #a855f7;
-    --pink: #ec4899;
-    --text: #e0e0e0;
-    --muted: #666;
-    --font: 'Segoe UI', system-ui, sans-serif;
-    --mono: 'Courier New', monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
-
-  /* ── Header ── */
-  header {
-    height: 52px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    padding: 0 20px;
-    gap: 14px;
-    flex-shrink: 0;
-    z-index: 10;
-  }
-  header .logo { font-size: 20px; color: var(--accent); font-weight: 700; letter-spacing: 1px; }
-  header .logo span { color: var(--accent2); }
-  .badge {
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: .5px;
-    border: 1px solid;
-  }
-  #phase-badge { border-color: var(--yellow); color: var(--yellow); background: rgba(243,156,18,.1); }
-  #turn-badge  { border-color: var(--blue);   color: var(--blue);   background: rgba(61,158,255,.1); }
-  #conn-badge  { border-color: var(--green);  color: var(--green);  background: rgba(46,204,113,.1); }
-  #conn-badge.off { border-color: var(--red); color: var(--red); background: rgba(231,76,60,.1); }
-  .spacer { flex: 1; }
-  #agent-count { color: var(--muted); font-size: 12px; }
-
-  /* ── Layout ── */
-  .layout {
-    display: grid;
-    grid-template-columns: 320px 1fr;
-    height: calc(100vh - 52px);
-    overflow: hidden;
-  }
-
-  /* ── Left: Agent Roster ── */
-  .roster {
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .roster-header {
-    padding: 12px 16px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    font-size: 11px;
-    letter-spacing: 1px;
-    color: var(--muted);
-    text-transform: uppercase;
-    flex-shrink: 0;
-  }
-  .roster-list {
-    overflow-y: auto;
-    flex: 1;
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .agent-card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    cursor: pointer;
-    transition: border-color .2s, background .2s;
-    position: relative;
-  }
-  .agent-card:hover { border-color: #333; background: #16161f; }
-  .agent-card.active { border-color: var(--accent); background: rgba(232,93,4,.06); }
-  .agent-card.our-team { border-color: var(--purple) !important; }
-  .agent-avatar {
-    width: 40px; height: 40px;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-weight: 700; font-size: 16px; flex-shrink: 0;
-    color: #fff;
-  }
-  .agent-info { flex: 1; min-width: 0; }
-  .agent-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .agent-sub { font-size: 11px; color: var(--muted); display: flex; gap: 8px; margin-top: 2px; flex-wrap: wrap; }
-  .agent-sub .val { color: var(--text); font-family: var(--mono); }
-  .status-dot {
-    width: 9px; height: 9px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .status-dot.open { background: var(--green); box-shadow: 0 0 5px var(--green); }
-  .status-dot.closed { background: #333; }
-  .agent-badge {
-    position: absolute;
-    top: 6px; right: 8px;
-    font-size: 9px;
-    padding: 1px 5px;
-    border-radius: 3px;
-    background: var(--purple);
-    color: #fff;
-    font-weight: 600;
-  }
-  .our-badge { background: var(--purple); }
-
-  /* ── Right: Social Feed ── */
-  .feed-col {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .feed-header {
-    padding: 12px 16px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    font-size: 11px;
-    letter-spacing: 1px;
-    color: var(--muted);
-    text-transform: uppercase;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-shrink: 0;
-  }
-  #msg-count {
-    background: var(--accent);
-    color: #fff;
-    border-radius: 20px;
-    padding: 1px 8px;
-    font-size: 10px;
-    font-weight: 600;
-  }
-  .feed-filter {
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    gap: 6px;
-    flex-shrink: 0;
-    background: #0d0d14;
-  }
-  .filt-btn {
-    padding: 3px 10px;
-    border-radius: 20px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 11px;
-    font-family: var(--font);
-    transition: all .15s;
-  }
-  .filt-btn.on { border-color: var(--accent); color: var(--accent); background: rgba(232,93,4,.12); }
-  .feed-stream {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  /* ── Post Card ── */
-  .post {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 12px 14px;
-    animation: slideIn .25s ease;
-    position: relative;
-  }
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateY(8px); }
-    to   { opacity: 1; transform: none; }
-  }
-  .post.new-msg   { border-left: 3px solid var(--purple); }
-  .post.sys-msg   { border-left: 3px solid var(--blue); opacity: .8; }
-  .post.phase-evt { border-left: 3px solid var(--yellow); }
-  .post.rest-evt  { border-left: 3px solid var(--green); }
-  .post.meal-evt  { border-left: 3px solid var(--accent); }
-  .post-head {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    margin-bottom: 7px;
-  }
-  .mini-avatar {
-    width: 32px; height: 32px;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-weight: 700; font-size: 13px; flex-shrink: 0;
-    color: #fff;
-  }
-  .post-meta { flex: 1; min-width: 0; }
-  .post-author { font-weight: 600; font-size: 13px; }
-  .post-to { font-size: 11px; color: var(--muted); margin-top: 1px; }
-  .post-ts { font-size: 10px; color: var(--muted); font-family: var(--mono); flex-shrink: 0; }
-  .post-body { font-size: 13px; line-height: 1.5; color: var(--text); word-break: break-word; }
-  .post-body.mono { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
-  .tag-chip {
-    display: inline-block;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: .5px;
-    margin-right: 4px;
-    vertical-align: middle;
-  }
-  .tag-chip.msg   { background: var(--purple); color: #fff; }
-  .tag-chip.sys   { background: var(--blue);   color: #fff; }
-  .tag-chip.phase { background: var(--yellow); color: #000; }
-  .tag-chip.rest  { background: var(--green);  color: #000; }
-  .tag-chip.meal  { background: var(--accent); color: #fff; }
-  .tag-chip.bid   { background: var(--pink);   color: #fff; }
-
-  /* ── Scrollbar ── */
-  ::-webkit-scrollbar { width: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #3a3a5a; }
-
-  /* ── Empty state ── */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--muted);
-    gap: 10px;
-  }
-  .empty-state .icon { font-size: 40px; opacity: .3; }
-  .empty-state p { font-size: 13px; }
-</style>
-</head>
-<body>
-
-<header>
-  <div class="logo">🍕 Agent<span>Social</span></div>
-  <div id="phase-badge" class="badge">—</div>
-  <div id="turn-badge"  class="badge">Turn —</div>
-  <div class="spacer"></div>
-  <span id="agent-count">Loading agents…</span>
-  <div id="conn-badge" class="badge off">● CONNECTING</div>
-</header>
-
-<div class="layout">
-  <!-- ── Roster ── -->
-  <div class="roster">
-    <div class="roster-header">🤖 Agents Online</div>
-    <div class="roster-list" id="roster"></div>
-  </div>
-
-  <!-- ── Feed ── -->
-  <div class="feed-col">
-    <div class="feed-header">
-      📡 Live Feed
-      <span id="msg-count">0</span>
-    </div>
-    <div class="feed-filter">
-      <button class="filt-btn on" data-f="all">All</button>
-      <button class="filt-btn" data-f="new-msg">💬 Messages</button>
-      <button class="filt-btn" data-f="phase-evt">⚡ Phase</button>
-      <button class="filt-btn" data-f="rest-evt">🏪 Restaurants</button>
-      <button class="filt-btn" data-f="meal-evt">🍽️ Meals</button>
-      <button class="filt-btn" data-f="sys-msg">⚙️ System</button>
-    </div>
-    <div class="feed-stream" id="feed">
-      <div class="empty-state">
-        <div class="icon">📡</div>
-        <p>Waiting for game events…</p>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-// ═══════════════════════════════════════════════════
-// Config
-// ═══════════════════════════════════════════════════
-const TEAM_ID = 17;
-const MAX_POSTS = 200;
-
-// ═══════════════════════════════════════════════════
-// State
-// ═══════════════════════════════════════════════════
-let restaurants = {};   // id → raw + flat
-let posts = [];         // all post objects {id,type,html}
-let postCount = 0;
-let activeFilter = 'all';
-let emptyCleared = false;
-
-// ═══════════════════════════════════════════════════
-// Avatar colors (deterministic by ID)
-// ═══════════════════════════════════════════════════
-const COLORS = [
-  '#e85d04','#ff9f1c','#2ecc71','#3d9eff','#a855f7',
-  '#ec4899','#06b6d4','#84cc16','#f59e0b','#8b5cf6',
-  '#10b981','#ef4444','#6366f1','#14b8a6','#f97316',
-];
-function avatarColor(id) {
-  return COLORS[Math.abs(parseInt(id) || 0) % COLORS.length];
-}
-function avatarLetter(name) {
-  return (name || '?')[0].toUpperCase();
-}
-function miniAvatar(id, name, size=32) {
-  const c = avatarColor(id);
-  const l = avatarLetter(name);
-  return `<div class="mini-avatar" style="width:${size}px;height:${size}px;background:${c}">${l}</div>`;
-}
-
-// ═══════════════════════════════════════════════════
-// Roster rendering
-// ═══════════════════════════════════════════════════
-function renderRoster() {
-  const roster = document.getElementById('roster');
-  const sorted = Object.values(restaurants).sort((a,b) => {
-    // Our team first, then by reputation desc
-    if (a.id == TEAM_ID) return -1;
-    if (b.id == TEAM_ID) return 1;
-    const ra = a._flat?.reputation ?? 0;
-    const rb = b._flat?.reputation ?? 0;
-    return rb - ra;
-  });
-
-  document.getElementById('agent-count').textContent =
-    `${sorted.length} agent${sorted.length !== 1 ? 's' : ''}`;
-
-  roster.innerHTML = sorted.map(r => {
-    const f = r._flat || {};
-    const isUs = r.id == TEAM_ID;
-    const isOpen = f.is_open;
-    const rep = f.reputation ?? '—';
-    const bal = f.balance != null ? '€' + Math.round(f.balance).toLocaleString() : '—';
-    const zone = f.zone ?? '—';
-    const menuN = Array.isArray(r.menu) ? r.menu.length : (f.menu_count ?? '—');
-    const c = avatarColor(r.id);
-    const letter = avatarLetter(r.name);
-    return `
-      <div class="agent-card${isUs ? ' our-team' : ''}" data-id="${r.id}" onclick="filterByAgent(${r.id})">
-        ${isUs ? '<div class="agent-badge our-badge">US</div>' : ''}
-        <div class="agent-avatar" style="background:${c}">${letter}</div>
-        <div class="agent-info">
-          <div class="agent-name">${r.name || 'Team ' + r.id}</div>
-          <div class="agent-sub">
-            <span>Rep <span class="val">${rep}</span></span>
-            <span>Bal <span class="val">${bal}</span></span>
-            <span>Zone <span class="val">${zone}</span></span>
-            <span>Menu <span class="val">${menuN}</span></span>
-          </div>
-        </div>
-        <div class="status-dot ${isOpen ? 'open' : 'closed'}"></div>
-      </div>`;
-  }).join('');
-}
-
-// ═══════════════════════════════════════════════════
-// Feed: creating posts
-// ═══════════════════════════════════════════════════
-function clearEmpty() {
-  if (!emptyCleared) {
-    document.getElementById('feed').innerHTML = '';
-    emptyCleared = true;
-  }
-}
-
-function addPost(type, html, anchorId) {
-  clearEmpty();
-  const feed = document.getElementById('feed');
-  const id = 'p' + (++postCount);
-  const div = document.createElement('div');
-  div.className = `post ${type}`;
-  div.dataset.type = type;
-  div.dataset.agent = anchorId || '';
-  div.id = id;
-  div.innerHTML = html;
-
-  // Apply filter visibility
-  if (activeFilter !== 'all' && !type.includes(activeFilter)) {
-    div.style.display = 'none';
-  }
-
-  feed.appendChild(div);
-  // Trim to max
-  const all = feed.querySelectorAll('.post');
-  if (all.length > MAX_POSTS) all[0].remove();
-  // Scroll to bottom
-  feed.scrollTop = feed.scrollHeight;
-
-  document.getElementById('msg-count').textContent =
-    feed.querySelectorAll('.post').length;
-
-  return id;
-}
-
-// ── Agent message (new_message SSE event) ──
-function postAgentMessage(payload) {
-  const sid  = payload.sender_id    || null;
-  const sname = payload.sender_name  || (sid ? 'Agent ' + sid : 'Unknown');
-  const rid  = payload.recipient_id  || null;
-  const rname = payload.recipient_name || (rid ? 'Agent ' + rid : 'broadcast');
-  const text  = payload.text || payload.content || JSON.stringify(payload);
-  const ts    = new Date().toLocaleTimeString();
-
-  const html = `
-    <div class="post-head">
-      ${miniAvatar(sid, sname)}
-      <div class="post-meta">
-        <div class="post-author"><span class="tag-chip msg">MSG</span>${sname}</div>
-        <div class="post-to">→ ${rname}</div>
-      </div>
-      <div class="post-ts">${ts}</div>
-    </div>
-    <div class="post-body">${escHtml(text)}</div>`;
-  addPost('new-msg', html, sid);
-}
-
-// ── System / server message ──
-function postSystem(msg) {
-  const ts = new Date().toLocaleTimeString();
-  const html = `
-    <div class="post-head">
-      ${miniAvatar('0', '⚙')}
-      <div class="post-meta"><div class="post-author"><span class="tag-chip sys">SYS</span>Server</div></div>
-      <div class="post-ts">${ts}</div>
-    </div>
-    <div class="post-body">${escHtml(msg)}</div>`;
-  addPost('sys-msg', html, null);
-}
-
-// ── Phase change ──
-function postPhase(phase, turnId) {
-  const ts = new Date().toLocaleTimeString();
-  const phaseEmoji = {speaking:'🗣️',closed_bid:'🔒',waiting:'⏳',serving:'🍽️',stopped:'🛑'}[phase] || '⚡';
-  const html = `
-    <div class="post-head">
-      ${miniAvatar('sys', phaseEmoji, 32)}
-      <div class="post-meta">
-        <div class="post-author"><span class="tag-chip phase">PHASE</span>Game Phase Changed</div>
-        <div class="post-to">Turn ${turnId ?? '—'}</div>
-      </div>
-      <div class="post-ts">${ts}</div>
-    </div>
-    <div class="post-body">Phase: <strong>${phase}</strong></div>`;
-  addPost('phase-evt', html, null);
-}
-
-// ── Restaurant change ──
-function postRestaurant(name, id, changes) {
-  const ts = new Date().toLocaleTimeString();
-  const changesText = changes.map(c => `${c.key}: ${c.old} → ${c.new}`).join(', ');
-  const html = `
-    <div class="post-head">
-      ${miniAvatar(id, name)}
-      <div class="post-meta">
-        <div class="post-author"><span class="tag-chip rest">AGENT</span>${name}</div>
-        <div class="post-to">State updated</div>
-      </div>
-      <div class="post-ts">${ts}</div>
-    </div>
-    <div class="post-body">${escHtml(changesText)}</div>`;
-  addPost('rest-evt', html, id);
-}
-
-// ── Meal event ──
-function postMeal(restaurantName, rid, meal, isNew) {
-  const ts = new Date().toLocaleTimeString();
-  const label = isNew ? 'New order' : 'Order updated';
-  const dish = meal?.dish || meal?.dish_name || '?';
-  const client = meal?.client_id || '?';
-  const executed = meal?.executed;
-  const html = `
-    <div class="post-head">
-      ${miniAvatar(rid, restaurantName)}
-      <div class="post-meta">
-        <div class="post-author"><span class="tag-chip meal">MEAL</span>${restaurantName}</div>
-        <div class="post-to">${label} — Client #${client}</div>
-      </div>
-      <div class="post-ts">${ts}</div>
-    </div>
-    <div class="post-body">🍽️ ${escHtml(dish)} ${executed === true ? '✅' : executed === false ? '❌' : ''}</div>`;
-  addPost('meal-evt', html, rid);
-}
-
-// ═══════════════════════════════════════════════════
-// Filter
-// ═══════════════════════════════════════════════════
-document.querySelectorAll('.filt-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.filt-btn').forEach(b => b.classList.remove('on'));
-    btn.classList.add('on');
-    activeFilter = btn.dataset.f;
-    document.querySelectorAll('.post').forEach(p => {
-      if (activeFilter === 'all') {
-        p.style.display = '';
-      } else {
-        p.style.display = p.dataset.type === activeFilter ? '' : 'none';
-      }
-    });
-  });
-});
-
-function filterByAgent(id) {
-  // Toggle: if already filtering this agent, clear
-  document.querySelectorAll('.post').forEach(p => {
-    if (activeFilter === 'agent-' + id) {
-      p.style.display = '';
-    } else {
-      p.style.display = (p.dataset.agent == id) ? '' : 'none';
-    }
-  });
-  activeFilter = activeFilter === 'agent-' + id ? 'all' : 'agent-' + id;
-  // Reset filter buttons
-  document.querySelectorAll('.filt-btn').forEach(b => b.classList.remove('on'));
-  if (activeFilter === 'all') document.querySelector('.filt-btn[data-f=all]').classList.add('on');
-  // Highlight active card
-  document.querySelectorAll('.agent-card').forEach(c => {
-    c.classList.toggle('active', c.dataset.id == id && activeFilter === 'agent-' + id);
-  });
-}
-
-// ═══════════════════════════════════════════════════
-// Helper
-// ═══════════════════════════════════════════════════
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// ═══════════════════════════════════════════════════
-// Phase badge update
-// ═══════════════════════════════════════════════════
-const PHASE_COLORS = {
-  speaking: '#f39c12', closed_bid: '#e85d04', waiting: '#3d9eff',
-  serving: '#2ecc71', stopped: '#e74c3c', reset: '#9b59b6'
-};
-function updateHeader(phase, turnId) {
-  const pb = document.getElementById('phase-badge');
-  const tb = document.getElementById('turn-badge');
-  pb.textContent = (phase || '—').toUpperCase();
-  const c = PHASE_COLORS[phase] || '#aaa';
-  pb.style.borderColor = c;
-  pb.style.color = c;
-  pb.style.background = c + '19';
-  if (turnId) tb.textContent = 'Turn ' + turnId;
-}
-
-// ═══════════════════════════════════════════════════
-// Initial data load
-// ═══════════════════════════════════════════════════
-async function loadInitial() {
-  try {
-    const [restResp, stateResp, msgResp] = await Promise.all([
-      fetch('/api/all_restaurants'),
-      fetch('/api/game_state'),
-      fetch('/api/messages'),
-    ]);
-    if (restResp.ok) {
-      const data = await restResp.json();
-      Object.assign(restaurants, data);
-      renderRoster();
-    }
-    if (stateResp.ok) {
-      const gs = await stateResp.json();
-      updateHeader(gs.phase, gs.turn_id);
-    }
-    if (msgResp.ok) {
-      const msgs = await msgResp.json();
-      msgs.forEach(m => postAgentMessage(m));
-    }
-  } catch(e) {
-    console.warn('Initial load failed:', e);
-  }
-}
-
-// ═══════════════════════════════════════════════════
-// SSE — only connects to our OWN tracker (port 5555)
-// NO direct calls to the game server ever!
-// ═══════════════════════════════════════════════════
-function connectSSE() {
-  const connBadge = document.getElementById('conn-badge');
-  const es = new EventSource('/stream');
-
-  es.onopen = () => {
-    connBadge.textContent = '● LIVE';
-    connBadge.className = 'badge';
-    connBadge.style.borderColor = 'var(--green)';
-    connBadge.style.color = 'var(--green)';
-    connBadge.style.background = 'rgba(46,204,113,.1)';
-  };
-  es.onerror = () => {
-    connBadge.textContent = '● RECONNECTING';
-    connBadge.className = 'badge off';
-    connBadge.style.borderColor = '';
-    connBadge.style.color = '';
-    connBadge.style.background = '';
-  };
-
-  es.onmessage = (ev) => {
-    let evt;
-    try { evt = JSON.parse(ev.data); } catch { return; }
-    const { type, data: d } = evt;
-
-    if (type === 'sse_event') {
-      const gameEvt = d.event;
-      const payload = d.payload || {};
-
-      if (gameEvt === 'new_message') {
-        postAgentMessage(payload);
-      } else if (gameEvt === 'game_phase_changed' || gameEvt === 'game_started') {
-        const phase = payload.phase || (gameEvt === 'game_started' ? 'speaking' : null);
-        const turn  = payload.turn_id;
-        updateHeader(phase, turn);
-        postPhase(phase, turn);
-      } else if (gameEvt === 'game_reset') {
-        updateHeader('reset', null);
-        postSystem('Game has been reset.');
-      }
-
-    } else if (type === 'restaurant_changed') {
-      // Update our local restaurant cache
-      const rid = d.id;
-      if (restaurants[rid]) {
-        if (d.state) restaurants[rid]._flat = d.state;
-      } else {
-        restaurants[rid] = { id: rid, name: d.name, _flat: d.state || {} };
-      }
-      renderRoster();
-      if (d.changes && d.changes.length) {
-        postRestaurant(d.name, rid, d.changes);
-      }
-
-    } else if (type === 'restaurant_snapshot') {
-      const rid = d.id;
-      if (!restaurants[rid]) {
-        restaurants[rid] = { id: rid, name: d.name, _flat: d.state || {} };
-        renderRoster();
-      }
-
-    } else if (type === 'meal_new') {
-      postMeal(d.restaurant_name, d.restaurant_id, d.meal, true);
-
-    } else if (type === 'meal_changed') {
-      postMeal(d.restaurant_name, d.restaurant_id, d.meal, false);
-
-    } else if (type === 'system') {
-      postSystem(d.msg || JSON.stringify(d));
-    }
-  };
-}
-
-// ═══════════════════════════════════════════════════
-// Boot
-// ═══════════════════════════════════════════════════
-loadInitial();
-connectSSE();
-
-// Refresh roster every 10 s (tracker already polls, no game API calls)
-setInterval(async () => {
-  try {
-    const r = await fetch('/api/all_restaurants');
-    if (r.ok) { Object.assign(restaurants, await r.json()); renderRoster(); }
-  } catch {}
-}, 10000);
-</script>
-</body>
-</html>
-"""  # end SOCIAL_TEMPLATE
-
-
-HTML_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>🍕 SPAM! Server Tracker</title>
-<style>
-  :root {
-    --bg: #0e0e0e;
-    --panel: #161616;
-    --border: #2a2a2a;
-    --accent: #e85d04;
-    --green: #2ecc71;
-    --red: #e74c3c;
-    --yellow: #f39c12;
-    --blue: #3498db;
-    --purple: #9b59b6;
-    --text: #e0e0e0;
-    --muted: #777;
-    --font: 'Courier New', monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { height: 100%; overflow: hidden; }
-  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; height: 100%; overflow: hidden; }
-  header { background: var(--panel); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
-  header h1 { font-size: 16px; color: var(--accent); letter-spacing: 2px; }
-  #phase-badge { padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; background: #333; color: var(--yellow); border: 1px solid var(--yellow); }
-  #turn-badge { padding: 3px 10px; border-radius: 4px; font-size: 12px; background: #1a1a2e; color: var(--blue); border: 1px solid var(--blue); }
-  #conn-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); margin-left: auto; }
-  #conn-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  #conn-label { font-size: 11px; color: var(--muted); }
-  .layout { display: grid; grid-template-columns: 1fr 420px; gap: 0; height: calc(100vh - 45px); overflow: hidden; }
-  .main-col { overflow-y: auto; overflow-x: hidden; padding: 14px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
-  .side-col { border-left: 1px solid var(--border); overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-  .panel-header { padding: 8px 12px; background: #1a1a1a; border-bottom: 1px solid var(--border); font-size: 11px; letter-spacing: 1px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
-  .panel-header span.badge { background: var(--accent); color: #fff; border-radius: 3px; padding: 1px 6px; font-size: 10px; }
-  table { width: 100%; border-collapse: collapse; }
-  th { padding: 6px 8px; text-align: left; color: var(--muted); font-size: 10px; letter-spacing: 1px; border-bottom: 1px solid var(--border); background: #111; }
-  td { padding: 5px 8px; border-bottom: 1px solid #1a1a1a; vertical-align: top; white-space: nowrap; }
-  tr:hover td { background: #1c1c1c; }
-  td.num { text-align: right; font-feature-settings: "tnum"; }
-  .up { color: var(--green); }
-  .dn { color: var(--red); }
-  .warn { color: var(--yellow); }
-  .info { color: var(--blue); }
-  .open-true  { color: var(--green); }
-  .open-false { color: var(--red); }
-  /* Event feed */
-  #feed { flex: 1; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column-reverse; padding: 8px; gap: 4px; min-height: 0; }
-  .evt { border-left: 3px solid var(--border); padding: 5px 8px; background: #111; border-radius: 0 4px 4px 0; animation: fadein .3s ease; }
-  .evt:hover { background: #1a1a1a; }
-  @keyframes fadein { from { opacity:0; transform: translateX(6px); } to { opacity:1; transform: none; } }
-  .evt .ts { color: var(--muted); font-size: 10px; margin-right: 6px; }
-  .evt .tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
-  .evt .body { color: var(--text); word-break: break-word; white-space: pre-wrap; }
-  /* event type colors */
-  .evt.sse_event { border-color: var(--blue); }
-  .evt.restaurant_changed { border-color: var(--green); }
-  .evt.restaurant_snapshot { border-color: #333; }
-  .evt.market_new_entry { border-color: var(--purple); }
-  .evt.market_changed { border-color: var(--yellow); }
-  .evt.market_removed { border-color: var(--red); }
-  .evt.meal_new { border-color: var(--accent); }
-  .evt.meal_changed { border-color: var(--yellow); }
-  .evt.bid_history { border-color: var(--purple); }
-  .evt.system { border-color: #444; }
-  .tag.sse_event { background: var(--blue); color: #fff; }
-  .tag.restaurant_changed { background: var(--green); color: #000; }
-  .tag.restaurant_snapshot { background: #333; color: #fff; }
-  .tag.market_new_entry { background: var(--purple); color: #fff; }
-  .tag.market_changed { background: var(--yellow); color: #000; }
-  .tag.market_removed { background: var(--red); color: #fff; }
-  .tag.meal_new { background: var(--accent); color: #fff; }
-  .tag.meal_changed { background: var(--yellow); color: #000; }
-  .tag.bid_history { background: var(--purple); color: #fff; }
-  .tag.system { background: #333; color: #aaa; }
-  .feed-header { padding: 8px 12px; background: #1a1a1a; border-bottom: 1px solid var(--border); font-size: 11px; letter-spacing: 1px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-  #feed-count { background: var(--accent); color: #fff; border-radius: 3px; padding: 1px 6px; font-size: 10px; }
-  .market-row td { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
-  .table-scroll { overflow-x: auto; overflow-y: auto; max-height: 400px; }
-  #filter-bar { padding: 6px 12px; background: #111; border-bottom: 1px solid var(--border); display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
-  .filter-btn { padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-family: var(--font); font-size: 11px; }
-  .filter-btn.active { color: #fff; }
-  .filter-btn.all.active { border-color: var(--text); color: var(--text); }
-  .filter-btn.sse_event.active { border-color: var(--blue); color: var(--blue); }
-  .filter-btn.restaurant_changed.active { border-color: var(--green); color: var(--green); }
-  .filter-btn.market_new_entry.active { border-color: var(--purple); color: var(--purple); }
-  .filter-btn.market_changed.active { border-color: var(--yellow); color: var(--yellow); }
-  .filter-btn.meal_new.active { border-color: var(--accent); color: var(--accent); }
-  .filter-btn.system.active { border-color: #555; color: #aaa; }
-  .highlight { animation: hl 1.5s ease; }
-  @keyframes hl { 0%,100% { background: transparent; } 20% { background: rgba(232,93,4,.18); } }
-  .delta-up::after { content: ' ▲'; color: var(--green); font-size: 10px; }
-  .delta-dn::after { content: ' ▼'; color: var(--red); font-size: 10px; }
-  /* Modal */
-  #modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:999; align-items:center; justify-content:center; }
-  #modal-overlay.open { display:flex; }
-  #modal { background:var(--panel); border:1px solid var(--border); border-radius:8px; width:min(860px,95vw); max-height:92vh; height:92vh; display:flex; flex-direction:column; overflow:hidden; }
-  #modal-header { padding:12px 16px; background:#1a1a1a; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-shrink:0; }
-  #modal-title { font-size:15px; color:var(--accent); flex:1; }
-  #modal-close { background:transparent; border:1px solid #444; color:#aaa; cursor:pointer; font-size:16px; padding:2px 10px; border-radius:4px; font-family:var(--font); }
-  #modal-close:hover { border-color:var(--accent); color:var(--accent); }
-  #modal-refresh { background:transparent; border:1px solid #444; color:#aaa; cursor:pointer; font-size:11px; padding:4px 10px; border-radius:4px; font-family:var(--font); }
-  #modal-refresh:hover { border-color:var(--blue); color:var(--blue); }
-  #modal-body { overflow-y:auto; overflow-x:hidden; padding:16px; display:flex; flex-direction:column; gap:16px; flex:1; min-height:0; }
-  .detail-section { border:1px solid var(--border); border-radius:6px; overflow-y:auto; overflow-x:hidden; max-height:480px; flex-shrink:0; }
-  .detail-section-header { padding:7px 12px; background:#111; font-size:10px; letter-spacing:1.5px; color:var(--muted); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; position:sticky; top:0; z-index:2; }
-  .detail-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:0; }
-  .detail-kv { padding:8px 12px; border-right:1px solid #1a1a1a; border-bottom:1px solid #1a1a1a; }
-  .detail-kv .dk { font-size:10px; color:var(--muted); margin-bottom:3px; letter-spacing:.5px; }
-  .detail-kv .dv { font-size:13px; }
-  .modal-table { width:100%; border-collapse:collapse; }
-  .modal-table th { padding:6px 10px; text-align:left; font-size:10px; color:var(--muted); letter-spacing:1px; border-bottom:1px solid var(--border); background:#111; }
-  .modal-table td { padding:5px 10px; border-bottom:1px solid #1a1a1a; font-size:12px; }
-  .modal-table tr:hover td { background:#1c1c1c; }
-  .change-entry { padding:6px 10px; border-bottom:1px solid #1a1a1a; display:flex; gap:8px; align-items:flex-start; font-size:12px; }
-  .change-entry:last-child { border:none; }
-  .change-ts { color:var(--muted); font-size:10px; white-space:nowrap; min-width:80px; padding-top:2px; }
-  .change-list { display:flex; flex-wrap:wrap; gap:4px; }
-  .change-pill { padding:2px 7px; border-radius:3px; background:#1e1e1e; border:1px solid var(--border); font-size:11px; }
-  .change-pill .old { color:var(--red); }
-  .change-pill .new { color:var(--green); }
-  #modal-loading { text-align:center; padding:40px; color:var(--muted); }
-  tr.clickable { cursor:pointer; }
-  tr.clickable:hover td { background:#1f1f1f !important; }
-  .team-17 td:first-child { color:var(--accent); font-weight:bold; }
-</style>
-</head>
-<body>
-<header>
-  <h1>🍕 SPAM! TRACKER</h1>
-  <div id="phase-badge">PHASE: —</div>
-  <div id="turn-badge">TURN: —</div>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
-    <a href="/waiting" style="color:var(--blue);font-size:11px;text-decoration:none;border:1px solid var(--blue);padding:3px 9px;border-radius:4px;" title="Market & Menus view">📈 Market & Menus</a>
-    <a href="/social"  style="color:var(--purple);font-size:11px;text-decoration:none;border:1px solid var(--purple);padding:3px 9px;border-radius:4px;" title="Social feed">📡 Social</a>
-    <span id="conn-label">disconnected</span>
-    <div id="conn-dot"></div>
-  </div>
-</header>
-<div class="layout">
-  <!-- Main area -->
-  <div class="main-col">
-    <!-- Restaurants table -->
-    <div class="panel">
-      <div class="panel-header">🏪 ALL RESTAURANTS <span class="badge" id="rest-count">0</span> <span style="color:var(--muted);font-size:10px;font-weight:normal">click a row to inspect</span></div>
-      <div class="table-scroll">
-        <table id="rest-table">
-          <thead>
-            <tr>
-              <th>ID</th><th>NAME</th><th>BALANCE</th><th>REPUTATION</th>
-              <th>OPEN</th><th>MENU ITEMS</th><th>INVENTORY</th><th>KITCHEN</th><th>MESSAGES</th>
-            </tr>
-          </thead>
-          <tbody id="rest-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-    <!-- Market table -->
-    <div class="panel">
-      <div class="panel-header">📈 MARKET ENTRIES <span class="badge" id="mkt-count">0</span></div>
-      <div class="table-scroll">
-        <table id="mkt-table">
-          <thead>
-            <tr>
-              <th>ID</th><th>SIDE</th><th>INGREDIENT</th><th>QTY</th>
-              <th>PRICE</th><th>STATUS</th><th>SELLER</th><th>BUYER</th>
-            </tr>
-          </thead>
-          <tbody id="mkt-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-    <!-- Meals table -->
-    <div class="panel">
-      <div class="panel-header">🍽️ ALL TEAMS' MEALS (this turn) <span class="badge" id="meal-count">0</span></div>
-      <div class="table-scroll">
-        <table id="meal-table">
-          <thead>
-            <tr><th>TEAM</th><th>CLIENT</th><th>ORDER</th><th>DISH</th><th>SERVED</th></tr>
-          </thead>
-          <tbody id="meal-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-  <!-- Side feed -->
-  <div class="side-col">
-    <div class="feed-header">
-      ⚡ LIVE EVENT FEED
-      <span id="feed-count">0</span>
-      <button onclick="clearFeed()" style="margin-left:auto;background:transparent;border:1px solid #333;color:#555;cursor:pointer;font-family:var(--font);font-size:10px;padding:2px 6px;border-radius:3px;">CLEAR</button>
-    </div>
-    <div id="filter-bar">
-      <button class="filter-btn all active" onclick="setFilter('all')">ALL</button>
-      <button class="filter-btn sse_event" onclick="setFilter('sse_event')">SSE</button>
-      <button class="filter-btn restaurant_changed" onclick="setFilter('restaurant_changed')">RESTAURANT</button>
-      <button class="filter-btn market_new_entry" onclick="setFilter('market_new_entry')">MARKET</button>
-      <button class="filter-btn meal_new" onclick="setFilter('meal_new')">MEALS</button>
-      <button class="filter-btn system" onclick="setFilter('system')">SYSTEM</button>
-    </div>
-    <div id="feed"></div>
-  </div>
-</div>
-
-<!-- Team Detail Modal -->
-<div id="modal-overlay" onclick="closeModal(event)">
-  <div id="modal">
-    <div id="modal-header">
-      <div id="modal-title">Team</div>
-      <button id="modal-refresh" onclick="refreshModal()">⟳ REFRESH</button>
-      <button id="modal-close" onclick="closeModalDirect()">✕</button>
-    </div>
-    <div id="modal-body"><div id="modal-loading">Loading…</div></div>
-  </div>
-</div>
-
-<script>
-// ── State ──────────────────────────────────────
-const restaurants = {};
-const market = {};
-const meals = {};
-let feedCount = 0;
-let activeFilter = 'all';
-const allEvents = [];
-let modalOpenId = null;
-
-// ── SSE connection ─────────────────────────────
-let evtSource;
-function connect() {
-  evtSource = new EventSource('/stream');
-  evtSource.onopen = () => {
-    document.getElementById('conn-dot').className = 'ok';
-    document.getElementById('conn-label').textContent = 'live';
-  };
-  evtSource.onerror = () => {
-    document.getElementById('conn-dot').className = '';
-    document.getElementById('conn-label').textContent = 'reconnecting…';
-  };
-  evtSource.onmessage = (e) => {
-    const evt = JSON.parse(e.data);
-    handleEvent(evt);
-  };
-}
-
-// ── Event dispatcher ───────────────────────────
-function handleEvent(evt) {
-  const {type, ts, data} = evt;
-  addFeedEntry(type, ts, formatEvent(type, data));
-
-  if (type === 'restaurant_snapshot') updateRestaurant(data.id, data.name, data.state, false);
-  else if (type === 'restaurant_changed') updateRestaurant(data.id, data.name, data.state, true);
-  else if (type === 'market_new_entry') updateMarket(data.id, data.entry, false);
-  else if (type === 'market_changed') updateMarket(data.id, data.entry, true);
-  else if (type === 'market_removed') removeMarket(data.id);
-  else if (type === 'meal_new' || type === 'meal_changed') updateMeal(data);
-  else if (type === 'sse_event') {
-    if (data.event === 'game_phase_changed') {
-      setPhase(data.payload.phase);
-    } else if (data.event === 'game_started') {
-      setPhase('speaking');
-      setTurn(data.payload.turn_id);
-    } else if (data.event === 'game_reset') {
-      setPhase('reset');
-    } else if (data.event === 'heartbeat') {
-      // skip heartbeats in feed (too noisy)
-      allEvents.shift(); // remove just-added heartbeat
-      feedCount--;
-      return;
-    }
-  }
-}
-
-function setPhase(p) {
-  const el = document.getElementById('phase-badge');
-  el.textContent = 'PHASE: ' + (p||'?').toUpperCase();
-}
-function setTurn(t) {
-  if (t) document.getElementById('turn-badge').textContent = 'TURN: ' + t;
-}
-
-// ── Format event text ──────────────────────────
-function formatEvent(type, data) {
-  switch(type) {
-    case 'sse_event':
-      return `[${data.event}] ${JSON.stringify(data.payload)}`;
-    case 'restaurant_snapshot':
-      return `${data.name} (id:${data.id}) — snapshot: bal=${data.state.balance} rep=${data.state.reputation}`;
-    case 'restaurant_changed': {
-      const ch = data.changes.map(c => {
-        if (typeof c.old === 'object' || typeof c.new === 'object') {
-          return `${c.field}: changed`;
-        }
-        return `${c.field}: ${c.old} → ${c.new}`;
-      }).join(', ');
-      return `${data.name} (id:${data.id}) — ${ch}`;
-    }
-    case 'market_new_entry':
-      return `NEW ${data.entry.side} — ${data.entry.ingredient_name} x${data.entry.quantity} @ ${data.entry.price} (id:${data.id})`;
-    case 'market_changed':
-      return `Market #${data.id} changed: ${data.changes.map(c=>`${c.field}: ${c.old}→${c.new}`).join(', ')}`;
-    case 'market_removed':
-      return `Market #${data.id} removed (${data.entry.ingredient_name})`;
-    case 'meal_new':
-      return `[${data.restaurant_name||'team '+data.restaurant_id}] New client — ${data.meal.order||'?'} (id:${data.meal.client_id})`;
-    case 'meal_changed':
-      return `[${data.restaurant_name||'team '+data.restaurant_id}] Meal updated: ${data.changes.map(c=>`${c.field}: ${c.old}→${c.new}`).join(', ')}`;
-    case 'bid_history':
-      return `Bid: ${JSON.stringify(data.bid)}`;
-    case 'system':
-      return data.msg;
-    default:
-      return JSON.stringify(data);
-  }
-}
-
-// ── Feed ───────────────────────────────────────
-function addFeedEntry(type, ts, text) {
-  feedCount++;
-  document.getElementById('feed-count').textContent = feedCount;
-
-  const entry = {type, ts, text};
-  allEvents.unshift(entry);
-  if (allEvents.length > 500) allEvents.pop();
-
-  if (activeFilter === 'all' || activeFilter === type ||
-      (activeFilter === 'restaurant_changed' && (type === 'restaurant_changed' || type === 'restaurant_snapshot')) ||
-      (activeFilter === 'market_new_entry' && (type === 'market_new_entry' || type === 'market_changed' || type === 'market_removed')) ||
-      (activeFilter === 'meal_new' && (type === 'meal_new' || type === 'meal_changed' || type === 'bid_history'))) {
-    prependFeedDOM(entry);
-  }
-}
-
-function prependFeedDOM(entry) {
-  const feed = document.getElementById('feed');
-  const div = document.createElement('div');
-  div.className = `evt ${entry.type}`;
-  div.innerHTML = `<span class="ts">${entry.ts}</span><span class="tag ${entry.type}">${entry.type.replace('_',' ').toUpperCase()}</span><span class="body">${escHtml(entry.text)}</span>`;
-  feed.prepend(div);
-  // Limit DOM nodes
-  while (feed.children.length > 200) feed.lastChild.remove();
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-function clearFeed() {
-  document.getElementById('feed').innerHTML = '';
-}
-
-function setFilter(f) {
-  activeFilter = f;
-  document.querySelectorAll('.filter-btn').forEach(b => {
-    b.classList.toggle('active', b.classList.contains(f) || (f==='all' && b.classList.contains('all')));
-  });
-  // Re-render
-  const feed = document.getElementById('feed');
-  feed.innerHTML = '';
-  allEvents.forEach(entry => {
-    if (activeFilter === 'all' || activeFilter === entry.type ||
-        (activeFilter === 'restaurant_changed' && (entry.type === 'restaurant_changed' || entry.type === 'restaurant_snapshot')) ||
-        (activeFilter === 'market_new_entry' && (entry.type === 'market_new_entry' || entry.type === 'market_changed' || entry.type === 'market_removed')) ||
-        (activeFilter === 'meal_new' && (entry.type === 'meal_new' || entry.type === 'meal_changed' || entry.type === 'bid_history'))) {
-      prependFeedDOM(entry);
-    }
-  });
-}
-
-// ── Restaurants table ──────────────────────────
-function updateRestaurant(id, name, s, highlight) {
-  restaurants[id] = {name, ...s};
-  const tbody = document.getElementById('rest-tbody');
-  let row = document.getElementById(`rest-${id}`);
-  const menuCount = s.menu ? Object.keys(s.menu).length : 0;
-  const invCount = s.inventory ? Object.keys(s.inventory).length : 0;
-  const msgs = s.receivedMessages ?? 0;
-  const openCls = s.isOpen ? 'open-true' : 'open-false';
-  const openTxt = s.isOpen ? '🟢 YES' : '🔴 NO';
-  const isUs = String(id) === '17';
-  const idCell = isUs ? `<td class="num" style="color:var(--accent);font-weight:bold">★ ${id}</td>` : `<td class="num">${id}</td>`;
-  const inner = `
-    ${idCell}
-    <td>${escHtml(name)}</td>
-    <td class="num">${s.balance ?? '—'}</td>
-    <td class="num">${s.reputation ?? '—'}</td>
-    <td class="${openCls}">${openTxt}</td>
-    <td class="num">${s.menu_count ?? menuCount}</td>
-    <td class="num">${s.inventory_count ?? invCount}</td>
-    <td class="num">${s.kitchen ?? '—'}</td>
-    <td class="num ${msgs>0?'warn':''}">${msgs}</td>
-  `;
-  if (!row) {
-    row = document.createElement('tr');
-    row.id = `rest-${id}`;
-    row.className = 'clickable';
-    row.addEventListener('click', () => openModal(id, name));
-    tbody.appendChild(row);
-    const rows = Array.from(tbody.querySelectorAll('tr')).sort((a,b) => +a.id.split('-')[1] - +b.id.split('-')[1]);
-    rows.forEach(r => tbody.appendChild(r));
-  }
-  row.innerHTML = inner;
-  if (highlight) {
-    row.classList.remove('highlight');
-    void row.offsetWidth;
-    row.classList.add('highlight');
-  }
-  document.getElementById('rest-count').textContent = Object.keys(restaurants).length;
-  // if this team's modal is open, refresh it live
-  if (modalOpenId !== null && String(modalOpenId) === String(id)) refreshModal();
-}
-
-// ── Team Detail Modal ──────────────────────────
-function openModal(id, name) {
-  modalOpenId = id;
-  document.getElementById('modal-title').textContent = `🏪 Team Inspector — ${name} (id: ${id})`;
-  document.getElementById('modal-body').innerHTML = '<div id="modal-loading">Loading…</div>';
-  document.getElementById('modal-overlay').classList.add('open');
-  fetchModalData(id);
-}
-
-function refreshModal() {
-  if (modalOpenId === null) return;
-  const name = (restaurants[modalOpenId] || {}).name || `#${modalOpenId}`;
-  fetchModalData(modalOpenId);
-}
-
-function closeModal(e) {
-  if (e.target === document.getElementById('modal-overlay')) closeModalDirect();
-}
-function closeModalDirect() {
-  document.getElementById('modal-overlay').classList.remove('open');
-  modalOpenId = null;
-}
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModalDirect(); });
-
-async function fetchModalData(id) {
-  try {
-    const res = await fetch(`/api/restaurant/${id}`);
-    const d = await res.json();
-    renderModal(id, d);
-  } catch(e) {
-    document.getElementById('modal-body').innerHTML =
-      `<div id="modal-loading" style="color:var(--red)">Error: ${e}</div>`;
-  }
-}
-
-function renderModal(id, d) {
-  const r = d.raw || {};
-  const menuData = d.menu || {};
-  const menuItems = menuData.items || (Array.isArray(menuData) ? menuData : []);
-  const changeLog = d.change_log || [];
-  const mealsList = d.meals || [];
-
-  const inv = r.inventory || {};
-  const invEntries = Object.entries(inv);
-
-  const kitchen = r.kitchen || [];
-  const kitchenList = Array.isArray(kitchen) ? kitchen : Object.entries(kitchen);
-
-  const msgs = r.receivedMessages || [];
-  const msgList = Array.isArray(msgs) ? msgs : [];
-
-  const isOpenHtml = r.isOpen
-    ? '<span class="open-true">🟢 OPEN</span>'
-    : '<span class="open-false">🔴 CLOSED</span>';
-
-  let html = '';
-
-  // ── Overview stats
-  html += `<div class="detail-section">
-    <div class="detail-section-header"><span>📊 OVERVIEW</span><span style="color:var(--muted);font-size:10px">turn: ${d.turn_id ?? '—'}</span></div>
-    <div class="detail-grid">
-      <div class="detail-kv"><div class="dk">BALANCE</div><div class="dv" style="color:var(--green);font-size:18px;font-weight:bold">${r.balance ?? '—'}</div></div>
-      <div class="detail-kv"><div class="dk">REPUTATION</div><div class="dv" style="font-size:18px">${r.reputation ?? '—'}</div></div>
-      <div class="detail-kv"><div class="dk">STATUS</div><div class="dv">${isOpenHtml}</div></div>
-      <div class="detail-kv"><div class="dk">MENU ITEMS</div><div class="dv">${menuItems.length}</div></div>
-      <div class="detail-kv"><div class="dk">INVENTORY SLOTS</div><div class="dv">${invEntries.length}</div></div>
-      <div class="detail-kv"><div class="dk">KITCHEN ACTIVE</div><div class="dv">${kitchenList.length}</div></div>
-      <div class="detail-kv"><div class="dk">MESSAGES</div><div class="dv ${msgList.length>0?'warn':''}">${msgList.length}</div></div>
-      <div class="detail-kv"><div class="dk">CHANGES LOGGED</div><div class="dv">${changeLog.length}</div></div>
-    </div>
-  </div>`;
-
-  // ── Menu
-  html += `<div class="detail-section">
-    <div class="detail-section-header"><span>🍽️ MENU</span><span>${menuItems.length} items</span></div>`;
-  if (menuItems.length === 0) {
-    html += `<div style="padding:12px;color:var(--muted);font-size:12px">No menu items set</div>`;
-  } else {
-    html += `<table class="modal-table"><thead><tr><th>#</th><th>DISH NAME</th><th style="text-align:right">PRICE</th></tr></thead><tbody>`;
-    menuItems.forEach((item, i) => {
-      const nm = item.name || item.Name || JSON.stringify(item);
-      const pr = item.price ?? item.Price ?? '—';
-      html += `<tr><td class="num" style="color:var(--muted)">${i+1}</td><td>${escHtml(String(nm))}</td><td class="num" style="color:var(--green)">${pr}</td></tr>`;
-    });
-    html += `</tbody></table>`;
-  }
-  html += `</div>`;
-
-  // ── Inventory
-  html += `<div class="detail-section">
-    <div class="detail-section-header"><span>📦 INVENTORY</span><span>${invEntries.length} ingredients</span></div>`;
-  if (invEntries.length === 0) {
-    html += `<div style="padding:12px;color:var(--muted);font-size:12px">Empty</div>`;
-  } else {
-    html += `<table class="modal-table"><thead><tr><th>INGREDIENT</th><th style="text-align:right">QTY</th></tr></thead><tbody>`;
-    invEntries.sort((a,b) => b[1]-a[1]).forEach(([ing, qty]) => {
-      html += `<tr><td>${escHtml(ing)}</td><td class="num">${qty}</td></tr>`;
-    });
-    html += `</tbody></table>`;
-  }
-  html += `</div>`;
-
-  // ── Kitchen
-  html += `<div class="detail-section">
-    <div class="detail-section-header"><span>👨‍🍳 KITCHEN (cooking now)</span><span>${kitchenList.length}</span></div>`;
-  if (kitchenList.length === 0) {
-    html += `<div style="padding:12px;color:var(--muted);font-size:12px">Nothing cooking</div>`;
-  } else {
-    html += `<table class="modal-table"><thead><tr><th>ITEM</th><th>DETAIL</th></tr></thead><tbody>`;
-    kitchenList.forEach(entry => {
-      const [k, v] = Array.isArray(entry) ? entry : [JSON.stringify(entry), ''];
-      html += `<tr><td>${escHtml(String(k))}</td><td>${escHtml(String(v))}</td></tr>`;
-    });
-    html += `</tbody></table>`;
-  }
-  html += `</div>`;
-
-  // ── Meals (only populated for our own team)
-  if (mealsList.length > 0) {
-    html += `<div class="detail-section">
-      <div class="detail-section-header"><span>🍽️ MEALS THIS TURN</span><span>${mealsList.length}</span></div>
-      <table class="modal-table"><thead><tr><th>CLIENT</th><th>ORDER</th><th>DISH</th><th>SERVED</th></tr></thead><tbody>`;
-    mealsList.forEach(m => {
-      const served = m.executed ? '<span class="open-true">✅</span>' : '<span style="color:var(--muted)">⏳</span>';
-      html += `<tr>
-        <td style="font-size:10px;max-width:80px;overflow:hidden;text-overflow:ellipsis">${escHtml(String(m.client_id||''))}</td>
-        <td style="white-space:normal;max-width:220px">${escHtml(m.orderText||m.order||'')}</td>
-        <td>${escHtml(m.dish_name||m.dish||'—')}</td>
-        <td>${served}</td></tr>`;
-    });
-    html += `</tbody></table></div>`;
-  }
-
-  // ── Received messages
-  if (msgList.length > 0) {
-    html += `<div class="detail-section">
-      <div class="detail-section-header"><span>✉️ RECEIVED MESSAGES</span><span>${msgList.length}</span></div>
-      <table class="modal-table"><thead><tr><th>FROM</th><th>TEXT</th><th>TIME</th></tr></thead><tbody>`;
-    msgList.forEach(m => {
-      const sender = m.senderName || m.sender_name || m.senderId || '?';
-      const text = m.text || m.body || JSON.stringify(m);
-      const dt = m.datetime || m.ts || '';
-      html += `<tr><td>${escHtml(String(sender))}</td><td style="white-space:normal">${escHtml(String(text))}</td><td style="color:var(--muted);font-size:10px">${escHtml(String(dt))}</td></tr>`;
-    });
-    html += `</tbody></table></div>`;
-  }
-
-  // ── Change history
-  html += `<div class="detail-section">
-    <div class="detail-section-header"><span>📝 CHANGE LOG</span><span>last ${changeLog.length} events</span></div>`;
-  if (changeLog.length === 0) {
-    html += `<div style="padding:12px;color:var(--muted);font-size:12px">No changes recorded yet — tracker started after last change or game hasn't started</div>`;
-  } else {
-    [...changeLog].reverse().forEach(entry => {
-      const pills = entry.changes.map(c => {
-        if (typeof c.old === 'object' || typeof c.new === 'object') {
-          return `<span class="change-pill">${escHtml(c.field)}: <em style="color:var(--yellow)">changed</em></span>`;
-        }
-        return `<span class="change-pill">${escHtml(c.field)}: <span class="old">${escHtml(String(c.old))}</span> → <span class="new">${escHtml(String(c.new))}</span></span>`;
-      }).join('');
-      html += `<div class="change-entry"><span class="change-ts">${entry.ts}</span><div class="change-list">${pills}</div></div>`;
-    });
-  }
-  html += `</div>`;
-
-  document.getElementById('modal-body').innerHTML = html;
-}
-
-// ── Market table ───────────────────────────────
-function updateMarket(id, entry, highlight) {
-  market[id] = entry;
-  const tbody = document.getElementById('mkt-tbody');
-  let row = document.getElementById(`mkt-${id}`);
-  const sideCls = entry.side === 'BUY' ? 'up' : 'dn';
-  const stCls = entry.status === 'open' ? 'up' : entry.status === 'closed' ? 'dn' : '';
-  const inner = `
-    <td class="num">${id}</td>
-    <td class="${sideCls}">${entry.side||'—'}</td>
-    <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${escHtml(entry.ingredient_name||'')}</td>
-    <td class="num">${entry.quantity??'—'}</td>
-    <td class="num">${entry.unit_price??entry.price??'—'}</td>
-    <td class="${stCls}">${entry.status||'—'}</td>
-    <td class="num">${entry.seller_id??'—'}</td>
-    <td class="num">${entry.buyer_id??'—'}</td>
-  `;
-  if (!row) {
-    row = document.createElement('tr');
-    row.id = `mkt-${id}`;
-    row.className = 'market-row';
-    tbody.insertBefore(row, tbody.firstChild);
-  }
-  row.innerHTML = inner;
-  if (highlight) {
-    row.classList.remove('highlight');
-    void row.offsetWidth;
-    row.classList.add('highlight');
-  }
-  document.getElementById('mkt-count').textContent = Object.keys(market).length;
-}
-
-function removeMarket(id) {
-  const row = document.getElementById(`mkt-${id}`);
-  if (row) row.style.opacity = '0.3';
-  delete market[id];
-  document.getElementById('mkt-count').textContent = Object.keys(market).length;
-}
-
-// ── Meals table ────────────────────────────────
-function updateMeal(data) {
-  const meal = data.meal || data;
-  const rid = data.restaurant_id || meal.restaurant_id || '?';
-  const rname = data.restaurant_name || meal.restaurant_name || `team ${rid}`;
-  const rowKey = `meal-${rid}-${meal.client_id}`;
-  meals[rowKey] = meal;
-  const tbody = document.getElementById('meal-tbody');
-  let row = document.getElementById(rowKey);
-  const srvCls = meal.executed ? 'up' : 'muted';
-  const srvTxt = meal.executed ? '✅ YES' : '⏳ NO';
-  const isUs = String(rid) === '17';
-  const teamCell = isUs
-    ? `<td style="color:var(--accent);font-weight:bold;white-space:nowrap">★ ${escHtml(rname)}</td>`
-    : `<td style="color:var(--blue);white-space:nowrap">${escHtml(rname)}</td>`;
-  const inner = `
-    ${teamCell}
-    <td style="max-width:90px;overflow:hidden;text-overflow:ellipsis">${escHtml(String(meal.client_id||''))}</td>
-    <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:normal">${escHtml(meal.order||'')}</td>
-    <td>${escHtml(meal.dish||'—')}</td>
-    <td class="${srvCls}">${srvTxt}</td>
-  `;
-  if (!row) {
-    row = document.createElement('tr');
-    row.id = rowKey;
-    tbody.insertBefore(row, tbody.firstChild);
-  }
-  row.innerHTML = inner;
-  row.classList.remove('highlight');
-  void row.offsetWidth;
-  row.classList.add('highlight');
-  document.getElementById('meal-count').textContent = Object.keys(meals).length;
-}
-
-// ── Init ───────────────────────────────────────
-connect();
-</script>
-</body>
-</html>
-"""
-
-
-@app.route("/")
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-
-from flask import jsonify, request as flask_request
+# NOTE: All HTML UI templates have been removed.
+# The SPAM! Dashboard (port 5556) now handles all visualisation.
+# This file is a pure data-gathering sidecar.
+
+# (old WAITING_MARKET_TEMPLATE, SOCIAL_TEMPLATE, HTML_TEMPLATE removed)
+# Total: ~1,730 lines of HTML/CSS/JS templates deleted.
 
 
 @app.route("/api/all_restaurants")
@@ -2244,11 +570,37 @@ def api_game_state():
 
 @app.route("/api/messages")
 def api_messages():
-    """Return recent agent messages (captured from new_message SSE events)."""
+    """Return recent agent messages (captured from new_message SSE events + sent)."""
     limit = flask_request.args.get("limit", 100, type=int)
     with state_lock:
         msgs = list(state["messages"][-limit:])
     return jsonify(msgs)
+
+
+@app.route("/api/messages/sent", methods=["POST"])
+def api_messages_sent():
+    """Receive a sent message record from the main app."""
+    data = flask_request.get_json(force=True)
+    if not data:
+        return jsonify({"error": "no data"}), 400
+    msg_entry = {
+        "ts": data.get("ts", now_ts()),
+        "sender_id": TEAM_ID,
+        "sender_name": "SPAM!",
+        "recipient_id": data.get("recipient_id"),
+        "recipient_name": data.get("recipient_name", "?"),
+        "text": data.get("text", ""),
+        "turn_id": data.get("turn_id") or state.get("turn_id"),
+        "direction": "sent",
+        "arm": data.get("arm", ""),
+        "desired_effect": data.get("desired_effect", ""),
+    }
+    with state_lock:
+        state["messages"].append(msg_entry)
+        if len(state["messages"]) > 200:
+            state["messages"].pop(0)
+    push_event("sent_message", msg_entry)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/restaurant/<rid>")
@@ -2366,16 +718,6 @@ def api_waiting_market():
     })
 
 
-@app.route("/waiting")
-def waiting_market():
-    return render_template_string(WAITING_MARKET_TEMPLATE)
-
-
-@app.route("/social")
-def social():
-    return render_template_string(SOCIAL_TEMPLATE)
-
-
 @app.route("/stream")
 def stream():
     """SSE endpoint for the browser."""
@@ -2416,8 +758,9 @@ if __name__ == "__main__":
     t2.start()
 
     print("=" * 55)
-    print("  🍕  SPAM! Server Tracker")
-    print("  Open browser at  http://localhost:5555")
+    print("  🍕  SPAM! Server Tracker  (data sidecar)")
+    print("  API at  http://localhost:5555/api/*")
+    print("  Dashboard at  http://localhost:5556")
     print("  Press Ctrl+C to stop")
     print("=" * 55)
     app.run(host="0.0.0.0", port=5555, threaded=True, use_reloader=False)
