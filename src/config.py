@@ -56,21 +56,25 @@ ARCHETYPE_CEILINGS = {
     "Famiglie Orbitali": 150,
 }
 
-# ── ACTUAL target prices per tier (volume-first mixed pricing) ──
-# These are what we CHARGE — well below ceilings to attract customers.
-# Mixed tiers ensure we appeal to ALL archetypes simultaneously.
-# KEY INSIGHT: 20 customers × 30 credits = 600 revenue
-#              0 customers × 150 credits = 0 revenue
-# Granular tiers = better coverage of the full prestige spectrum.
+# ── ACTUAL target prices per tier (profit-aware mixed pricing) ──
+# These are MINIMUM base prices per prestige tier.
+# CRITICAL CONSTRAINT: price MUST exceed ingredient cost per serving.
+# Typical dish needs 3-10 ingredient units at 15-18 each = 45-180 cost.
+# Prices are further adjusted UP by cost-floor logic in compute_menu_price.
+# We still stay BELOW archetype ceilings to get volume:
+#   Esploratore Galattico: ≤60   → target 35-55
+#   Famiglie Orbitali:     ≤150  → target 50-120
+#   Saggi del Cosmo:       ≤600  → target 80-250
+#   Astrobarone:           ≤500  → target 80-250
 PRICE_TIERS = {
-    "ultra_bargain": (0,  20,  12),   # (prestige_min, prestige_max, base_price)
-    "bargain":       (21, 35,  18),
-    "budget":        (36, 50,  25),
-    "mid_low":       (51, 60,  32),
-    "mid":           (61, 70,  40),
-    "mid_high":      (71, 80,  50),
-    "premium":       (81, 90,  62),
-    "luxury":        (91, 100, 80),
+    "ultra_bargain": (0,  20,  30),   # (prestige_min, prestige_max, base_price)
+    "bargain":       (21, 35,  38),
+    "budget":        (36, 50,  48),
+    "mid_low":       (51, 60,  55),
+    "mid":           (61, 70,  65),
+    "mid_high":      (71, 80,  80),
+    "premium":       (81, 90,  100),
+    "luxury":        (91, 100, 130),
 }
 
 # ── Known archetypes ──
@@ -112,16 +116,16 @@ NEGATIVE_DELTA_INGREDIENTS = [
 ]
 
 # ── Zone-specific price factors ──
-# VOLUME-FIRST: price LOW across all zones.
-# Even premium zone keeps prices accessible — we NEED customers!
-# Revenue = price × volume. Volume is king.
+# These multiply the base price. Must be >= 1.0 for premium zones
+# to ensure we never sell below cost. Budget zones use slight discount
+# but the cost-floor in compute_menu_price prevents selling at a loss.
 ZONE_PRICE_FACTORS = {
-    "DIVERSIFIED": 0.65,
-    "PREMIUM_MONOPOLIST": 0.70,
-    "BUDGET_OPPORTUNIST": 0.45,
-    "NICHE_SPECIALIST": 0.60,
-    "SPEED_CONTENDER": 0.55,
-    "MARKET_ARBITRAGEUR": 0.50,
+    "DIVERSIFIED": 1.00,
+    "PREMIUM_MONOPOLIST": 1.10,
+    "BUDGET_OPPORTUNIST": 0.85,
+    "NICHE_SPECIALIST": 1.00,
+    "SPEED_CONTENDER": 0.90,
+    "MARKET_ARBITRAGEUR": 0.80,
 }
 
 # ── Zone-specific system prompts ──
@@ -252,20 +256,25 @@ DEFAULT_STARTING_BALANCE = 10000
 
 # ── Bidding strategy constants ──
 # SERVINGS_BUFFER: bid enough ingredients for N servings per menu item.
-# With buffer=2, if a dish needs 3x IngA, we bid for 6x IngA.
-# This prevents running out when multiple customers order the same dish.
-# Keep low to avoid overspending — profit = revenue - costs!
-SERVINGS_BUFFER = 2
+# With buffer=1, if a dish needs 3x IngA, we bid for 3x IngA.
+# buffer=2 was DOUBLING all costs with no guaranteed extra revenue.
+# Better to bid for 1 serving and potentially miss a repeat order
+# than to always overbid and sell at a loss.
+SERVINGS_BUFFER = 1
 
 # SPENDING_FRACTION: fraction of balance allocated to bidding.
-# PROFIT = REVENUE - COSTS. Keep spending LOW to maximise profit.
-# We only need enough ingredients to cook the menu — not a war chest.
-# 0.30 = conservative: spend ≤30% of balance, keep 70% as profit buffer.
-DEFAULT_SPENDING_FRACTION = 0.30
+# PROFIT = REVENUE - COSTS. Keep spending relative to expected revenue.
+# 0.25 = conservative: spend ≤25% of balance on bids.
+DEFAULT_SPENDING_FRACTION = 0.25
 
 # AGGRESSIVE_SPENDING_FRACTION: used when we detect heavy competition.
-# Even under pressure, never spend more than 45% of balance.
-AGGRESSIVE_SPENDING_FRACTION = 0.45
+# Even under pressure, never spend more than 35% of balance.
+AGGRESSIVE_SPENDING_FRACTION = 0.35
+
+# MINIMUM_PROFIT_MARGIN: the minimum ratio of (price / ingredient_cost).
+# A dish must sell for at least this multiple of its ingredient cost.
+# 1.5 means 50% gross margin (spend 100 on ingredients → sell for ≥150).
+MINIMUM_PROFIT_MARGIN = 1.5
 
 # ── Base bid prices (fallback when no competitor data) ──
 # CONSERVATIVE: bid just enough to win, not more. Every credit saved
