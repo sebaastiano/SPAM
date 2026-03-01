@@ -266,6 +266,7 @@ class SkillOrchestrator:
             "serving_monitor", "close_decision", "inventory_verify",
             "quick_intelligence", "emergency_menu",
             "serving_readiness_check",
+            "diplomacy_send",  # always attempt diplomacy when in speaking phase
         }
         if agent_skills:
             agent_set = set(agent_skills) | _ALWAYS_RUN

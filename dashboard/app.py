@@ -56,15 +56,27 @@ app = Flask(
 # ── Tracker Data Fetcher ──────────────────────────────────
 
 def tracker_get(endpoint: str, params: dict | None = None, timeout: float = 4.0):
-    """Fetch JSON from the tracker sidecar. Returns parsed data or None."""
+    """Fetch JSON from the tracker sidecar. Retries on 429/5xx."""
     url = f"{TRACKER_URL}{endpoint}"
-    try:
-        r = requests.get(url, params=params, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.warning("tracker_get %s failed: %s", endpoint, e)
-        return None
+    _retryable = {429, 500, 502, 503, 504}
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code in _retryable:
+                import time
+                wait = min(1.0 * (2 ** attempt), 8.0)
+                log.warning("tracker_get %s HTTP %d — retry in %.1fs", endpoint, r.status_code, wait)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt < 2:
+                import time
+                time.sleep(1.0 * (2 ** attempt))
+            else:
+                log.warning("tracker_get %s failed: %s", endpoint, e)
+    return None
 
 
 def get_restaurant_names() -> dict[int, str]:

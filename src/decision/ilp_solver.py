@@ -388,10 +388,37 @@ def _greedy_fallback(
     budget = balance * spending_fraction
     total_bid_cost = 0.0
 
-    for ing, qty in needed_ingredients.items():
+    # Sort: uncontested ingredients first (cheapest), so we buy MORE of them
+    # before budget runs out on contested (expensive) ones.
+    def _ingredient_contestation(ing: str) -> int:
+        """How many competitors target this ingredient? 0 = uncontested."""
+        count = 0
+        for brief in competitor_briefings.values():
+            if not brief.get("is_connected", False):
+                continue
+            if ing in brief.get("top_bid_ingredients", []):
+                count += 1
+        return count
+
+    sorted_ingredients = sorted(
+        needed_ingredients.items(),
+        key=lambda item: _ingredient_contestation(item[0]),
+    )
+
+    for ing, qty in sorted_ingredients:
         if qty <= 0:
             continue
         bid_price = compute_bid_price(ing, competitor_briefings, demand_forecast)
+
+        # Uncontested ingredient bonus: if no competitor is targeting this,
+        # the bid price is rock-bottom — buy an extra serving worth.
+        # This is the key insight: zone differentiation → uncontested
+        # ingredients → low per-unit cost → buy more → serve more clients.
+        contestation = _ingredient_contestation(ing)
+        if contestation == 0 and bid_price <= DEFAULT_BASE_BID * 1.5:
+            # Extra serving at bargain price — +50% more quantity
+            qty = max(qty, int(qty * 1.5))
+
         cost = bid_price * qty
         if total_bid_cost + cost <= budget:
             decision.bids.append({
@@ -533,7 +560,7 @@ def compute_menu_price(
             break
 
     # Gentle prestige scaling WITHIN each tier (±20% max)
-    prestige_mult = 1.0 + (prestige - 50) / 250
+    prestige_mult = 1.0 + (prestige - 50) / 200
 
     # Reputation bonus — subtle
     rep_mult = 1.0 + (reputation - 50) / 300
@@ -574,8 +601,8 @@ def compute_menu_price(
             if b.get("is_connected", False)
         )
         if active_competitors == 0:
-            # Monopoly — modest increase
-            price = int(price * 1.15)
+            # Monopoly — push prices up
+            price = int(price * 1.20)
         elif agent_undercut:
             # Don't undercut below cost floor
             competitor_prices = [
@@ -586,18 +613,18 @@ def compute_menu_price(
             if competitor_prices:
                 avg_comp_price = sum(competitor_prices) / len(competitor_prices)
                 if prestige <= 50:
-                    undercut_price = int(avg_comp_price * 0.85)
+                    undercut_price = int(avg_comp_price * 0.80)
                 elif prestige <= 70:
-                    undercut_price = int(avg_comp_price * 0.92)
+                    undercut_price = int(avg_comp_price * 0.88)
                 else:
                     undercut_price = int(avg_comp_price * 0.95)
                 # Only undercut if it's still above cost floor
                 price = max(min(price, undercut_price), cost_floor)
 
     # ── 4. Hard floor and ceiling ──
-    # Floor: cost_floor or 20 credits minimum
+    # Floor: cost_floor or 10 credits minimum
     # Ceiling: 550 credits (stay under Saggi 600 ceiling with margin)
-    price = max(max(cost_floor, 20), min(price, 550))
+    price = max(max(cost_floor, 10), min(price, 550))
 
     return price
 
@@ -621,7 +648,7 @@ def compute_bid_price(
     - When no competition: bid absolute minimum
     - The goal is to WIN cheaply, maximising dish profit margin
     """
-    MAX_BID_PER_INGREDIENT = 80  # hard ceiling — no ingredient is worth more
+    MAX_BID_PER_INGREDIENT = 65  # hard ceiling — no ingredient is worth more
 
     # Count active competitors
     active_competitors = sum(
@@ -657,12 +684,12 @@ def compute_bid_price(
         # No competitor specifically targeting this ingredient.
         if active_competitors == 0:
             # True monopoly — bid bare minimum
-            return max(base * 0.3, 8) if is_high_delta else max(base * 0.25, 5)
+            return max(base * 0.25, 6) if is_high_delta else max(base * 0.20, 4)
 
         # Light competition — bid conservatively, just above base
         competition_factor = min(active_competitors / 6.0, 1.0)
-        scaled = base * (1.0 + competition_factor * 0.25)
-        return int(min(max(scaled, 10), MAX_BID_PER_INGREDIENT))
+        scaled = base * (1.0 + competition_factor * 0.20)
+        return int(min(max(scaled, 8), MAX_BID_PER_INGREDIENT))
 
     # Competitors target this ingredient — bid just enough to beat them.
     predicted_max = max(predicted_competitor_bids)
@@ -717,13 +744,13 @@ def _compute_smart_spending(
 
     # Base spending by competition level (conservative defaults)
     if active_competitors == 0:
-        base = 0.10  # monopoly: barely spend anything
+        base = 0.15  # monopoly: still need enough for 2x servings
     elif active_competitors <= 2:
-        base = 0.15
+        base = 0.22
     elif active_competitors <= 4:
-        base = 0.20
+        base = 0.28
     else:
-        base = 0.25
+        base = 0.32
 
     if not pnl_history or len(pnl_history) < 2:
         return base
@@ -744,9 +771,9 @@ def _compute_smart_spending(
             f"reducing to {base:.2f}"
         )
     elif avg_delta > 200:
-        # Profitable → can afford slightly more, but stay conservative
-        boost = min(0.05, avg_delta / 5000)
-        base = min(0.30, base + boost)
+        # Profitable → can afford more spending for more ingredients
+        boost = min(0.08, avg_delta / 4000)
+        base = min(0.40, base + boost)
         logger.info(
             f"P&L-aware spending: avg_delta={avg_delta:.0f} (profitable), "
             f"increasing to {base:.2f}"
@@ -760,8 +787,8 @@ def _compute_smart_spending(
             f"({avg_clients:.1f}) → reducing to {base:.2f}"
         )
 
-    # Never spend more than 30% even under pressure
-    return min(0.30, max(0.05, base))
+    # Cap at 40% — we can afford more now that per-unit bids are low
+    return min(0.40, max(0.05, base))
 
 
 def _estimate_order_probabilities(
@@ -790,10 +817,10 @@ def _estimate_order_probabilities(
         if b.get("is_connected", False)
     )
 
-    # Base order probability: assume ~5-10 clients per serving window total,
+    # Base order probability: assume ~8-12 clients per serving window total,
     # split across N competitors. Each client orders 1 dish.
-    # So our restaurant might see 2-8 clients per turn.
-    total_clients_estimate = 8  # typical game clients per turn
+    # With bigger menus and 2x servings, we can handle more of them.
+    total_clients_estimate = 10  # typical game clients per turn
     our_share = 1.0 / max(active_competitors + 1, 1)
     our_clients_estimate = total_clients_estimate * our_share
 

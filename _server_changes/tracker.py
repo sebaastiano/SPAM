@@ -143,26 +143,53 @@ def sse_relay_thread():
 
 
 # ──────────────────────────────────────────────
-# Helper: safe GET
+# Helper: safe GET with 429/5xx retry
 # ──────────────────────────────────────────────
 
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 5
+_BASE_DELAY = 1.0
+
 def api_get(path: str, params: dict = None, silent_404: bool = False, silent_400: bool = False):
-    try:
-        r = requests.get(f"{BASE_URL}{path}", headers=HEADERS, params=params, timeout=10)
-        if r.status_code == 404 and silent_404:
-            return None
-        if r.status_code == 400:
-            if silent_400:
+    url = f"{BASE_URL}{path}"
+    for attempt in range(_MAX_RETRIES):
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+            if r.status_code in _RETRYABLE_STATUSES:
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait = min(float(retry_after), 16.0)
+                    except ValueError:
+                        wait = min(_BASE_DELAY * (2 ** attempt), 16.0)
+                else:
+                    wait = min(_BASE_DELAY * (2 ** attempt), 16.0)
+                push_event("system", {
+                    "msg": f"HTTP {r.status_code} on GET {path} "
+                           f"(attempt {attempt + 1}/{_MAX_RETRIES}) — retrying in {wait:.1f}s"
+                })
+                time.sleep(wait)
+                continue
+            if r.status_code == 404 and silent_404:
                 return None
-            # Return a sentinel so callers can detect 400 vs network error
-            body = r.text
-            push_event("system", {"msg": f"GET {path} returned 400: {body[:200]}"})
-            return {"__error": 400, "body": body}
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        push_event("system", {"msg": f"GET {path} failed: {e}"})
-        return None
+            if r.status_code == 400:
+                if silent_400:
+                    return None
+                body = r.text
+                push_event("system", {"msg": f"GET {path} returned 400: {body[:200]}"})
+                return {"__error": 400, "body": body}
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            wait = min(_BASE_DELAY * (2 ** attempt), 16.0)
+            if attempt < _MAX_RETRIES - 1:
+                push_event("system", {
+                    "msg": f"GET {path} error (attempt {attempt + 1}): {e} — retrying in {wait:.1f}s"
+                })
+                time.sleep(wait)
+            else:
+                push_event("system", {"msg": f"GET {path} failed after {_MAX_RETRIES} attempts: {e}"})
+    return None
 
 
 # ──────────────────────────────────────────────

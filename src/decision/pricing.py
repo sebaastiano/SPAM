@@ -70,8 +70,8 @@ def compute_menu_prices(
             if b.get("is_connected", False)
         )
 
-    # Monopoly bonus — modest, don't scare customers
-    monopoly_mult = 1.15 if active_competitors == 0 else 1.0
+    # Monopoly bonus — push prices up when no competition, especially premium
+    monopoly_mult = 1.20 if active_competitors == 0 else 1.0
 
     # Get competitor avg for undercutting
     comp_avg = competitor_avg_price
@@ -95,19 +95,20 @@ def compute_menu_prices(
                 base_price = tier_price
                 break
 
-        # Gentle scaling
-        prestige_mult = 1.0 + (prestige - 50) / 250
+        # Prestige-proportional scaling — steeper for premium dishes
+        prestige_mult = 1.0 + (prestige - 50) / 200
         price = int(base_price * prestige_mult * rep_mult * zone_factor * monopoly_mult * agent_factor)
 
         # Competition undercutting (only when competitors exist AND agent allows it)
         if active_competitors > 0 and comp_avg > 0 and agent_undercut:
             if prestige <= 50:
-                price = min(price, int(comp_avg * 0.75))
+                price = min(price, int(comp_avg * 0.70))
             elif prestige <= 70:
-                price = min(price, int(comp_avg * 0.90))
+                price = min(price, int(comp_avg * 0.85))
 
-        # Hard bounds
-        price = max(12, min(price, 250))
+        # Hard bounds — wider range to capture both budget and premium customers
+        # Low floor (10) attracts Esploratori; high ceiling (550) captures Saggi/Astrobaroni
+        price = max(10, min(price, 550))
 
         priced.append({
             "name": item["name"],
@@ -158,12 +159,12 @@ def adjust_prices_competitive(
 
         # Cheap dishes (≤50): undercut aggressively to win customers
         if price <= 50:
-            price = min(price, int(avg_competitor * 0.75))
+            price = min(price, int(avg_competitor * 0.70))
         # Mid dishes (51-100): slight undercut
         elif price <= 100:
-            price = min(price, int(avg_competitor * 0.90))
+            price = min(price, int(avg_competitor * 0.85))
         # Premium dishes (>100): hold firm (rich clients don't comparison-shop)
 
-        adjusted.append({"name": item["name"], "price": max(12, price)})
+        adjusted.append({"name": item["name"], "price": max(10, price)})
 
     return adjusted

@@ -47,6 +47,9 @@ PREP_TIMEOUT_MULTIPLIER = 2.5  # prep_time * this = max wait
 PREP_TIMEOUT_BUFFER = 5.0  # extra seconds on top
 POLL_INTERVAL = 1.5  # seconds between /meals polls
 POLL_TRIGGER_DELAY = 0.3  # seconds to wait after client_spawned before polling
+HTTP_RETRY_MAX = 5        # retries for 429 / 5xx on session-based GETs
+HTTP_RETRY_BASE_DELAY = 1.0
+RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -564,12 +567,70 @@ class ServingPipeline:
             logger.error(f"prepare_dish permanently failed for {dish}")
 
     # ══════════════════════════════════════════════════════════════
+    #  SESSION-BASED RETRY HELPER
+    # ══════════════════════════════════════════════════════════════
+
+    async def _retry_session_get(
+        self, url: str, label: str = "",
+        max_retries: int = HTTP_RETRY_MAX,
+    ):
+        """GET with exponential backoff on 429/5xx using the shared session.
+
+        Returns (status, json_body | text_body) or (None, None) on total failure.
+        For 200: returns parsed JSON.
+        For other non-retryable codes: returns raw text so caller can inspect.
+        """
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+
+        _label = label or url.split("?")[0].split("/")[-1]
+
+        for attempt in range(max_retries):
+            try:
+                async with self._session.get(url, headers=HEADERS) as resp:
+                    if resp.status < 400:
+                        return resp.status, await resp.json()
+
+                    if resp.status in RETRYABLE_HTTP_STATUSES:
+                        retry_after = resp.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                wait = min(float(retry_after), 16.0)
+                            except ValueError:
+                                wait = min(HTTP_RETRY_BASE_DELAY * (2 ** attempt), 16.0)
+                        else:
+                            wait = min(HTTP_RETRY_BASE_DELAY * (2 ** attempt), 16.0)
+                        logger.warning(
+                            f"HTTP {resp.status} on {_label} "
+                            f"(attempt {attempt + 1}/{max_retries}) — retrying in {wait:.1f}s"
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+
+                    # Non-retryable (400, 401, 403, 404, etc.)
+                    body = await resp.text()
+                    return resp.status, body
+
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                wait = min(HTTP_RETRY_BASE_DELAY * (2 ** attempt), 16.0)
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"{_label} request error (attempt {attempt + 1}): {e} — retrying in {wait:.1f}s"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"{_label} request failed after {max_retries} attempts: {e}")
+
+        return None, None
+
+    # ══════════════════════════════════════════════════════════════
     #  /MEALS FETCHING
     # ══════════════════════════════════════════════════════════════
 
     async def _fetch_meals(self) -> list[dict] | None:
         """Fetch current meals from GET /meals.
 
+        Retries 429/5xx via _retry_session_get.
         If the server returns 400 ("turn_id too old"), probe for the
         correct turn_id, update self.current_turn, and retry once.
         """
@@ -577,47 +638,52 @@ class ServingPipeline:
             logger.warning(f"GET /meals skipped — current_turn={self.current_turn} (not set)")
             return None
 
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-
         url = f"{BASE_URL}/meals?turn_id={self.current_turn}&restaurant_id={TEAM_ID}"
         try:
-            async with self._session.get(url, headers=HEADERS) as resp:
-                if resp.status == 400:
-                    body = await resp.text()
-                    if "too old" in body:
-                        # turn_id is stale — probe for the correct one
-                        corrected = await self._probe_correct_turn_id()
-                        if corrected and corrected != self.current_turn:
-                            logger.warning(
-                                f"turn_id auto-corrected: {self.current_turn} → {corrected}"
-                            )
-                            self.current_turn = corrected
-                            # Retry with corrected turn_id
-                            retry_url = f"{BASE_URL}/meals?turn_id={corrected}&restaurant_id={TEAM_ID}"
-                            async with self._session.get(retry_url, headers=HEADERS) as retry_resp:
-                                if retry_resp.status == 200:
-                                    return await retry_resp.json()
-                                logger.error(
-                                    f"GET /meals retry returned {retry_resp.status} "
-                                    f"(corrected turn_id={corrected})"
-                                )
-                                return None
-                        else:
-                            logger.error(
-                                f"GET /meals returned 400 (turn_id={self.current_turn}): "
-                                f"{body} — probe could not find valid turn_id"
-                            )
-                            return None
-                    else:
+            status, body = await self._retry_session_get(url, label="fetch_meals")
+            if status is None:
+                logger.error("GET /meals failed after all retries")
+                return None
+
+            if status == 400:
+                if isinstance(body, str) and "too old" in body:
+                    # turn_id is stale — probe for the correct one
+                    corrected = await self._probe_correct_turn_id()
+                    if corrected and corrected != self.current_turn:
+                        logger.warning(
+                            f"turn_id auto-corrected: {self.current_turn} → {corrected}"
+                        )
+                        self.current_turn = corrected
+                        # Retry with corrected turn_id
+                        retry_url = f"{BASE_URL}/meals?turn_id={corrected}&restaurant_id={TEAM_ID}"
+                        retry_status, retry_body = await self._retry_session_get(
+                            retry_url, label=f"fetch_meals_corrected_t{corrected}",
+                        )
+                        if retry_status == 200:
+                            return retry_body
                         logger.error(
-                            f"GET /meals returned 400 (turn_id={self.current_turn}): {body}"
+                            f"GET /meals retry returned {retry_status} "
+                            f"(corrected turn_id={corrected})"
                         )
                         return None
-                if resp.status != 200:
-                    logger.error(f"GET /meals returned {resp.status}")
+                    else:
+                        logger.error(
+                            f"GET /meals returned 400 (turn_id={self.current_turn}): "
+                            f"{body} — probe could not find valid turn_id"
+                        )
+                        return None
+                else:
+                    logger.error(
+                        f"GET /meals returned 400 (turn_id={self.current_turn}): {body}"
+                    )
                     return None
-                return await resp.json()
+
+            if status != 200:
+                logger.error(f"GET /meals returned {status}")
+                return None
+
+            return body  # already parsed as JSON by _retry_session_get
+
         except Exception as e:
             logger.error(f"GET /meals failed: {e}")
             return None
@@ -640,20 +706,18 @@ class ServingPipeline:
         found_any_valid = False
         while hi <= 200:  # safety cap
             url = f"{BASE_URL}/meals?turn_id={hi}&restaurant_id={TEAM_ID}"
-            try:
-                async with self._session.get(url, headers=HEADERS) as resp:
-                    if resp.status == 200:
-                        lo = hi
-                        found_any_valid = True
-                        hi *= 2
-                    else:
-                        if not found_any_valid:
-                            # Haven't found anything valid yet — keep searching up
-                            hi = hi + 1 if hi < 10 else hi * 2
-                        else:
-                            break
-            except Exception:
-                break
+            status, _ = await self._retry_session_get(
+                url, label=f"probe_up_{hi}", max_retries=3,
+            )
+            if status == 200:
+                lo = hi
+                found_any_valid = True
+                hi *= 2
+            else:
+                if not found_any_valid:
+                    hi = hi + 1 if hi < 10 else hi * 2
+                else:
+                    break
 
         if not found_any_valid:
             logger.error("turn_id probe: no valid turn_id found in range 1-200")
@@ -663,13 +727,12 @@ class ServingPipeline:
         while lo < hi:
             mid = (lo + hi + 1) // 2
             url = f"{BASE_URL}/meals?turn_id={mid}&restaurant_id={TEAM_ID}"
-            try:
-                async with self._session.get(url, headers=HEADERS) as resp:
-                    if resp.status == 200:
-                        lo = mid
-                    else:
-                        hi = mid - 1
-            except Exception:
+            status, _ = await self._retry_session_get(
+                url, label=f"probe_bs_{mid}", max_retries=3,
+            )
+            if status == 200:
+                lo = mid
+            else:
                 hi = mid - 1
 
         logger.info(f"turn_id probe result: {lo}")
@@ -678,30 +741,25 @@ class ServingPipeline:
     async def _validate_turn_id(self, turn_id: int) -> int | None:
         """Quick validation of a turn_id against the server.
 
-        Makes a single GET /meals request. If it returns 200, the turn_id
-        is valid. If 400, probes for the correct one.
+        Makes a GET /meals request with retry. If it returns 200, the
+        turn_id is valid. If 400, probes for the correct one.
         Returns the correct turn_id (may be the same as input).
         """
         if turn_id <= 0:
             return await self._probe_correct_turn_id()
 
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-
         url = f"{BASE_URL}/meals?turn_id={turn_id}&restaurant_id={TEAM_ID}"
-        try:
-            async with self._session.get(url, headers=HEADERS) as resp:
-                if resp.status == 200:
-                    return turn_id  # valid
-                if resp.status == 400:
-                    logger.warning(
-                        f"turn_id={turn_id} rejected by server — probing for correct one"
-                    )
-                    return await self._probe_correct_turn_id()
-        except Exception as e:
-            logger.warning(f"turn_id validation failed: {e}")
+        status, _ = await self._retry_session_get(
+            url, label=f"validate_turn_{turn_id}",
+        )
+        if status == 200:
+            return turn_id  # valid
+        if status == 400:
+            logger.warning(
+                f"turn_id={turn_id} rejected by server — probing for correct one"
+            )
+            return await self._probe_correct_turn_id()
         return turn_id  # fallback: keep the original
-
     @staticmethod
     def _extract_client_id(meal: dict) -> str | None:
         """

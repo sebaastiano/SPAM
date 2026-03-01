@@ -61,19 +61,19 @@ ARCHETYPE_CEILINGS = {
 # CRITICAL CONSTRAINT: price MUST exceed ingredient cost per serving.
 # Typical dish needs 3-10 ingredient units at 15-18 each = 45-180 cost.
 # Prices are further adjusted UP by cost-floor logic in compute_menu_price.
-# LOW tiers: keep cheap to attract volume (Esploratori, Famiglie)
+# LOW tiers: ROCK BOTTOM to attract max volume (Esploratori, Famiglie)
 # HIGH tiers: price AGGRESSIVELY — Saggi (≤600) and Astrobaroni (≤500)
-#   will pay handsomely. If they don't come, we still have cheap dishes.
+#   will pay handsomely. Wider spread = more archetypes served.
 #   1000 credits for closing restaurant = we MUST beat that with serving.
 PRICE_TIERS = {
-    "ultra_bargain": (0,  20,  30),   # (prestige_min, prestige_max, base_price)
-    "bargain":       (21, 35,  40),
-    "budget":        (36, 50,  50),
-    "mid_low":       (51, 60,  65),
-    "mid":           (61, 70,  90),
-    "mid_high":      (71, 80,  140),
-    "premium":       (81, 90,  220),  # Astrobaroni territory (ceiling 500)
-    "luxury":        (91, 100, 320),  # Saggi territory (ceiling 600)
+    "ultra_bargain": (0,  20,  18),   # (prestige_min, prestige_max, base_price)
+    "bargain":       (21, 35,  28),
+    "budget":        (36, 50,  42),
+    "mid_low":       (51, 60,  60),
+    "mid":           (61, 70,  85),
+    "mid_high":      (71, 80,  150),
+    "premium":       (81, 90,  280),  # Astrobaroni territory (ceiling 500)
+    "luxury":        (91, 100, 420),  # Saggi territory (ceiling 600)
 }
 
 # ── Known archetypes ──
@@ -220,12 +220,12 @@ ZONE_TARGET_ARCHETYPES = {
 # CRITICAL: Include LOW-prestige dishes in EVERY zone to attract budget customers!
 # DIVERSIFIED uses the FULL spectrum to attract every archetype.
 ZONE_PRESTIGE_RANGE = {
-    "DIVERSIFIED": (10, 100),
-    "PREMIUM_MONOPOLIST": (23, 100),
-    "BUDGET_OPPORTUNIST": (10, 75),
-    "NICHE_SPECIALIST": (23, 100),
-    "SPEED_CONTENDER": (15, 90),
-    "MARKET_ARBITRAGEUR": (10, 100),
+    "DIVERSIFIED": (5, 100),
+    "PREMIUM_MONOPOLIST": (20, 100),
+    "BUDGET_OPPORTUNIST": (5, 80),
+    "NICHE_SPECIALIST": (15, 100),
+    "SPEED_CONTENDER": (10, 95),
+    "MARKET_ARBITRAGEUR": (5, 100),
 }
 
 # ── Zone menu size constraints ──
@@ -234,24 +234,24 @@ ZONE_PRESTIGE_RANGE = {
 # Bigger menus attract more archetypes and serve more clients.
 # DIVERSIFIED has the largest menu to cover all price/prestige points.
 ZONE_MENU_SIZE = {
-    "DIVERSIFIED": (12, 22),
-    "PREMIUM_MONOPOLIST": (8, 16),
-    "BUDGET_OPPORTUNIST": (10, 20),
-    "NICHE_SPECIALIST": (8, 16),
-    "SPEED_CONTENDER": (10, 20),
-    "MARKET_ARBITRAGEUR": (4, 10),
+    "DIVERSIFIED": (14, 26),
+    "PREMIUM_MONOPOLIST": (10, 20),
+    "BUDGET_OPPORTUNIST": (12, 24),
+    "NICHE_SPECIALIST": (10, 20),
+    "SPEED_CONTENDER": (12, 24),
+    "MARKET_ARBITRAGEUR": (5, 12),
 }
 
 # ── Max prep time per zone (seconds) ──
 # Relaxed to allow more recipes into the pool = bigger menus.
 # DIVERSIFIED is generous on prep time to maximize recipe pool.
 ZONE_MAX_PREP_TIME = {
-    "DIVERSIFIED": 12.0,
-    "PREMIUM_MONOPOLIST": 10.0,
-    "BUDGET_OPPORTUNIST": 10.0,
-    "NICHE_SPECIALIST": 14.0,
-    "SPEED_CONTENDER": 7.0,
-    "MARKET_ARBITRAGEUR": 15.0,
+    "DIVERSIFIED": 14.0,
+    "PREMIUM_MONOPOLIST": 12.0,
+    "BUDGET_OPPORTUNIST": 12.0,
+    "NICHE_SPECIALIST": 16.0,
+    "SPEED_CONTENDER": 8.0,
+    "MARKET_ARBITRAGEUR": 16.0,
 }
 
 # ── Competitor cluster strategies ──
@@ -270,19 +270,23 @@ DEFAULT_STARTING_BALANCE = 10000
 # ── Bidding strategy constants ──
 # SERVINGS_BUFFER: bid enough ingredients for N servings per menu item.
 # With buffer=1, if a dish needs 3x IngA, we bid for 3x IngA.
-# buffer=2 was DOUBLING all costs with no guaranteed extra revenue.
-# Better to bid for 1 serving and potentially miss a repeat order
-# than to always overbid and sell at a loss.
-SERVINGS_BUFFER = 1
+# We used to keep buffer=1 because buffer=2 was DOUBLING costs —
+# but now bid prices are lower (12 default vs 15 before) and we
+# finish ingredients way before the serving window ends, losing
+# customers. Better to have surplus ingredients than to turn away
+# paying clients. 2 servings per dish = can serve repeat orders.
+SERVINGS_BUFFER = 2
 
 # SPENDING_FRACTION: fraction of balance allocated to bidding.
 # PROFIT = REVENUE - COSTS. Keep spending relative to expected revenue.
-# 0.25 = conservative: spend ≤25% of balance on bids.
-DEFAULT_SPENDING_FRACTION = 0.25
+# 0.30 = moderate: spend up to 30%. We earn it back with dish margins
+# now that per-ingredient bids are low (12-32 range).
+DEFAULT_SPENDING_FRACTION = 0.30
 
 # AGGRESSIVE_SPENDING_FRACTION: used when we detect heavy competition.
-# Even under pressure, never spend more than 35% of balance.
-AGGRESSIVE_SPENDING_FRACTION = 0.35
+# With lower bid prices per unit, we can afford to spend 40% and still
+# maintain healthy margins on every dish sale.
+AGGRESSIVE_SPENDING_FRACTION = 0.40
 
 # MINIMUM_PROFIT_MARGIN: the minimum ratio of (price / ingredient_cost).
 # A dish must sell for at least this multiple of its ingredient cost.
@@ -290,16 +294,17 @@ AGGRESSIVE_SPENDING_FRACTION = 0.35
 MINIMUM_PROFIT_MARGIN = 1.5
 
 # ── Base bid prices (fallback when no competitor data) ──
-# CONSERVATIVE: bid just enough to win, not more. Every credit saved
-# on ingredients is pure profit when we sell the dish at high prices.
+# CONSERVATIVE: bid the MINIMUM to win. Every credit saved
+# on ingredients is pure profit when we sell at high prices.
 # The real money comes from SELLING dishes, not winning auctions.
+# Lowest viable bids — we'd rather lose a bid than overpay.
 BASE_BID_PRICES = {
-    "Polvere di Crononite": 40,
-    "Shard di Prisma Stellare": 38,
-    "Lacrime di Andromeda": 35,
-    "Essenza di Tachioni": 32,
-    "Frutti del Diavolo": 25,
-    "Gnocchi del Crepuscolo": 22,
-    "Polvere di Stelle": 22,
+    "Polvere di Crononite": 32,
+    "Shard di Prisma Stellare": 30,
+    "Lacrime di Andromeda": 28,
+    "Essenza di Tachioni": 26,
+    "Frutti del Diavolo": 20,
+    "Gnocchi del Crepuscolo": 18,
+    "Polvere di Stelle": 18,
 }
-DEFAULT_BASE_BID = 15
+DEFAULT_BASE_BID = 12

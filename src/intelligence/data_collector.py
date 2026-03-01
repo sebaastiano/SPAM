@@ -18,6 +18,7 @@ import time
 import aiohttp
 
 from src.config import BASE_URL, HEADERS, TEAM_ID
+from src.http_retry import aiohttp_retry_get
 
 logger = logging.getLogger("spam.intelligence.data_collector")
 
@@ -138,20 +139,19 @@ class DataCollectorModule:
             return self._bid_history_by_turn[prior_turn]
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{BASE_URL}/bid_history?turn_id={prior_turn}",
-                    headers=HEADERS,
-                ) as resp:
-                    if resp.status == 200:
-                        bids = await resp.json()
-                        if bids:
-                            self._bid_history_by_turn[prior_turn] = bids
-                            logger.info(
-                                f"Fetched {len(bids)} prior-turn bids "
-                                f"(turn {prior_turn})"
-                            )
-                            return bids
+            resp = await aiohttp_retry_get(
+                f"{BASE_URL}/bid_history?turn_id={prior_turn}",
+                headers=HEADERS, label=f"prior_bids_t{prior_turn}",
+            )
+            if resp and resp.status == 200:
+                bids = await resp.json()
+                if bids:
+                    self._bid_history_by_turn[prior_turn] = bids
+                    logger.info(
+                        f"Fetched {len(bids)} prior-turn bids "
+                        f"(turn {prior_turn})"
+                    )
+                    return bids
         except Exception as e:
             logger.warning(f"Failed to fetch prior turn bids: {e}")
 
@@ -170,39 +170,41 @@ class DataCollectorModule:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                # Fetch restaurants
-                async with session.get(
-                    f"{BASE_URL}/restaurants", headers=HEADERS
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if isinstance(data, list):
-                            result["all_restaurants"] = {
-                                r.get("id", i): r for i, r in enumerate(data)
-                            }
+            # Fetch restaurants
+            resp = await aiohttp_retry_get(
+                f"{BASE_URL}/restaurants", headers=HEADERS,
+                label="poll_restaurants",
+            )
+            if resp and resp.status == 200:
+                data = await resp.json()
+                if isinstance(data, list):
+                    result["all_restaurants"] = {
+                        r.get("id", i): r for i, r in enumerate(data)
+                    }
 
-                # Fetch bid history (current turn — may be empty)
-                async with session.get(
-                    f"{BASE_URL}/bid_history?turn_id={turn_id}", headers=HEADERS
-                ) as resp:
-                    if resp.status == 200:
-                        result["bids"] = await resp.json()
+            # Fetch bid history (current turn — may be empty)
+            resp = await aiohttp_retry_get(
+                f"{BASE_URL}/bid_history?turn_id={turn_id}",
+                headers=HEADERS, label=f"poll_bids_t{turn_id}",
+            )
+            if resp and resp.status == 200:
+                result["bids"] = await resp.json()
 
-                # Fetch market entries
-                async with session.get(
-                    f"{BASE_URL}/market/entries", headers=HEADERS
-                ) as resp:
-                    if resp.status == 200:
-                        result["market_entries"] = await resp.json()
+            # Fetch market entries
+            resp = await aiohttp_retry_get(
+                f"{BASE_URL}/market/entries", headers=HEADERS,
+                label="poll_market",
+            )
+            if resp and resp.status == 200:
+                result["market_entries"] = await resp.json()
 
-                # Fetch our meals
-                async with session.get(
-                    f"{BASE_URL}/meals?turn_id={turn_id}&restaurant_id={TEAM_ID}",
-                    headers=HEADERS,
-                ) as resp:
-                    if resp.status == 200:
-                        result["own_meals"] = await resp.json()
+            # Fetch our meals
+            resp = await aiohttp_retry_get(
+                f"{BASE_URL}/meals?turn_id={turn_id}&restaurant_id={TEAM_ID}",
+                headers=HEADERS, label=f"poll_meals_t{turn_id}",
+            )
+            if resp and resp.status == 200:
+                result["own_meals"] = await resp.json()
 
         except Exception as e:
             logger.error(f"Direct polling failed: {e}")

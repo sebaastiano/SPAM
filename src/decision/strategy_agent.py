@@ -759,5 +759,9 @@ Respond with a JSON object (no markdown, no explanation outside JSON):
         strategy.menu_max_prep_time = 12.0
         strategy.confidence = 0.4
         strategy.raw_reasoning = "Default strategy (LLM unavailable)"
+        strategy.skills_to_activate = [
+            "intelligence_scan", "zone_selection", "menu_planning",
+            "menu_save", "diplomacy_send", "market_ops",
+        ]
 
         return strategy

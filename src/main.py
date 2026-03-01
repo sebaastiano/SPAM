@@ -61,6 +61,7 @@ from src.decision.ilp_solver import solve_zone_ilp
 from src.decision.subagent_router import SubagentRouter
 from src.decision.pricing import compute_menu_prices, adjust_prices_competitive
 from src.decision.strategy_agent import StrategyAgent, TurnStrategy
+from src.http_retry import aiohttp_retry_get
 
 # Diplomacy
 from src.diplomacy.agent import DiplomacyAgent
@@ -195,6 +196,7 @@ class GameOrchestrator:
         self._discovered_turn: int | None = None  # cached turn from probe
         self._current_strategy: TurnStrategy | None = None  # agent's turn strategy
         self._incoming_messages_this_turn: list[dict] = []  # firewall-processed inbound messages
+        self._turn_degraded: bool = False  # True when we can't serve (skip bidding)
 
     async def start(self):
         """Initialise and start the game agent."""
@@ -484,48 +486,82 @@ class GameOrchestrator:
         400 = outside window. The highest turn_id that returns 200 is the
         current turn (or current+1/+2, close enough).
 
+        Uses retry-aware GET to handle 429 rate-limits during probing.
+
         Returns discovered turn_id, or 1 as absolute last resort.
         """
-        import aiohttp
-
         if self._discovered_turn and self._discovered_turn > 0:
             return self._discovered_turn
 
         logger.info("Probing server to discover current turn_id...")
 
-        async with aiohttp.ClientSession() as session:
-            # Phase 1: exponential search to find upper bound
-            # Try 1, 2, 4, 8, 16, 32, 64... until we get 400
-            lo, hi = 1, 1
-            while hi <= 200:  # safety cap
-                url = f"{BASE_URL}/meals?turn_id={hi}&restaurant_id={TEAM_ID}"
-                try:
-                    async with session.get(url, headers=HEADERS) as resp:
-                        if resp.status == 200:
-                            lo = hi
-                            hi *= 2
-                        else:
-                            break
-                except Exception:
-                    break
+        # Phase 1: exponential search to find upper bound
+        # Try 1, 2, 4, 8, 16, 32, 64... until we get 400
+        lo, hi = 1, 1
+        while hi <= 200:  # safety cap
+            url = f"{BASE_URL}/meals?turn_id={hi}&restaurant_id={TEAM_ID}"
+            resp = await aiohttp_retry_get(
+                url, headers=HEADERS, max_retries=3,
+                label=f"probe_turn_{hi}",
+            )
+            if resp and resp.status == 200:
+                lo = hi
+                hi *= 2
+            else:
+                break
 
-            # Phase 2: binary search between lo and hi
-            while lo < hi:
-                mid = (lo + hi + 1) // 2
-                url = f"{BASE_URL}/meals?turn_id={mid}&restaurant_id={TEAM_ID}"
-                try:
-                    async with session.get(url, headers=HEADERS) as resp:
-                        if resp.status == 200:
-                            lo = mid
-                        else:
-                            hi = mid - 1
-                except Exception:
-                    hi = mid - 1
+        # Phase 2: binary search between lo and hi
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            url = f"{BASE_URL}/meals?turn_id={mid}&restaurant_id={TEAM_ID}"
+            resp = await aiohttp_retry_get(
+                url, headers=HEADERS, max_retries=3,
+                label=f"probe_turn_{mid}",
+            )
+            if resp and resp.status == 200:
+                lo = mid
+            else:
+                hi = mid - 1
 
-            self._discovered_turn = lo
-            logger.info(f"Discovered current turn_id={lo}")
-            self.phase_router.current_turn = lo
-            return lo
+        self._discovered_turn = lo
+        logger.info(f"Discovered current turn_id={lo}")
+        self.phase_router.current_turn = lo
+        return lo
+
+    async def _validate_meals_access(self, turn_id: int) -> bool:
+        """Check if GET /meals works for this turn_id.
+
+        Returns True if the server responds 200, meaning we can poll for
+        customer orders during the serving phase.  Returns False on any
+        error (400 invalid turn, timeout, etc.) — the caller should close
+        the restaurant to avoid credibility damage.
+
+        429 rate-limits are retried automatically via aiohttp_retry_get.
+        """
+        import aiohttp
+
+        url = f"{BASE_URL}/meals?turn_id={turn_id}&restaurant_id={TEAM_ID}"
+        try:
+            resp = await aiohttp_retry_get(
+                url, headers=HEADERS,
+                timeout=aiohttp.ClientTimeout(total=15),
+                label=f"validate_meals_t{turn_id}",
+            )
+            if resp is None:
+                logger.warning(f"Meals access check FAILED (turn_id={turn_id}): no response after retries")
+                return False
+            if resp.status == 200:
+                logger.info(f"Meals access check OK (turn_id={turn_id})")
+                return True
+            body = await resp.text()
+            logger.warning(
+                f"Meals access check FAILED: HTTP {resp.status} "
+                f"(turn_id={turn_id}): {body[:200]}"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"Meals access check FAILED (turn_id={turn_id}): {e}")
+            return False
 
     async def _build_skill_context(
         self,
@@ -641,6 +677,33 @@ class GameOrchestrator:
         self.phase_router._first_phase_received = True
         self.phase_router.phase_start_time = time.time()
 
+        # ── EARLY TURN CHECK: validate we can serve this turn ──
+        # If GET /meals fails for our turn_id, we won't be able to serve
+        # clients later.  Close the restaurant NOW to avoid bidding costs
+        # and reputation damage from customers seeing an open restaurant
+        # that never serves them.
+        can_serve = await self._validate_meals_access(turn_id)
+        if not can_serve:
+            logger.warning(
+                f"⚠ EARLY TURN CHECK FAILED: cannot access GET /meals for turn {turn_id}. "
+                f"Closing restaurant to avoid credibility damage."
+            )
+            try:
+                await _checked_mcp_call(
+                    self.mcp_client,
+                    "update_restaurant_is_open",
+                    {"is_open": False},
+                    logger=logger,
+                )
+                logger.info("Restaurant closed preemptively — skipping this turn")
+            except Exception as e:
+                logger.error(f"Failed to close restaurant preemptively: {e}")
+            # Still dispatch speaking phase for intelligence gathering,
+            # but mark the turn as degraded so we don't waste money bidding
+            self._turn_degraded = True
+        else:
+            self._turn_degraded = False
+
         speaking_data = dict(data)
         speaking_data["phase"] = "speaking"
         speaking_data["turn_id"] = turn_id
@@ -747,11 +810,19 @@ class GameOrchestrator:
 
         Normal flow: compute + submit bids
         Mid-turn: quick intel → zone → menu → bids (catch-up)
+        Degraded turn: skip bidding entirely to save money
         """
         turn_id = data.get("turn_id", self.phase_router.current_turn)
         is_mid = data.get("is_mid_turn_entry", False)
         tag = "[CLOSED_BID/MID-TURN]" if is_mid else "[CLOSED_BID]"
         logger.info(f"{tag} Turn {turn_id}")
+
+        if self._turn_degraded:
+            logger.warning(
+                f"{tag} Turn {turn_id} — DEGRADED (no meals access). "
+                f"Skipping bids to save money."
+            )
+            return
 
         ctx = await self._build_skill_context(data)
         results = await self.skill_orchestrator.execute_for_phase(ctx)
@@ -762,12 +833,16 @@ class GameOrchestrator:
         Waiting phase handler.
 
         Normal flow: verify inventory → finalize menu → market → open → prep
-        Mid-turn: quick intel → zone → verify → menu → market → open → prep
+        Degraded turn: skip everything — we're already closed
         """
         turn_id = data.get("turn_id", self.phase_router.current_turn)
         is_mid = data.get("is_mid_turn_entry", False)
         tag = "[WAITING/MID-TURN]" if is_mid else "[WAITING]"
         logger.info(f"{tag} Turn {turn_id}")
+
+        if self._turn_degraded:
+            logger.warning(f"{tag} Turn {turn_id} — DEGRADED. Skipping wait phase.")
+            return
 
         ctx = await self._build_skill_context(data)
         results = await self.skill_orchestrator.execute_for_phase(ctx)
@@ -779,11 +854,18 @@ class GameOrchestrator:
 
         Normal flow: log serving start, clients handled by SSE events
         Mid-turn: check readiness → emergency menu → open → start serving
+        Degraded turn: skip serving — restaurant already closed
         """
         turn_id = data.get("turn_id", self.phase_router.current_turn)
         is_mid = data.get("is_mid_turn_entry", False)
         tag = "[SERVING/MID-TURN]" if is_mid else "[SERVING]"
         logger.info(f"{tag} Turn {turn_id}")
+
+        if self._turn_degraded:
+            logger.warning(
+                f"{tag} Turn {turn_id} — DEGRADED. Restaurant closed, skipping serving."
+            )
+            return
 
         ctx = await self._build_skill_context(data)
         results = await self.skill_orchestrator.execute_for_phase(ctx)
@@ -978,16 +1060,15 @@ class GameOrchestrator:
         and builds minimal competitor context for zone selection.
         """
         try:
-            import aiohttp
-
             # Fetch all restaurants for basic competitor awareness
             url = f"{BASE_URL}/restaurants"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=HEADERS) as resp:
-                    if resp.status == 200:
-                        restaurants = await resp.json()
-                    else:
-                        restaurants = []
+            resp = await aiohttp_retry_get(
+                url, headers=HEADERS, label="quick_intel_restaurants",
+            )
+            if resp and resp.status == 200:
+                restaurants = await resp.json()
+            else:
+                restaurants = []
 
             # Build minimal intel from restaurant overview
             all_states = {}
@@ -1803,19 +1884,18 @@ class GameOrchestrator:
     async def _skill_info_gather(self, ctx: SkillContext) -> SkillResult:
         """Gather observable info for next turn planning."""
         try:
-            import aiohttp
-
             # Fetch bid history for this turn
             url = f"{BASE_URL}/bid_history?turn_id={ctx.turn_id}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=HEADERS) as resp:
-                    if resp.status == 200:
-                        bid_history = await resp.json()
-                        logger.info(
-                            f"Bid history: {len(bid_history)} entries for turn {ctx.turn_id}"
-                        )
-                    else:
-                        bid_history = []
+            resp = await aiohttp_retry_get(
+                url, headers=HEADERS, label=f"info_gather_bids_t{ctx.turn_id}",
+            )
+            if resp and resp.status == 200:
+                bid_history = await resp.json()
+                logger.info(
+                    f"Bid history: {len(bid_history)} entries for turn {ctx.turn_id}"
+                )
+            else:
+                bid_history = []
 
             # Feed to intelligence for next turn
             if bid_history:

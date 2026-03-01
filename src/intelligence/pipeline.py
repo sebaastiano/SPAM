@@ -318,6 +318,7 @@ class IntelligencePipeline:
         recipe_db: dict | None = None,
         competitor_memory: CompetitorMemory | None = None,
     ):
+        self._team_id = TEAM_ID
         # Core processing objects (shared across components by reference)
         self.data_collector = DataCollectorModule(bridge=bridge)
         self.state_builder = CompetitorStateBuilder(recipe_db=recipe_db or {})
@@ -461,14 +462,65 @@ class IntelligencePipeline:
         # ── Persist vectors for dashboard visualization ──
         try:
             from src.intelligence.vector_store import save_turn_vectors
+
+            # Build name map from competitor states
             names = {}
             for rid, state in all_states.items():
                 if hasattr(state, 'name'):
                     names[rid] = state.name
+
+            # ── Include our own team in the vector space ──
+            # We skip ourselves in the analysis pipeline (briefings, clusters,
+            # strategy inference) to avoid circular reasoning, but we DO want
+            # to appear in the visualisation so we can see our position
+            # relative to competitors and zone centroids.
+            viz_features = dict(features)   # copy — don't mutate pipeline output
+            viz_embeddings = dict(result["embeddings"])
+
+            raw_data = dag_result.get("data_collector") or {}
+            our_rdata = (raw_data.get("all_restaurants") or {}).get(
+                str(self._team_id), (raw_data.get("all_restaurants") or {}).get(self._team_id)
+            )
+            if our_rdata is not None:
+                # Build a lightweight CompetitorTurnState for ourselves
+                our_state = CompetitorTurnState(
+                    restaurant_id=self._team_id,
+                    turn_id=turn_id,
+                    name=our_rdata.get("name", f"Team {self._team_id}"),
+                    balance=our_rdata.get("balance", 0),
+                    inventory=our_rdata.get("inventory", {}),
+                    reputation=our_rdata.get("reputation", 100.0),
+                    is_open=our_rdata.get("isOpen", False),
+                )
+                # Parse menu
+                raw_menu = our_rdata.get("menu", {})
+                if isinstance(raw_menu, dict):
+                    for item in raw_menu.get("items", []):
+                        if isinstance(item, dict) and "name" in item:
+                            our_state.menu[item["name"]] = item.get("price", 0)
+                elif isinstance(raw_menu, list):
+                    for item in raw_menu:
+                        if isinstance(item, dict) and "name" in item:
+                            our_state.menu[item["name"]] = item.get("price", 0)
+
+                # Parse bids
+                raw_bids = raw_data.get("bids", [])
+                for bid in raw_bids:
+                    if bid.get("restaurant_id") in (self._team_id, str(self._team_id)):
+                        our_state.bids.append(bid)
+                        our_state.bid_ingredients.add(bid.get("ingredient", ""))
+                        our_state.total_bid_spend += bid.get("price", 0) * bid.get("quantity", 0)
+
+                # Extract feature vector for ourselves
+                our_feat = extract_feature_vector(our_state, [], global_avg_price)
+                viz_features[self._team_id] = our_feat
+                names[self._team_id] = our_state.name
+                logger.debug(f"Added own team ({self._team_id}) to vectorspace visualization")
+
             save_turn_vectors(
                 turn_id=turn_id,
-                feature_vectors=features,
-                embeddings=result["embeddings"],
+                feature_vectors=viz_features,
+                embeddings=viz_embeddings,
                 trajectories=None,  # heavy, skip for now
                 restaurant_names=names,
             )
