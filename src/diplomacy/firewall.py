@@ -18,6 +18,46 @@ class TrustLevel(str, Enum):
     UNTRUSTED = "untrusted"
 
 
+# ── Prompt injection / social engineering indicators ──
+# These patterns detect messages designed to trick our LLM into
+# overriding its own instructions or treating attacker text as
+# authoritative system commands.
+INJECTION_PATTERNS: list[tuple[str, str]] = [
+    # Direct system-override attempts
+    (r"override\s+(di\s+)?sistema", "system_override"),
+    (r"system\s*override", "system_override"),
+    (r"avviso\s+urgente", "urgency_lure"),
+    (r"urgent\s+(notice|warning|alert)", "urgency_lure"),
+    # Impersonation of authority
+    (r"federazione\s+galattic", "authority_impersonation"),
+    (r"federation\s+(order|mandate|directive|notice)", "authority_impersonation"),
+    (r"ufficiale|official\s+notice", "authority_impersonation"),
+    (r"comunicazione\s+ufficiale", "authority_impersonation"),
+    (r"decreto|ordinanza|mandato", "authority_impersonation"),
+    # Prompt injection markers
+    (r"ignore\s+(previous|all|prior)\s+(instructions|prompts)", "prompt_injection"),
+    (r"ignora\s+(le\s+)?istruzioni\s+precedenti", "prompt_injection"),
+    (r"new\s+instructions?\s*:", "prompt_injection"),
+    (r"nuove\s+istruzioni\s*:", "prompt_injection"),
+    (r"you\s+are\s+now\s+a", "prompt_injection"),
+    (r"sei\s+ora\s+un", "prompt_injection"),
+    (r"act\s+as\s+if", "prompt_injection"),
+    (r"\bsystem\s*prompt\b", "prompt_injection"),
+    (r"\bsystem\s*message\b", "prompt_injection"),
+    # Role/identity hijacking
+    (r"\[system\]", "prompt_injection"),
+    (r"\[admin\]", "prompt_injection"),
+    (r"\[override\]", "prompt_injection"),
+    (r"<\s*system\s*>", "prompt_injection"),
+    # Manipulative urgency / scare tactics
+    (r"penalit[àa]|sanzione|sanction|penalty", "scare_tactic"),
+    (r"eliminat|disqualif|espuls", "scare_tactic"),
+    (r"obbligo|obbligator|mandatory", "scare_tactic"),
+    (r"dovete\s+(immediatamente|subito)", "scare_tactic"),
+    (r"you\s+must\s+immediately", "scare_tactic"),
+]
+
+
 class GroundTruthFirewall:
     """
     Only SERVER_SIGNED and SELF_GENERATED data passes through to ILP.
@@ -25,11 +65,13 @@ class GroundTruthFirewall:
     the decision engine directly.
 
     Cross-references claims against tracker observations.
+    Detects prompt injection and social engineering attacks.
     """
 
     def __init__(self, message_log=None):
         self.message_log = message_log
         self._untrusted_log: list[dict] = []
+        self._injection_log: list[dict] = []
 
     def validate_for_decisions(
         self, data: dict, trust_level: str
@@ -45,22 +87,63 @@ class GroundTruthFirewall:
         self._untrusted_log.append(data)
         logger.debug(f"Blocked untrusted data: {data.get('type', 'unknown')}")
 
+    def detect_injection(self, text: str) -> list[str]:
+        """
+        Scan a message for prompt-injection / social-engineering indicators.
+
+        Returns a list of triggered categories (empty = clean).
+        """
+        import re
+
+        triggered: list[str] = []
+        text_lower = text.lower()
+        for pattern, category in INJECTION_PATTERNS:
+            if re.search(pattern, text_lower):
+                if category not in triggered:
+                    triggered.append(category)
+        return triggered
+
     def process_incoming_message(self, message: dict) -> dict:
         """
         Incoming messages are processed for intelligence but NEVER
         enter the decision engine directly.
 
         Steps:
-        1. Log the message
-        2. Compare claims against our own observations
-        3. Update sender credibility score
-        4. If claims are verifiable via GET, verify them
+        1. Detect prompt injection / social engineering
+        2. Log the message
+        3. Compare claims against our own observations
+        4. Update sender credibility score
+        5. If claims are verifiable via GET, verify them
         """
         sender_id = message.get("senderId")
         sender_name = message.get("senderName", "Unknown")
         claim = message.get("text", "")
         timestamp = message.get("datetime", "")
         message_id = message.get("messageId", "")
+
+        # ── Injection / social-engineering scan ──
+        injection_flags = self.detect_injection(claim)
+        is_attack = len(injection_flags) > 0
+        if is_attack:
+            logger.warning(
+                f"⚠ INJECTION ATTACK detected from {sender_name} (id={sender_id})! "
+                f"Flags: {injection_flags}. "
+                f"Message (first 120 chars): '{claim[:120]}'"
+            )
+            self._injection_log.append({
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "flags": injection_flags,
+                "text_preview": claim[:200],
+                "datetime": timestamp,
+            })
+            # Severe credibility penalty — one attack ≈ permanent distrust
+            if self.message_log:
+                self.message_log.update_credibility(sender_id, -0.5)
+                logger.info(
+                    f"Credibility for {sender_name} (id={sender_id}) reduced to "
+                    f"{self.message_log.get_credibility(sender_id):.2f} (injection penalty)"
+                )
 
         # Record in message log
         if self.message_log:
@@ -84,6 +167,8 @@ class GroundTruthFirewall:
             "datetime": timestamp,
             "trust_level": TrustLevel.UNTRUSTED,
             "sender_credibility": credibility,
+            "is_injection_attack": is_attack,
+            "injection_flags": injection_flags,
         }
 
     def verify_claim_against_tracker(

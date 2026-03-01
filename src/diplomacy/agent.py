@@ -218,8 +218,8 @@ class DiplomacyAgent:
             result = await self.mcp_client.call_tool(
                 "send_message",
                 {
-                    "restaurantId": target_rid,
-                    "message": text,
+                    "recipient_id": target_rid,
+                    "text": text,
                 },
             )
             logger.debug(f"Message sent to {target_rid}: {result}")

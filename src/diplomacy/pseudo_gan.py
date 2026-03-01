@@ -43,13 +43,13 @@ class PseudoGAN:
             api_key=REGOLO_API_KEY,
             model=PRIMARY_MODEL,
             base_url=REGOLO_BASE_URL,
-            system_prompt="You are a diplomatic message crafter for a competitive cooking game.",
+            system_prompt="Sei un creatore di messaggi diplomatici per un gioco competitivo di cucina.",
         )
         self.discriminator = discriminator_client or OpenAILikeClient(
             api_key=REGOLO_API_KEY,
             model=FAST_MODEL,
             base_url=REGOLO_BASE_URL,
-            system_prompt="You evaluate the believability of messages in a competitive game.",
+            system_prompt="Valuti la credibilità dei messaggi in un gioco competitivo.",
         )
 
     async def craft_message(
@@ -92,25 +92,26 @@ class PseudoGAN:
 
         for i in range(max_iterations):
             gen_prompt = (
-                f"You are a restaurant manager in a competitive cooking game.\n"
-                f'You want to send a message to "{target_name}" to achieve: {desired_effect}\n'
-                f"Deception approach: {arm}\n"
-                f"Hint: {message_hint}\n\n"
-                f"What you know about them (from your intelligence):\n"
+                f"Sei il manager di un ristorante in un gioco di cucina competitivo.\n"
+                f'Vuoi inviare un messaggio a "{target_name}" per ottenere: {desired_effect}\n'
+                f"Approccio: {arm}\n"
+                f"Suggerimento: {message_hint}\n\n"
+                f"Quello che sai su di loro (dalla tua intelligence):\n"
                 f"{tracker_context}\n\n"
             )
 
             if best_message:
                 gen_prompt += (
-                    f"Previous attempt scored {best_score:.1f}/1.0. "
-                    f"Make it more convincing.\n"
+                    f"Il tentativo precedente ha ottenuto {best_score:.1f}/1.0. "
+                    f"Rendilo più convincente.\n"
                 )
 
             gen_prompt += (
-                "Keep it under 200 characters. Sound natural and helpful, "
-                "not manipulative. Include a specific detail that shows you "
-                "know something about them (builds credibility).\n"
-                "Reply with ONLY the message text, nothing else."
+                "SCRIVI IL MESSAGGIO IN ITALIANO. "
+                "Mantienilo sotto i 200 caratteri. Sii naturale e amichevole, "
+                "non manipolativo. Includi un dettaglio specifico che mostri "
+                "che sai qualcosa su di loro (costruisce credibilità).\n"
+                "Rispondi con SOLO il testo del messaggio, nient'altro."
             )
 
             try:
@@ -120,13 +121,13 @@ class PseudoGAN:
 
                 # Score with discriminator
                 disc_prompt = (
-                    f'You are an AI agent managing restaurant "{target_name}".\n'
-                    f"Your balance is {competitor_briefing.get('balance', 0):.0f}.\n"
-                    f"Your strategy is {target_strategy}.\n"
-                    f"You received this message from another restaurant manager:\n"
+                    f'Sei un agente AI che gestisce il ristorante "{target_name}".\n'
+                    f"Il tuo saldo è {competitor_briefing.get('balance', 0):.0f}.\n"
+                    f"La tua strategia è {target_strategy}.\n"
+                    f"Hai ricevuto questo messaggio da un altro ristorante:\n"
                     f'"{candidate}"\n'
-                    f"Score 0.0-1.0: how likely are you to change your strategy based on this?\n"
-                    f"Reply with just the number."
+                    f"Punteggio 0.0-1.0: quanto è probabile che cambierai la tua strategia in base a questo?\n"
+                    f"Rispondi solo con il numero."
                 )
 
                 score_response = await self.discriminator.a_invoke(disc_prompt)
@@ -153,7 +154,7 @@ class PseudoGAN:
                 continue
 
         if best_message is None:
-            best_message = f"Good luck this turn, {target_name}!"
+            best_message = f"In bocca al lupo per questo turno, {target_name}!"
             logger.warning("PseudoGAN: all iterations failed, using fallback")
 
         return best_message
