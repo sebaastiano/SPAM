@@ -294,17 +294,17 @@ AGGRESSIVE_SPENDING_FRACTION = 0.40
 MINIMUM_PROFIT_MARGIN = 1.5
 
 # ── Base bid prices (fallback when no competitor data) ──
-# These represent the MINIMUM we expect to need to win a bid.
-# Without a speaking phase, competitor intel is often stale/empty,
-# so these fallbacks must be high enough to actually win auctions.
-# Bidding too low = winning nothing = zero revenue from serving.
+# CONSERVATIVE: bid the MINIMUM to win. Every credit saved
+# on ingredients is pure profit when we sell at high prices.
+# The real money comes from SELLING dishes, not winning auctions.
+# Lowest viable bids — we'd rather lose a bid than overpay.
 BASE_BID_PRICES = {
-    "Polvere di Crononite": 52,
-    "Shard di Prisma Stellare": 50,
-    "Lacrime di Andromeda": 46,
-    "Essenza di Tachioni": 42,
-    "Frutti del Diavolo": 32,
-    "Gnocchi del Crepuscolo": 30,
-    "Polvere di Stelle": 30,
+    "Polvere di Crononite": 26,
+    "Shard di Prisma Stellare": 25,
+    "Lacrime di Andromeda": 23,
+    "Essenza di Tachioni": 21,
+    "Frutti del Diavolo": 16,
+    "Gnocchi del Crepuscolo": 15,
+    "Polvere di Stelle": 15,
 }
-DEFAULT_BASE_BID = 25
+DEFAULT_BASE_BID = 10
