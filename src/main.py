@@ -99,9 +99,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("spam.main")
 
-# ── Countdown config ──
-COUNTDOWN_LOG_INTERVAL = 15.0  # seconds between countdown log lines
-
 
 class GameOrchestrator:
     """
@@ -113,7 +110,6 @@ class GameOrchestrator:
       3. Route events to phase-specific handlers
       4. Each phase handler coordinates subsystems via SkillOrchestrator
       5. Mid-turn entry: detect skipped phases, run catch-up skills
-      6. Background countdown timer logs time remaining in each phase
     """
 
     def __init__(self):
@@ -190,7 +186,6 @@ class GameOrchestrator:
         self.recipe_db: dict[str, dict] = {}
         self._latest_intel: dict = {}
         self._running = False
-        self._countdown_task: asyncio.Task | None = None
         self._discovered_turn: int | None = None  # cached turn from probe
         self._current_strategy: TurnStrategy | None = None  # agent's turn strategy
 
@@ -237,9 +232,6 @@ class GameOrchestrator:
 
         # Wire event bus
         self._wire_events()
-
-        # Start countdown timer background task
-        self._countdown_task = asyncio.create_task(self._countdown_timer())
 
         # Connect SSE (runs forever)
         self._running = True
@@ -1817,70 +1809,6 @@ class GameOrchestrator:
                 except Exception as e:
                     logger.warning(f"Market SELL failed for {ing}: {e}")
 
-    # ══════════════════════════════════════════════════════════════
-    #  COUNTDOWN TIMER
-    # ══════════════════════════════════════════════════════════════
-
-    async def _countdown_timer(self):
-        """
-        Background task that periodically logs estimated time remaining
-        in the current phase and until the next turn.
-
-        Phase duration estimates are updated from observed transitions
-        (rolling average in PhaseRouter).
-        """
-        logger.info("Countdown timer started")
-        while self._running:
-            try:
-                await asyncio.sleep(COUNTDOWN_LOG_INTERVAL)
-
-                phase = self.phase_router.current_phase
-                if not phase:
-                    continue  # no active game
-
-                turn = self.phase_router.current_turn
-                elapsed = self.phase_router.elapsed_in_phase
-                remaining = self.phase_router.estimated_remaining
-                est_total = self.phase_router.estimated_durations.get(phase, 60)
-
-                # Format times
-                def fmt_time(s: float) -> str:
-                    m, sec = divmod(int(s), 60)
-                    return f"{m}m{sec:02d}s" if m > 0 else f"{sec}s"
-
-                # Compute time until next turn starts
-                # Sum remaining of current phase + all subsequent phases
-                from src.skills import PHASE_ORDER
-
-                if phase in PHASE_ORDER:
-                    idx = PHASE_ORDER.index(phase)
-                    remaining_phases = PHASE_ORDER[idx + 1:]
-                    time_to_next_turn = remaining
-                    for p in remaining_phases:
-                        time_to_next_turn += self.phase_router.estimated_durations.get(
-                            p, 60
-                        )
-                else:
-                    time_to_next_turn = remaining
-
-                # Build progress bar for phase
-                progress = min(1.0, elapsed / max(est_total, 1))
-                bar_len = 20
-                filled = int(bar_len * progress)
-                bar = "█" * filled + "░" * (bar_len - filled)
-
-                logger.info(
-                    f"⏱ Turn {turn} | {phase.upper()} "
-                    f"[{bar}] {fmt_time(elapsed)}/{fmt_time(est_total)} "
-                    f"(~{fmt_time(remaining)} left) | "
-                    f"Next turn in ~{fmt_time(time_to_next_turn)}"
-                )
-
-            except asyncio.CancelledError:
-                logger.info("Countdown timer stopped")
-                return
-            except Exception as e:
-                logger.debug(f"Countdown timer error: {e}")
 
 
 async def main():
@@ -1914,9 +1842,6 @@ async def _shutdown(orchestrator: GameOrchestrator):
     global _tracker_proc
     logger.info("Shutting down...")
     orchestrator._running = False
-    # Cancel countdown timer
-    if orchestrator._countdown_task:
-        orchestrator._countdown_task.cancel()
     # Allow pending tasks to complete
     await asyncio.sleep(0.5)
     # Terminate tracker sidecar if we launched it
