@@ -383,6 +383,14 @@ class IntelligencePipeline:
 
         logger.info("Intelligence DagPipeline built with 8 modules, 10 connections")
 
+        # Save zone centroids for dashboard visualization
+        try:
+            from src.intelligence.vector_store import save_zone_centroids
+            from src.decision.zone_selector import _ZONE_CENTROIDS
+            save_zone_centroids(_ZONE_CENTROIDS)
+        except Exception as e:
+            logger.debug(f"Zone centroid save skipped: {e}")
+
     async def run(self, turn_id: int) -> dict:
         """
         Run the full intelligence pipeline for a given turn.
@@ -449,6 +457,23 @@ class IntelligencePipeline:
             "all_states": all_states,
             "global_avg_price": global_avg_price,
         }
+
+        # ── Persist vectors for dashboard visualization ──
+        try:
+            from src.intelligence.vector_store import save_turn_vectors
+            names = {}
+            for rid, state in all_states.items():
+                if hasattr(state, 'name'):
+                    names[rid] = state.name
+            save_turn_vectors(
+                turn_id=turn_id,
+                feature_vectors=features,
+                embeddings=result["embeddings"],
+                trajectories=None,  # heavy, skip for now
+                restaurant_names=names,
+            )
+        except Exception as e:
+            logger.debug(f"Vector store save skipped: {e}")
 
         logger.info(
             f"Intelligence: {len(briefings)} competitors analyzed, "

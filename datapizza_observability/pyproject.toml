@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datapizza-ai-observability-vectorspace"
+version = "0.1.0"
+description = "Agent decision-making observability through latent space trajectories — a datapizza-ai kernel extension"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Team SPAM!", email = "team17@hackapizza.dev"},
+]
+keywords = [
+    "datapizza", "observability", "agents", "vector-space",
+    "trajectories", "visualization", "multi-agent", "AI",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = [
+    "datapizza-ai-core>=0.0.9",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dashboard = ["flask>=3.0"]
+umap = ["umap-learn>=0.5"]
+all = [
+    "datapizza-ai-observability-vectorspace[dashboard,umap]",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.urls]
+Homepage = "https://github.com/datapizza/datapizza-ai-observability-vectorspace"
+Documentation = "https://docs.datapizza.ai/extensions/observability-vectorspace"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["datapizza.*"]

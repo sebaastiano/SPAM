@@ -48,11 +48,15 @@ class DiplomacyAgent:
         turn_id: int = 0,
     ) -> list[dict]:
         """
-        Execute a full diplomacy turn:
-        1. Select targets and strategies (bandit)
-        2. Craft messages (PseudoGAN)
-        3. Send messages via MCP
+        Execute a full diplomacy turn (speaking phase ONLY):
+        1. Select targets and strategies (bandit + alliance heuristics)
+        2. Craft messages (PseudoGAN generator + discriminator loop)
+        3. Send messages via MCP send_message
         4. Record for reward tracking
+
+        Alliance logic: briefings marked with alliance_candidate=True
+        (set by the orchestrator based on incoming message analysis)
+        get preferential alliance_offer treatment.
 
         Returns list of sent message records.
         """

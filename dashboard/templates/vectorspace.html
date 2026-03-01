@@ -1,0 +1,722 @@
+{% extends "base.html" %} {% block title %}Vector Space — SPAM! Dashboard{%
+endblock %} {% block head %}
+<style>
+  #vs-canvas {
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    cursor: crosshair;
+  }
+  .vs-controls {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .vs-legend {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+  }
+  .vs-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .vs-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .vs-centroid-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    display: inline-block;
+    border: 2px solid #fff;
+  }
+  .tooltip-card {
+    position: absolute;
+    background: rgba(30, 30, 50, 0.95);
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 0.75rem;
+    font-size: 0.8rem;
+    pointer-events: none;
+    z-index: 100;
+    max-width: 320px;
+    display: none;
+  }
+  .feature-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 2px 0;
+  }
+  .feature-bar-label {
+    width: 100px;
+    text-align: right;
+    font-size: 0.7rem;
+    color: #aaa;
+  }
+  .feature-bar-fill {
+    height: 8px;
+    border-radius: 3px;
+    min-width: 2px;
+  }
+  .turn-slider {
+    width: 200px;
+  }
+  #trail-toggle {
+    cursor: pointer;
+  }
+</style>
+{% endblock %} {% block content %}
+<div class="row mb-3">
+  <div class="col">
+    <h4>
+      <i class="bi bi-diagram-3-fill text-info me-2"></i>Vector Space
+      Visualization
+    </h4>
+    <p class="text-muted small mb-2">
+      PCA projection of 14-dimensional competitor behavioral feature vectors.
+      Each dot is a restaurant; squares are zone centroids.
+    </p>
+  </div>
+</div>
+
+<div class="row mb-3">
+  <div class="col">
+    <div class="vs-controls">
+      <div>
+        <label class="form-label small mb-0">Turn:</label>
+        <select
+          class="form-select form-select-sm"
+          id="turn-select"
+          style="width: 120px; display: inline-block"
+        >
+          <option value="latest">Latest</option>
+        </select>
+      </div>
+      <div class="form-check form-switch">
+        <input
+          class="form-check-input"
+          type="checkbox"
+          id="trail-toggle"
+          checked
+        />
+        <label class="form-check-label small" for="trail-toggle"
+          >Show trails</label
+        >
+      </div>
+      <div class="form-check form-switch">
+        <input
+          class="form-check-input"
+          type="checkbox"
+          id="centroid-toggle"
+          checked
+        />
+        <label class="form-check-label small" for="centroid-toggle"
+          >Show zone centroids</label
+        >
+      </div>
+      <div class="form-check form-switch">
+        <input
+          class="form-check-input"
+          type="checkbox"
+          id="labels-toggle"
+          checked
+        />
+        <label class="form-check-label small" for="labels-toggle"
+          >Show labels</label
+        >
+      </div>
+      <button class="btn btn-sm btn-outline-info" id="refresh-btn">
+        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="col-lg-9">
+    <canvas id="vs-canvas" width="900" height="600"></canvas>
+    <div class="tooltip-card" id="tooltip"></div>
+  </div>
+  <div class="col-lg-3">
+    <div class="card bg-dark border-secondary">
+      <div class="card-header">
+        <i class="bi bi-info-circle me-1"></i>Legend
+      </div>
+      <div class="card-body">
+        <h6 class="text-muted small">Zone Centroids</h6>
+        <div class="vs-legend flex-column" id="centroid-legend"></div>
+        <hr class="border-secondary" />
+        <h6 class="text-muted small">Restaurants</h6>
+        <div class="vs-legend flex-column" id="restaurant-legend"></div>
+        <hr class="border-secondary" />
+        <h6 class="text-muted small">PCA Info</h6>
+        <div id="pca-info" class="small text-muted"></div>
+      </div>
+    </div>
+    <div class="card bg-dark border-secondary mt-3">
+      <div class="card-header">
+        <i class="bi bi-bar-chart me-1"></i>Feature Radar
+      </div>
+      <div class="card-body">
+        <canvas id="radar-canvas" width="280" height="280"></canvas>
+        <div class="small text-muted mt-1" id="radar-label">
+          Hover over a restaurant to see its features
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %} {% block scripts %}
+<script>
+  const ZONE_COLORS = {
+    DIVERSIFIED: "#4ecdc4",
+    PREMIUM_MONOPOLIST: "#ff6b6b",
+    BUDGET_OPPORTUNIST: "#45b7d1",
+    NICHE_SPECIALIST: "#96ceb4",
+    SPEED_CONTENDER: "#ffeaa7",
+    MARKET_ARBITRAGEUR: "#dda0dd",
+  };
+
+  const TEAM_COLORS = {};
+  let colorIdx = 0;
+  const PALETTE = [
+    "#ff6b6b",
+    "#4ecdc4",
+    "#45b7d1",
+    "#96ceb4",
+    "#ffeaa7",
+    "#dda0dd",
+    "#f39c12",
+    "#e74c3c",
+    "#3498db",
+    "#2ecc71",
+    "#9b59b6",
+    "#1abc9c",
+    "#e67e22",
+    "#c0392b",
+    "#2980b9",
+    "#27ae60",
+    "#8e44ad",
+    "#16a085",
+    "#d35400",
+    "#7f8c8d",
+  ];
+
+  function getTeamColor(rid) {
+    if (!TEAM_COLORS[rid]) {
+      TEAM_COLORS[rid] = PALETTE[colorIdx % PALETTE.length];
+      colorIdx++;
+    }
+    return TEAM_COLORS[rid];
+  }
+
+  const OUR_TEAM_ID = "17";
+
+  let vsData = null;
+  let hoveredRid = null;
+
+  async function fetchData() {
+    try {
+      const resp = await fetch("/api/vectorspace");
+      vsData = await resp.json();
+      populateTurnSelect();
+      render();
+    } catch (e) {
+      console.error("Failed to fetch vector data:", e);
+    }
+  }
+
+  function populateTurnSelect() {
+    const sel = document.getElementById("turn-select");
+    const currentVal = sel.value;
+    sel.innerHTML = '<option value="latest">Latest</option>';
+    if (!vsData || !vsData.turns) return;
+    const turns = Object.keys(vsData.turns).sort(
+      (a, b) => parseInt(a) - parseInt(b),
+    );
+    turns.forEach((t) => {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = `Turn ${t}`;
+      sel.appendChild(opt);
+    });
+    sel.value = currentVal;
+  }
+
+  function getSelectedTurn() {
+    const sel = document.getElementById("turn-select");
+    if (!vsData || !vsData.turns) return null;
+    const turns = Object.keys(vsData.turns).sort(
+      (a, b) => parseInt(a) - parseInt(b),
+    );
+    if (!turns.length) return null;
+    if (sel.value === "latest") return turns[turns.length - 1];
+    return sel.value;
+  }
+
+  function render() {
+    const canvas = document.getElementById("vs-canvas");
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width,
+      H = canvas.height;
+    const pad = 60;
+
+    ctx.clearRect(0, 0, W, H);
+
+    if (!vsData || !vsData.turns || Object.keys(vsData.turns).length === 0) {
+      ctx.fillStyle = "#888";
+      ctx.font = "16px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(
+        "No vector data yet. Run the intelligence pipeline first.",
+        W / 2,
+        H / 2,
+      );
+      return;
+    }
+
+    const selectedTurn = getSelectedTurn();
+    if (!selectedTurn) return;
+
+    const turnData = vsData.turns[selectedTurn];
+    const centroids = vsData.zone_centroids || {};
+    const showTrails = document.getElementById("trail-toggle").checked;
+    const showCentroids = document.getElementById("centroid-toggle").checked;
+    const showLabels = document.getElementById("labels-toggle").checked;
+
+    // Collect all points for axis scaling
+    let allX = [],
+      allY = [];
+    for (const tid in vsData.turns) {
+      for (const rid in vsData.turns[tid]) {
+        allX.push(vsData.turns[tid][rid].x);
+        allY.push(vsData.turns[tid][rid].y);
+      }
+    }
+    for (const z in centroids) {
+      allX.push(centroids[z].x);
+      allY.push(centroids[z].y);
+    }
+
+    if (!allX.length) return;
+
+    const xMin = Math.min(...allX) - 0.1;
+    const xMax = Math.max(...allX) + 0.1;
+    const yMin = Math.min(...allY) - 0.1;
+    const yMax = Math.max(...allY) + 0.1;
+
+    function toCanvas(px, py) {
+      const x = pad + ((px - xMin) / (xMax - xMin)) * (W - 2 * pad);
+      const y = H - pad - ((py - yMin) / (yMax - yMin)) * (H - 2 * pad);
+      return [x, y];
+    }
+
+    // Draw grid
+    ctx.strokeStyle = "#2a2a4a";
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 10; i++) {
+      const gx = pad + (i / 10) * (W - 2 * pad);
+      ctx.beginPath();
+      ctx.moveTo(gx, pad);
+      ctx.lineTo(gx, H - pad);
+      ctx.stroke();
+      const gy = pad + (i / 10) * (H - 2 * pad);
+      ctx.beginPath();
+      ctx.moveTo(pad, gy);
+      ctx.lineTo(W - pad, gy);
+      ctx.stroke();
+    }
+
+    // Axes labels
+    ctx.fillStyle = "#888";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("PC1", W / 2, H - 10);
+    ctx.save();
+    ctx.translate(15, H / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("PC2", 0, 0);
+    ctx.restore();
+
+    // Draw zone centroids
+    if (showCentroids) {
+      for (const zone in centroids) {
+        const [cx, cy] = toCanvas(centroids[zone].x, centroids[zone].y);
+        const color = ZONE_COLORS[zone] || "#888";
+
+        // Zone region (faint circle)
+        ctx.beginPath();
+        ctx.arc(cx, cy, 40, 0, Math.PI * 2);
+        ctx.fillStyle = color + "15";
+        ctx.fill();
+        ctx.strokeStyle = color + "40";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Centroid square
+        ctx.fillStyle = color;
+        ctx.fillRect(cx - 7, cy - 7, 14, 14);
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 7, cy - 7, 14, 14);
+
+        if (showLabels) {
+          ctx.fillStyle = color;
+          ctx.font = "bold 9px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(zone.substring(0, 8), cx, cy - 14);
+        }
+      }
+    }
+
+    // Draw trails (previous turn positions)
+    if (showTrails) {
+      const turns = Object.keys(vsData.turns).sort(
+        (a, b) => parseInt(a) - parseInt(b),
+      );
+      const selIdx = turns.indexOf(selectedTurn);
+      const trailTurns = turns.slice(Math.max(0, selIdx - 5), selIdx);
+
+      for (const rid in turnData) {
+        const color = rid === OUR_TEAM_ID ? "#ffd700" : getTeamColor(rid);
+        let prevPoint = null;
+
+        for (const tid of trailTurns) {
+          if (vsData.turns[tid] && vsData.turns[tid][rid]) {
+            const pt = vsData.turns[tid][rid];
+            const [px, py] = toCanvas(pt.x, pt.y);
+            const alpha =
+              0.15 + 0.15 * (trailTurns.indexOf(tid) / trailTurns.length);
+
+            if (prevPoint) {
+              ctx.beginPath();
+              ctx.moveTo(prevPoint[0], prevPoint[1]);
+              ctx.lineTo(px, py);
+              ctx.strokeStyle =
+                color +
+                Math.round(alpha * 255)
+                  .toString(16)
+                  .padStart(2, "0");
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
+
+            ctx.beginPath();
+            ctx.arc(px, py, 3, 0, Math.PI * 2);
+            ctx.fillStyle =
+              color +
+              Math.round(alpha * 255)
+                .toString(16)
+                .padStart(2, "0");
+            ctx.fill();
+
+            prevPoint = [px, py];
+          }
+        }
+
+        // Trail line to current position
+        if (prevPoint) {
+          const [cx, cy] = toCanvas(turnData[rid].x, turnData[rid].y);
+          ctx.beginPath();
+          ctx.moveTo(prevPoint[0], prevPoint[1]);
+          ctx.lineTo(cx, cy);
+          ctx.strokeStyle = color + "60";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    }
+
+    // Draw current turn restaurants
+    const restaurantLegendEl = document.getElementById("restaurant-legend");
+    restaurantLegendEl.innerHTML = "";
+
+    for (const rid in turnData) {
+      const pt = turnData[rid];
+      const [cx, cy] = toCanvas(pt.x, pt.y);
+      const isUs = rid === OUR_TEAM_ID;
+      const color = isUs ? "#ffd700" : getTeamColor(rid);
+      const radius = isUs ? 10 : 7;
+      const isHovered = hoveredRid === rid;
+
+      // Glow for our team
+      if (isUs) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffd70030";
+        ctx.fill();
+      }
+
+      // Hover highlight
+      if (isHovered) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Dot
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      if (isUs) {
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Label
+      if (showLabels) {
+        ctx.fillStyle = isUs ? "#ffd700" : "#ccc";
+        ctx.font = isUs ? "bold 11px monospace" : "10px monospace";
+        ctx.textAlign = "left";
+        const label = pt.name || `Team ${rid}`;
+        ctx.fillText(isUs ? `★ ${label}` : label, cx + radius + 4, cy + 4);
+      }
+
+      // Legend entry
+      const legendItem = document.createElement("div");
+      legendItem.className = "vs-legend-item";
+      legendItem.innerHTML = `<span class="vs-dot" style="background:${color}${isUs ? ";border:2px solid #fff" : ""}"></span>
+      <span${isUs ? ' class="text-warning fw-bold"' : ""}>${pt.name || "Team " + rid}${isUs ? " (US)" : ""}</span>`;
+      restaurantLegendEl.appendChild(legendItem);
+    }
+
+    // Centroid legend
+    const centroidLegendEl = document.getElementById("centroid-legend");
+    centroidLegendEl.innerHTML = "";
+    for (const zone in ZONE_COLORS) {
+      const item = document.createElement("div");
+      item.className = "vs-legend-item";
+      item.innerHTML = `<span class="vs-centroid-dot" style="background:${ZONE_COLORS[zone]}"></span>
+      <span>${zone}</span>`;
+      centroidLegendEl.appendChild(item);
+    }
+
+    // PCA info
+    const pcaInfoEl = document.getElementById("pca-info");
+    if (vsData.variance_explained) {
+      const [v1, v2] = vsData.variance_explained;
+      pcaInfoEl.innerHTML = `PC1 explains ${(v1 * 100).toFixed(1)}% variance<br>
+      PC2 explains ${(v2 * 100).toFixed(1)}% variance<br>
+      Total: ${((v1 + v2) * 100).toFixed(1)}%<br>
+      <small>Turn: ${selectedTurn}</small>`;
+    }
+  }
+
+  function drawRadar(features, labels, name) {
+    const canvas = document.getElementById("radar-canvas");
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width,
+      H = canvas.height;
+    const cx = W / 2,
+      cy = H / 2;
+    const R = Math.min(W, H) / 2 - 30;
+
+    ctx.clearRect(0, 0, W, H);
+
+    if (!features || !labels || features.length === 0) return;
+
+    const n = Math.min(features.length, labels.length);
+
+    // Normalize features to [0, 1]
+    const maxVals = [0.5, 1, 1, 15, 3, 1, 0.5, 1, 2, 500, 5, 1, 1, 25];
+    const normalized = features.map((v, i) =>
+      Math.min(1, Math.max(0, v / (maxVals[i] || 1))),
+    );
+
+    // Draw grid rings
+    for (let ring = 1; ring <= 4; ring++) {
+      const r = (ring / 4) * R;
+      ctx.beginPath();
+      for (let i = 0; i <= n; i++) {
+        const angle = (2 * Math.PI * (i % n)) / n - Math.PI / 2;
+        const x = cx + r * Math.cos(angle);
+        const y = cy + r * Math.sin(angle);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+
+    // Draw axis lines + labels
+    for (let i = 0; i < n; i++) {
+      const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+      const x = cx + R * Math.cos(angle);
+      const y = cy + R * Math.sin(angle);
+
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(x, y);
+      ctx.strokeStyle = "#444";
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+
+      // Label
+      const lx = cx + (R + 18) * Math.cos(angle);
+      const ly = cy + (R + 18) * Math.sin(angle);
+      ctx.fillStyle = "#888";
+      ctx.font = "7px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const shortLabel = (labels[i] || "").replace(/_/g, " ").substring(0, 8);
+      ctx.fillText(shortLabel, lx, ly);
+    }
+
+    // Draw data polygon
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const angle = (2 * Math.PI * (i % n)) / n - Math.PI / 2;
+      const r = normalized[i % n] * R;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.fillStyle = "#4ecdc440";
+    ctx.fill();
+    ctx.strokeStyle = "#4ecdc4";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Data points
+    for (let i = 0; i < n; i++) {
+      const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+      const r = normalized[i] * R;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "#4ecdc4";
+      ctx.fill();
+    }
+
+    // Label
+    document.getElementById("radar-label").textContent = name || "";
+  }
+
+  // Mouse hover for tooltips
+  const canvas = document.getElementById("vs-canvas");
+  const tooltip = document.getElementById("tooltip");
+
+  canvas.addEventListener("mousemove", (e) => {
+    if (!vsData || !vsData.turns) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const W = canvas.width,
+      H = canvas.height;
+    const pad = 60;
+
+    const selectedTurn = getSelectedTurn();
+    if (!selectedTurn || !vsData.turns[selectedTurn]) return;
+    const turnData = vsData.turns[selectedTurn];
+    const centroids = vsData.zone_centroids || {};
+
+    // Compute scaling (same as render)
+    let allX = [],
+      allY = [];
+    for (const tid in vsData.turns) {
+      for (const rid in vsData.turns[tid]) {
+        allX.push(vsData.turns[tid][rid].x);
+        allY.push(vsData.turns[tid][rid].y);
+      }
+    }
+    for (const z in centroids) {
+      allX.push(centroids[z].x);
+      allY.push(centroids[z].y);
+    }
+    if (!allX.length) return;
+
+    const xMin = Math.min(...allX) - 0.1,
+      xMax = Math.max(...allX) + 0.1;
+    const yMin = Math.min(...allY) - 0.1,
+      yMax = Math.max(...allY) + 0.1;
+
+    let closest = null,
+      minDist = 20;
+    for (const rid in turnData) {
+      const pt = turnData[rid];
+      const cx = pad + ((pt.x - xMin) / (xMax - xMin)) * (W - 2 * pad);
+      const cy = H - pad - ((pt.y - yMin) / (yMax - yMin)) * (H - 2 * pad);
+      const d = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
+      if (d < minDist) {
+        minDist = d;
+        closest = { rid, ...pt };
+      }
+    }
+
+    if (closest) {
+      hoveredRid = closest.rid;
+
+      // Build feature bars
+      const labels = vsData.feature_labels || [];
+      const features = closest.features || [];
+      const maxVals = [0.5, 1, 1, 15, 3, 1, 0.5, 1, 2, 500, 5, 1, 1, 25];
+      let barsHtml = "";
+      for (let i = 0; i < features.length && i < labels.length; i++) {
+        const pct = Math.min(100, (features[i] / (maxVals[i] || 1)) * 100);
+        const color = pct > 70 ? "#ff6b6b" : pct > 40 ? "#ffeaa7" : "#4ecdc4";
+        barsHtml += `<div class="feature-bar">
+        <span class="feature-bar-label">${labels[i]}</span>
+        <div style="width:100px;background:#333;border-radius:3px;overflow:hidden;">
+          <div class="feature-bar-fill" style="width:${pct}%;background:${color};"></div>
+        </div>
+        <span style="font-size:0.7rem;color:#aaa;width:40px;">${features[i].toFixed(2)}</span>
+      </div>`;
+      }
+
+      tooltip.innerHTML = `<strong style="color:${closest.rid === OUR_TEAM_ID ? "#ffd700" : getTeamColor(closest.rid)}">${closest.name}</strong>
+      <span class="text-muted small"> (ID ${closest.rid})</span>
+      <div class="mt-1">${barsHtml}</div>`;
+      tooltip.style.display = "block";
+      tooltip.style.left = e.clientX + 15 + "px";
+      tooltip.style.top = e.clientY - 10 + "px";
+
+      // Update radar
+      drawRadar(features, labels, closest.name);
+
+      render(); // re-render to show hover highlight
+    } else {
+      if (hoveredRid) {
+        hoveredRid = null;
+        tooltip.style.display = "none";
+        render();
+      }
+    }
+  });
+
+  canvas.addEventListener("mouseleave", () => {
+    hoveredRid = null;
+    tooltip.style.display = "none";
+    render();
+  });
+
+  // Controls
+  document.getElementById("turn-select").addEventListener("change", render);
+  document.getElementById("trail-toggle").addEventListener("change", render);
+  document.getElementById("centroid-toggle").addEventListener("change", render);
+  document.getElementById("labels-toggle").addEventListener("change", render);
+  document.getElementById("refresh-btn").addEventListener("click", fetchData);
+
+  // Auto-refresh every 15s
+  setInterval(fetchData, 15000);
+
+  // Initial load
+  fetchData();
+</script>
+{% endblock %}

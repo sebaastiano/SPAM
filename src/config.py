@@ -138,8 +138,12 @@ ZONE_SYSTEM_PROMPTS = {
         "Menu size: LARGE (12-20 dishes) to maximize choice and customer attraction.\n"
         "Bidding priority: Diverse ingredients for broad menu coverage.\n"
         "Risk tolerance: Moderate — invest in variety, not luxury.\n"
-        "Key principle: MAX CUSTOMERS through MAX CHOICE. Every archetype should "
-        "find something appealing and affordable on our menu."
+        "PROFIT RULE: MINIMIZE bid spending. Only bid on ingredients you NEED for cookable "
+        "recipes. Every credit saved on bids is pure profit. Target spending < 20% of balance.\n"
+        "VECTOR INTELLIGENCE: Use competitor behavioral signatures to find demand gaps. "
+        "If competitors have high bid_aggressiveness, avoid bidding wars — let them overpay. "
+        "If a competitor has high specialization_depth, avoid their niche.\n"
+        "Key principle: MAX PROFIT through MAX CHOICE with MIN COST."
     ),
     "PREMIUM_MONOPOLIST": (
         "You are managing a premium galactic restaurant.\n"
@@ -149,7 +153,9 @@ ZONE_SYSTEM_PROMPTS = {
         "Bidding priority: High-Δ ingredients (Polvere di Crononite, Shard di Prisma Stellare, "
         "Lacrime di Andromeda, Essenza di Tachioni).\n"
         "Risk tolerance: Accept negative immediate margin if prestige gain > 5.\n"
-        "Key principle: Serve quality fast. Never miss a client."
+        "PROFIT RULE: Premium dishes have high margins. Bid only on premium ingredients "
+        "where competitor bid_concentration is low — find gaps in the vector space.\n"
+        "Key principle: Serve quality fast. High margin per dish beats volume."
     ),
     "BUDGET_OPPORTUNIST": (
         "You are managing a high-volume budget restaurant.\n"
@@ -158,27 +164,35 @@ ZONE_SYSTEM_PROMPTS = {
         "Recipe focus: Prestige 23-60, prep time ≤ 5s, minimal ingredients.\n"
         "Bidding priority: Common ingredients at lowest possible price.\n"
         "Risk tolerance: Avoid all negative margins. Volume > prestige.\n"
-        "Key principle: Serve many clients fast. Throughput is revenue."
+        "PROFIT RULE: NEVER overbid. Budget dishes have thin margins — every credit of "
+        "bid cost matters. Target bid prices < 15 credits per ingredient.\n"
+        "Key principle: Serve many clients fast. Throughput times margin is profit."
     ),
     "NICHE_SPECIALIST": (
         "You are managing a niche specialist restaurant.\n"
         "Target clients: One specific archetype (determined at runtime).\n"
         "Price strategy: Archetype-optimal pricing.\n"
         "Recipe focus: Archetype-specific prestige range.\n"
-        "Key principle: Own one niche completely."
+        "PROFIT RULE: Use vector space intelligence to identify which archetype niche "
+        "has the LEAST competitor coverage. Dominate that niche with minimal bid spending.\n"
+        "Key principle: Own one niche completely at lowest cost."
     ),
     "SPEED_CONTENDER": (
         "You are managing a speed-focused restaurant.\n"
         "Target clients: All archetypes (speed wins).\n"
         "Price strategy: Moderate pricing.\n"
         "Recipe focus: Prestige 50-80, ALL recipes with prep time ≤ 5s.\n"
-        "Key principle: Serve the most clients in the serving window."
+        "PROFIT RULE: Fast dishes require fewer ingredients. Keep bids minimal — "
+        "your advantage is SPEED, not ingredient quality.\n"
+        "Key principle: Serve the most clients in the serving window at lowest ingredient cost."
     ),
     "MARKET_ARBITRAGEUR": (
         "You are managing a trade-focused operation.\n"
         "Minimal menu (1-2 dishes).\n"
         "Focus: Exploit ingredient price spreads between buy/sell listings.\n"
-        "Key principle: Profit from market inefficiencies."
+        "PROFIT RULE: Only enter trades with positive expected value. Use competitor "
+        "buy_sell_ratio and market_activity features to identify mispriced ingredients.\n"
+        "Key principle: Profit from market inefficiencies with zero risk."
     ),
 }
 

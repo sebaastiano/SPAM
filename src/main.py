@@ -193,6 +193,7 @@ class GameOrchestrator:
         self._countdown_task: asyncio.Task | None = None
         self._discovered_turn: int | None = None  # cached turn from probe
         self._current_strategy: TurnStrategy | None = None  # agent's turn strategy
+        self._incoming_messages_this_turn: list[dict] = []  # firewall-processed inbound messages
 
     async def start(self):
         """Initialise and start the game agent."""
@@ -353,8 +354,8 @@ class GameOrchestrator:
         # ── Diplomacy ──
         so.register(Skill(
             name="diplomacy_send",
-            description="Run diplomacy turn (messages, deception)",
-            valid_phases={"speaking", "closed_bid", "waiting", "serving"},
+            description="Run diplomacy turn (messages, deception) — speaking phase ONLY",
+            valid_phases={"speaking"},
             priority=50,
             execute_fn=self._skill_diplomacy_send,
         ))
@@ -591,6 +592,7 @@ class GameOrchestrator:
             our_state=our_state,
             menu_set=menu_set,
             restaurant_open=restaurant_open,
+            incoming_messages=list(self._incoming_messages_this_turn),
         )
 
     # ══════════════════════════════════════════════════════════════
@@ -664,6 +666,7 @@ class GameOrchestrator:
         logger.info(f"Turn change: {turn_id}")
         self.game_state.new_turn(turn_id)
         self.skill_orchestrator.new_turn()
+        self._incoming_messages_this_turn.clear()  # fresh message buffer for new turn
 
     # ── Client / Serving Events ──
 
@@ -681,12 +684,32 @@ class GameOrchestrator:
         await self.serving.handle_preparation_complete(data)
 
     async def _handle_new_message(self, data: dict):
-        """Handle new_message SSE event — process through diplomacy firewall."""
-        processed = self.diplomacy.process_incoming_message(data)
+        """Handle new_message SSE event — process through diplomacy firewall.
+
+        Processed messages are stored so the strategy agent can reason about
+        them during the speaking phase.  Messages are NEVER trusted blindly:
+        the firewall assigns credibility and injection flags, and the agent
+        decides how (or whether) to incorporate the information.
+        """
+        # Get competitor state for claim verification
+        sender_id = data.get("senderId")
+        competitor_state = None
+        if sender_id and self._latest_intel:
+            competitor_state = self._latest_intel.get("all_states", {}).get(sender_id)
+
+        processed = self.diplomacy.process_incoming_message(
+            data, competitor_state=competitor_state,
+        )
+
+        # Store for agent context (speaking phase diplomacy skill will consume these)
+        self._incoming_messages_this_turn.append(processed)
+
+        # Log with trust assessment
+        trust_tag = "⚠ INJECTION" if processed.get("is_injection_attack") else ""
         logger.info(
-            f"Message from {processed.get('sender_name', '?')}: "
-            f"'{processed.get('text', '')[:80]}' "
-            f"(credibility={processed.get('sender_credibility', 0):.2f})"
+            f"Message from {processed.get('sender_name', '?')} "
+            f"(cred={processed.get('sender_credibility', 0):.2f}): "
+            f"'{processed.get('text', '')[:80]}' {trust_tag}"
         )
 
     # ══════════════════════════════════════════════════════════════
@@ -699,6 +722,9 @@ class GameOrchestrator:
 
         Normal flow: intelligence → zone → menu → diplomacy
         Mid-turn: same (speaking is the earliest phase, no catch-up needed)
+
+        Agent skill filtering is applied here: the strategy agent decides
+        which optional skills (diplomacy_send, market_ops) to activate.
         """
         turn_id = data.get("turn_id", self.phase_router.current_turn)
         is_mid = data.get("is_mid_turn_entry", False)
@@ -706,7 +732,12 @@ class GameOrchestrator:
         logger.info(f"{tag} Turn {turn_id}")
 
         ctx = await self._build_skill_context(data)
-        results = await self.skill_orchestrator.execute_for_phase(ctx)
+        # Agent skill filtering: pass skills from current strategy
+        # (set by strategic_plan → strategic_refine during this execution)
+        agent_skills = None
+        if self._current_strategy and self._current_strategy.skills_to_activate:
+            agent_skills = self._current_strategy.skills_to_activate
+        results = await self.skill_orchestrator.execute_for_phase(ctx, agent_skills=agent_skills)
         self._log_skill_results(results)
 
     async def _phase_closed_bid(self, data: dict):
@@ -817,6 +848,9 @@ class GameOrchestrator:
                 menu_set=ctx.menu_set,
                 our_state=ctx.our_state,
                 phase=ctx.phase,
+                pnl_history=self.game_state.get_pnl_history(5),
+                feature_vectors=ctx.intel.get("features"),
+                trajectory_predictions=ctx.intel.get("trajectories"),
             )
             self._current_strategy = strategy
             logger.info(
@@ -825,7 +859,8 @@ class GameOrchestrator:
                 f"bid_aggr={strategy.bid_aggressiveness:.2f}, "
                 f"price={strategy.price_strategy}, "
                 f"diplo={strategy.diplomacy_priority}, "
-                f"confidence={strategy.confidence:.2f}"
+                f"confidence={strategy.confidence:.2f}, "
+                f"skills={strategy.skills_to_activate}"
             )
             if strategy.zone_reasoning:
                 logger.info(f"  Zone reasoning: {strategy.zone_reasoning[:120]}")
@@ -876,11 +911,15 @@ class GameOrchestrator:
                 menu_set=ctx.menu_set,
                 our_state=ctx.our_state,
                 phase=ctx.phase,
+                pnl_history=self.game_state.get_pnl_history(5),
+                feature_vectors=ctx.intel.get("features"),
+                trajectory_predictions=ctx.intel.get("trajectories"),
             )
             self._current_strategy = strategy
             logger.info(
                 f"Strategy refined with intel: zone={strategy.recommended_zone}, "
-                f"confidence={strategy.confidence:.2f}"
+                f"confidence={strategy.confidence:.2f}, "
+                f"skills={strategy.skills_to_activate}"
             )
             return SkillResult(
                 skill_name="strategic_refine", success=True,
@@ -1105,6 +1144,9 @@ class GameOrchestrator:
                     f"diversify={agent_guidance.get('diversify')}"
                 )
 
+            # Get P&L history for realistic spending decisions
+            pnl_history = self.game_state.get_pnl_history(5)
+
             decision = solve_zone_ilp(
                 zone=zone,
                 balance=ctx.balance,
@@ -1115,6 +1157,7 @@ class GameOrchestrator:
                 reputation=ctx.reputation,
                 spending_fraction=spending,
                 agent_guidance=agent_guidance,
+                pnl_history=pnl_history,
             )
 
             # ── Zone fallback: if primary zone yields empty menu in
@@ -1137,6 +1180,7 @@ class GameOrchestrator:
                         competitor_briefings=ctx.intel.get("briefings", {}),
                         reputation=ctx.reputation,
                         spending_fraction=0.0,
+                        pnl_history=pnl_history,
                     )
                     if decision.menu:
                         logger.info(
@@ -1216,10 +1260,48 @@ class GameOrchestrator:
             )
 
     async def _skill_diplomacy_send(self, ctx: SkillContext) -> SkillResult:
-        """Run diplomacy turn — guided by strategy agent."""
+        """Run diplomacy turn — guided by strategy agent.
+
+        Diplomacy runs ONLY in speaking phase.  The agent:
+        1. Reviews incoming messages (firewall-processed) to decide alliances/threats
+        2. Selects targets via DeceptionBandit (allies vs. threats)
+        3. Crafts messages via PseudoGAN generator+discriminator loop
+        4. Sends messages via MCP send_message
+        """
         try:
             briefings = ctx.intel.get("briefings", {})
             all_states = ctx.intel.get("all_states", {})
+
+            # Feed incoming messages to the diplomacy agent for context-aware decisions
+            # The agent sees WHO messaged us, their credibility, and whether it's an attack
+            if ctx.incoming_messages:
+                trusted_msgs = [
+                    m for m in ctx.incoming_messages
+                    if not m.get("is_injection_attack")
+                    and m.get("sender_credibility", 0) >= 0.45
+                ]
+                attack_msgs = [
+                    m for m in ctx.incoming_messages
+                    if m.get("is_injection_attack")
+                ]
+                logger.info(
+                    f"Diplomacy context: {len(ctx.incoming_messages)} inbound messages "
+                    f"({len(trusted_msgs)} above trust threshold, "
+                    f"{len(attack_msgs)} injection attacks blocked)"
+                )
+                # Boost alliance_offer priority for senders who seem friendly and
+                # share our competitive situation (similar zone / balance range)
+                for msg in trusted_msgs:
+                    sid = msg.get("sender_id")
+                    if sid and sid in briefings:
+                        brief = briefings[sid]
+                        # Friendly message + similar situation = alliance candidate
+                        if brief.get("threat_level", 1) < 0.4:
+                            brief["alliance_candidate"] = True
+                            logger.info(
+                                f"  Alliance candidate: {msg.get('sender_name')} "
+                                f"(cred={msg.get('sender_credibility', 0):.2f})"
+                            )
 
             # Consult strategy agent for diplomacy guidance
             diplomacy_guidance = None
@@ -1643,15 +1725,41 @@ class GameOrchestrator:
         try:
             our_state = ctx.our_state
             if our_state:
+                # Compute actual P&L for this turn
+                prev_snap = self.game_state.history[-1] if self.game_state.history else None
+                prev_balance = prev_snap.balance if prev_snap else 10000
+                current_balance = our_state.get("balance", 0)
+                balance_delta = current_balance - prev_balance
+
+                # Estimate bid cost from the latest decision
+                bid_cost = 0.0
+                latest_dec = getattr(self, "_latest_decision", None)
+                if latest_dec:
+                    bid_cost = getattr(latest_dec, "total_bid_cost", 0.0)
+
+                served_count = len(self.serving.served_this_turn)
+                # Revenue ≈ balance_delta + costs (we earned delta after spending)
+                estimated_revenue = max(0, balance_delta + bid_cost)
+                net_profit = balance_delta
+
                 current = RestaurantState(
                     turn_id=ctx.turn_id,
                     phase="stopped",
-                    balance=our_state.get("balance", 0),
+                    balance=current_balance,
                     inventory=our_state.get("inventory", {}),
                     reputation=our_state.get("reputation", 0),
                     menu=our_state.get("menu", []),
-                    clients_served=len(self.serving.served_this_turn),
-                    revenue_this_turn=0,
+                    clients_served=served_count,
+                    revenue_this_turn=estimated_revenue,
+                    bid_cost_this_turn=bid_cost,
+                    net_profit_this_turn=net_profit,
+                    menu_size_this_turn=len(self.serving.menu),
+                    zone_this_turn=self.subagent_router.active_zone,
+                )
+                logger.info(
+                    f"P&L Turn {ctx.turn_id}: "
+                    f"revenue≈{estimated_revenue:.0f}, bid_cost={bid_cost:.0f}, "
+                    f"net_profit={net_profit:+.0f}, served={served_count}"
                 )
                 self.game_state.snapshot(current)
 
@@ -1711,6 +1819,11 @@ class GameOrchestrator:
             # Feed to intelligence for next turn
             if bid_history:
                 self._latest_intel["bid_history"] = bid_history
+                # CRITICAL: Feed bid history back to data collector
+                # so next turn's feature extraction has it
+                self.intelligence.data_collector.feed_bid_history(
+                    ctx.turn_id, bid_history,
+                )
 
             return SkillResult(
                 skill_name="info_gather", success=True,

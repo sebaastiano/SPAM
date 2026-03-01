@@ -65,6 +65,7 @@ def solve_zone_ilp(
     reputation: float = 100.0,
     spending_fraction: float | None = None,
     agent_guidance: dict | None = None,
+    pnl_history: list[dict] | None = None,
 ) -> ZoneDecision:
     """
     Solve the zone-specific MILP for menu selection and bid allocation.
@@ -74,26 +75,28 @@ def solve_zone_ilp(
       x_i ∈ Z≥0    — quantity of ingredient i to bid on
 
     Objective (minimised by scipy):
-      min  -Σ_j(revenue_j · y_j) + Σ_i(bid_price_i · x_i)
+      min  -Σ_j(realistic_revenue_j · y_j) + Σ_i(bid_price_i · x_i)
 
     Subject to:
       menu_min ≤ Σ y_j ≤ menu_max                                      (C1)
       SERVINGS_BUFFER * Σ_j(need_{ij} · y_j) - x_i ≤ inventory_i  ∀ i  (C2)
       Σ_i(bid_price_i · x_i) ≤ budget                                  (C3)
+
+    REVENUE REALISM (new): The raw menu price is discounted by an
+    "order probability" factor based on:
+      - Historical avg revenue per client / dish price
+      - Menu competition (more items → each gets fewer orders)
+      - Client archetype distribution (budget vs premium)
+    This prevents the solver from thinking every dish = 1 guaranteed sale.
     """
     decision = ZoneDecision()
     decision.zone = zone
 
-    # ── Spending fraction: auto-select based on competition ──
+    # ── Spending fraction: P&L-aware auto-selection ──
     if spending_fraction is None:
-        active_competitors = sum(
-            1 for b in competitor_briefings.values()
-            if b.get("is_connected", False)
+        spending_fraction = _compute_smart_spending(
+            balance, competitor_briefings, pnl_history,
         )
-        if active_competitors >= 4:
-            spending_fraction = AGGRESSIVE_SPENDING_FRACTION
-        else:
-            spending_fraction = DEFAULT_SPENDING_FRACTION
 
     # ── Zone constraints (optionally overridden by agent guidance) ──
     prestige_min, prestige_max = ZONE_PRESTIGE_RANGE.get(zone, (0, 100))
@@ -155,12 +158,22 @@ def solve_zone_ilp(
             "undercut": agent_guidance.get("undercut", True),
         }
 
-    # ── Per-recipe revenue (price estimate) ──
-    revenues = np.array(
+    # ── Per-recipe revenue (REALISTIC: price × order probability) ──
+    raw_prices = np.array(
         [compute_menu_price(r, zone, reputation, competitor_briefings, agent_pricing)
          for r in eligible_recipes],
         dtype=float,
     )
+
+    # Discount prices by realistic order probability
+    # NOT every dish gets ordered. A menu of 15 dishes might see 3-8 orders
+    # total in a serving window. Each dish's "expected revenue" is:
+    #   price × P(ordered) where P depends on menu size, prestige tier, speed
+    menu_size_target = menu_max  # approximate final menu size
+    order_probabilities = _estimate_order_probabilities(
+        eligible_recipes, menu_size_target, reputation, competitor_briefings,
+    )
+    revenues = raw_prices * order_probabilities
 
     # ── Per-ingredient bid price ──
     bid_prices = np.array(
@@ -643,3 +656,151 @@ def compute_bid_price(
     bid = min(bid, MAX_BID_PER_INGREDIENT)
 
     return int(bid) + 1
+
+
+# ─────────────────────────────────────────────────────────────────
+# P&L-Aware Spending & Realistic Revenue Estimation
+# ─────────────────────────────────────────────────────────────────
+
+def _compute_smart_spending(
+    balance: float,
+    competitor_briefings: dict[int, dict],
+    pnl_history: list[dict] | None = None,
+) -> float:
+    """
+    Compute spending fraction using ACTUAL P&L history.
+
+    Instead of hardcoded 0.25/0.35, adapts based on:
+    - How much we actually earned vs. spent in recent turns
+    - Whether spending more led to more profit (or just more loss)
+    - Competition level (more competitors → need to bid more)
+    - Balance trend (declining → be conservative)
+
+    The goal: NEVER spend more than we can realistically earn back.
+    """
+    active_competitors = sum(
+        1 for b in competitor_briefings.values()
+        if b.get("is_connected", False)
+    )
+
+    # Base spending by competition level (conservative defaults)
+    if active_competitors == 0:
+        base = 0.10  # monopoly: barely spend anything
+    elif active_competitors <= 2:
+        base = 0.15
+    elif active_competitors <= 4:
+        base = 0.20
+    else:
+        base = 0.25
+
+    if not pnl_history or len(pnl_history) < 2:
+        return base
+
+    # Analyse recent P&L: are we profitable?
+    recent = pnl_history[-5:]
+    avg_delta = sum(p.get("balance_delta", 0) for p in recent) / len(recent)
+    avg_bid_cost = sum(p.get("bid_cost", 0) for p in recent) / len(recent)
+    avg_clients = sum(p.get("clients_served", 0) for p in recent) / len(recent)
+
+    # If we're losing money on average, cut spending aggressively
+    if avg_delta < -100:
+        # Losing money → spend less
+        reduction = min(0.10, abs(avg_delta) / 2000)
+        base = max(0.05, base - reduction)
+        logger.info(
+            f"P&L-aware spending: avg_delta={avg_delta:.0f} (losing), "
+            f"reducing to {base:.2f}"
+        )
+    elif avg_delta > 200:
+        # Profitable → can afford slightly more, but stay conservative
+        boost = min(0.05, avg_delta / 5000)
+        base = min(0.30, base + boost)
+        logger.info(
+            f"P&L-aware spending: avg_delta={avg_delta:.0f} (profitable), "
+            f"increasing to {base:.2f}"
+        )
+
+    # If we're spending a lot on bids but not getting clients, cut spending
+    if avg_bid_cost > 0 and avg_clients < 2:
+        base = max(0.05, base * 0.7)
+        logger.info(
+            f"P&L-aware: high bid cost ({avg_bid_cost:.0f}) but few clients "
+            f"({avg_clients:.1f}) → reducing to {base:.2f}"
+        )
+
+    # Never spend more than 30% even under pressure
+    return min(0.30, max(0.05, base))
+
+
+def _estimate_order_probabilities(
+    recipes: list[dict],
+    menu_size: int,
+    reputation: float,
+    competitor_briefings: dict[int, dict],
+) -> np.ndarray:
+    """
+    Estimate the probability that each dish gets at least one order.
+
+    Factors:
+    - Menu size: more items → each gets fewer orders (dilution)
+    - Prestige tier: mid-range dishes get ordered more (larger client pool)
+    - Speed: faster dishes can be served more times
+    - Competition: more competitors → fewer clients reach us
+
+    Returns array of probabilities [0, 1] for each recipe.
+    """
+    n = len(recipes)
+    if n == 0:
+        return np.array([])
+
+    active_competitors = sum(
+        1 for b in competitor_briefings.values()
+        if b.get("is_connected", False)
+    )
+
+    # Base order probability: assume ~5-10 clients per serving window total,
+    # split across N competitors. Each client orders 1 dish.
+    # So our restaurant might see 2-8 clients per turn.
+    total_clients_estimate = 8  # typical game clients per turn
+    our_share = 1.0 / max(active_competitors + 1, 1)
+    our_clients_estimate = total_clients_estimate * our_share
+
+    # Reputation bonus: higher rep → slightly more clients
+    rep_factor = 0.8 + (reputation / 100) * 0.4  # 0.8 to 1.2
+
+    expected_orders = our_clients_estimate * rep_factor
+
+    # Each dish's probability = expected_orders / menu_size (uniform-ish)
+    # but adjusted by prestige tier appeal
+    probs = np.zeros(n)
+    for i, recipe in enumerate(recipes):
+        prestige = recipe.get("prestige", 50)
+        prep_time = recipe.get("prep_time", 5.0)
+
+        # Prestige tier appeal: mid-range dishes appeal to more archetypes
+        if prestige <= 30:
+            tier_appeal = 0.7   # budget-only clients
+        elif prestige <= 60:
+            tier_appeal = 1.0   # broad appeal
+        elif prestige <= 80:
+            tier_appeal = 0.8   # fewer but richer clients
+        else:
+            tier_appeal = 0.5   # premium-only clients
+
+        # Speed bonus: faster dishes can be served more
+        speed_bonus = max(0.5, min(1.2, 1.0 - (prep_time - 5) / 20))
+
+        # Base probability for this dish
+        dish_prob = (expected_orders / max(menu_size, 1)) * tier_appeal * speed_bonus
+
+        # Cap at 1.0 — a dish can't be ordered more than once in our model
+        # (actually it can, but for spending decisions 1 order is conservative)
+        probs[i] = min(1.0, dish_prob)
+
+    # Ensure we're conservative overall: scale so total expected revenue
+    # roughly matches realistic expectations
+    total_expected = sum(probs)
+    if total_expected > expected_orders * 1.5:
+        probs *= (expected_orders * 1.5) / total_expected
+
+    return probs

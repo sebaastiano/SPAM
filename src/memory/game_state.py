@@ -25,6 +25,13 @@ class RestaurantState:
     revenue_this_turn: float = 0.0
     total_revenue: float = 0.0
     total_clients_served: int = 0
+    # P&L tracking
+    bid_cost_this_turn: float = 0.0
+    market_cost_this_turn: float = 0.0
+    market_income_this_turn: float = 0.0
+    net_profit_this_turn: float = 0.0
+    menu_size_this_turn: int = 0
+    zone_this_turn: str = ""
 
 
 class GameStateMemory:
@@ -103,6 +110,55 @@ class GameStateMemory:
         """Get reputation values over the last N turns."""
         return [s.reputation for s in self.history[-window:]]
 
+    def get_pnl_history(self, window: int = 10) -> list[dict]:
+        """Get per-turn P&L data for the last N turns.
+
+        Returns list of dicts with keys:
+          turn_id, balance, balance_delta, bid_cost, revenue,
+          net_profit, clients_served, menu_size, zone, reputation
+        """
+        snaps = self.history[-window:]
+        pnl = []
+        for i, s in enumerate(snaps):
+            prev_balance = snaps[i - 1].balance if i > 0 else s.balance
+            balance_delta = s.balance - prev_balance
+            pnl.append({
+                "turn_id": s.turn_id,
+                "balance": s.balance,
+                "balance_delta": balance_delta,
+                "bid_cost": s.bid_cost_this_turn,
+                "market_cost": s.market_cost_this_turn,
+                "market_income": s.market_income_this_turn,
+                "revenue": s.revenue_this_turn,
+                "net_profit": s.net_profit_this_turn,
+                "clients_served": s.clients_served,
+                "menu_size": s.menu_size_this_turn,
+                "zone": s.zone_this_turn,
+                "reputation": s.reputation,
+            })
+        return pnl
+
+    def get_avg_revenue_per_client(self, window: int = 5) -> float:
+        """Average revenue earned per client served (last N turns)."""
+        snaps = self.history[-window:]
+        total_rev = sum(s.revenue_this_turn for s in snaps)
+        total_clients = sum(s.clients_served for s in snaps)
+        return total_rev / max(total_clients, 1)
+
+    def get_avg_profit_per_turn(self, window: int = 5) -> float:
+        """Average net profit per turn (revenue - costs)."""
+        pnl = self.get_pnl_history(window)
+        if not pnl:
+            return 0.0
+        return sum(p["balance_delta"] for p in pnl) / len(pnl)
+
+    def get_spending_efficiency(self, window: int = 5) -> float:
+        """Ratio of revenue / total spending (bids + market). >1.0 = profitable."""
+        pnl = self.get_pnl_history(window)
+        total_spend = sum(p["bid_cost"] + p["market_cost"] for p in pnl)
+        total_rev = sum(p["balance_delta"] + p["bid_cost"] + p["market_cost"] for p in pnl)
+        return total_rev / max(total_spend, 1)
+
     def build_llm_context(self) -> str:
         """Build a concise context string for LLM agents."""
         s = self.current
@@ -119,6 +175,15 @@ class GameStateMemory:
             lines.append(
                 f"Last turn: balance Δ={s.balance - prev.balance:+.0f}, "
                 f"reputation Δ={s.reputation - prev.reputation:+.1f}"
+            )
+        # P&L summary
+        pnl = self.get_pnl_history(5)
+        if pnl:
+            avg_profit = self.get_avg_profit_per_turn(5)
+            efficiency = self.get_spending_efficiency(5)
+            lines.append(
+                f"Avg profit/turn (last 5): {avg_profit:+.0f} | "
+                f"Spending efficiency: {efficiency:.2f}x"
             )
         return "\n".join(lines)
 

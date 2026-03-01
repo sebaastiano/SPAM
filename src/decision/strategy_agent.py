@@ -69,6 +69,11 @@ class TurnStrategy:
     diplomacy_targets: list[int] = field(default_factory=list)
     diplomacy_reasoning: str = ""
 
+    # Skill activation (agent decides which skills to run)
+    skills_to_activate: list[str] = field(default_factory=lambda: [
+        "intelligence_scan", "zone_selection", "menu_planning", "menu_save",
+    ])
+
     # Overall confidence (how much to trust agent vs. algorithmic defaults)
     confidence: float = 0.5  # 0.0 = use defaults, 1.0 = fully trust agent
 
@@ -113,6 +118,9 @@ class StrategyAgent:
         menu_set: bool = False,
         our_state: dict | None = None,
         phase: str = "speaking",
+        pnl_history: list[dict] | None = None,
+        feature_vectors: dict | None = None,
+        trajectory_predictions: dict | None = None,
     ) -> TurnStrategy:
         """
         Generate a strategic plan for the entire turn.
@@ -133,6 +141,9 @@ class StrategyAgent:
                 intel=intel,
                 our_state=our_state,
                 phase=phase,
+                pnl_history=pnl_history,
+                feature_vectors=feature_vectors,
+                trajectory_predictions=trajectory_predictions,
             )
 
             prompt = self._build_strategy_prompt(context)
@@ -172,6 +183,7 @@ class StrategyAgent:
             "zone": strategy.recommended_zone,
             "menu_size": strategy.menu_target_size,
             "bid_aggr": strategy.bid_aggressiveness,
+            "skills": strategy.skills_to_activate,
         })
 
         return strategy
@@ -354,8 +366,11 @@ class StrategyAgent:
         intel: dict[str, Any],
         our_state: dict | None = None,
         phase: str = "speaking",
+        pnl_history: list[dict] | None = None,
+        feature_vectors: dict | None = None,
+        trajectory_predictions: dict | None = None,
     ) -> dict:
-        """Build a compact context dict for the LLM."""
+        """Build a compact context dict for the LLM, including P&L and vector space."""
         briefings = intel.get("briefings", {})
         active_competitors = sum(
             1 for b in briefings.values()
@@ -380,10 +395,10 @@ class StrategyAgent:
             ):
                 cookable += 1
 
-        # Competitor summary
+        # Competitor summary (enriched with vector + trajectory data)
         comp_summary = []
         for rid, b in briefings.items():
-            comp_summary.append({
+            entry = {
                 "id": rid,
                 "name": b.get("name", f"Team {rid}"),
                 "strategy": b.get("strategy", "UNKNOWN"),
@@ -393,12 +408,66 @@ class StrategyAgent:
                 "reputation": b.get("reputation", 0),
                 "balance": b.get("balance", 0),
                 "threat": b.get("threat_level", 0),
-            })
+            }
+            # Attach bid history from briefing if available
+            if b.get("recent_bids"):
+                entry["recent_bids"] = b["recent_bids"][-3:]  # last 3 turns
+            # Attach trajectory prediction if available
+            if trajectory_predictions and str(rid) in trajectory_predictions:
+                tp = trajectory_predictions[str(rid)]
+                entry["trajectory"] = {
+                    "predicted_direction": tp.get("direction", "stable"),
+                    "momentum": tp.get("momentum", 0),
+                }
+            comp_summary.append(entry)
 
         # History summary (what worked in past turns?)
-        history_summary = []
-        for h in self._turn_history[-5:]:  # last 5 turns
-            history_summary.append(h)
+        history_summary = list(self._turn_history[-5:])
+
+        # ── P&L summary ──
+        pnl_summary = {}
+        if pnl_history:
+            total_spent = sum(p.get("bid_cost", 0) + p.get("market_cost", 0) for p in pnl_history)
+            total_revenue = sum(p.get("market_income", 0) for p in pnl_history)
+            total_profit = sum(p.get("net_profit", 0) for p in pnl_history)
+            pnl_summary = {
+                "turns_tracked": len(pnl_history),
+                "total_spent": round(total_spent, 1),
+                "total_revenue": round(total_revenue, 1),
+                "total_profit": round(total_profit, 1),
+                "avg_profit_per_turn": round(total_profit / len(pnl_history), 1) if pnl_history else 0,
+                "last_turn": pnl_history[-1] if pnl_history else {},
+                "trend": "improving" if len(pnl_history) >= 2 and pnl_history[-1].get("net_profit", 0) > pnl_history[-2].get("net_profit", 0) else "declining" if len(pnl_history) >= 2 else "unknown",
+            }
+
+        # ── Vector space gap analysis ──
+        # Feature labels for interpretability
+        _FEAT_LABELS = [
+            "bid_aggr", "bid_conc", "bid_consist", "bid_vol",
+            "price_pos", "menu_stab", "spec_depth", "mkt_activity",
+            "buy_sell", "bal_growth", "rep_rate", "prestige_tgt",
+            "recipe_complex", "menu_size",
+        ]
+        gap_analysis = {}
+        if feature_vectors:
+            for rid, fv in feature_vectors.items():
+                if hasattr(fv, 'tolist'):
+                    fv = fv.tolist()
+                top_features = sorted(
+                    enumerate(fv), key=lambda x: abs(x[1]), reverse=True
+                )[:5]
+                gap_analysis[rid] = {
+                    _FEAT_LABELS[i]: round(v, 3) for i, v in top_features
+                }
+
+        # ── Demand forecast summary ──
+        demand_forecast = intel.get("demand_forecast", {})
+        top_demanded = []
+        if demand_forecast:
+            sorted_items = sorted(
+                demand_forecast.items(), key=lambda x: x[1], reverse=True
+            )[:8]
+            top_demanded = [{"ingredient": k, "demand_score": round(v, 2)} for k, v in sorted_items]
 
         return {
             "turn_id": turn_id,
@@ -418,20 +487,29 @@ class StrategyAgent:
                 max(prep_times) if prep_times else 15,
             ),
             "active_competitors": active_competitors,
-            "competitors": comp_summary[:10],  # top 10
+            "competitors": comp_summary[:10],
             "history": history_summary,
+            "pnl": pnl_summary,
+            "vector_gaps": gap_analysis,
+            "top_demanded": top_demanded,
         }
 
     def _build_strategy_prompt(self, context: dict) -> str:
-        """Build the strategy reasoning prompt for the LLM."""
+        """Build the strategy reasoning prompt for the LLM, including P&L and vector context."""
         competitors_text = ""
         for c in context.get("competitors", []):
             if c.get("connected"):
-                competitors_text += (
+                line = (
                     f"  - {c['name']} (ID {c['id']}): strategy={c['strategy']}, "
                     f"menu_size={c['menu_size']}, avg_price={c['avg_price']:.0f}, "
-                    f"reputation={c['reputation']}, threat={c['threat']:.2f}\n"
+                    f"reputation={c['reputation']}, threat={c['threat']:.2f}"
                 )
+                if c.get("trajectory"):
+                    t = c["trajectory"]
+                    line += f", direction={t['predicted_direction']}, momentum={t['momentum']:.2f}"
+                if c.get("recent_bids"):
+                    line += f", recent_bids={c['recent_bids']}"
+                competitors_text += line + "\n"
 
         history_text = ""
         for h in context.get("history", []):
@@ -439,6 +517,46 @@ class StrategyAgent:
                 f"  Turn {h['turn_id']}: zone={h['zone']}, "
                 f"menu_size={h['menu_size']}, bid_aggr={h['bid_aggr']:.2f}\n"
             )
+
+        # ── P&L section ──
+        pnl_text = ""
+        pnl = context.get("pnl", {})
+        if pnl:
+            pnl_text = f"""
+P&L PERFORMANCE (last {pnl.get('turns_tracked', 0)} turns):
+- Total spent: {pnl.get('total_spent', 0):.0f} credits
+- Total revenue: {pnl.get('total_revenue', 0):.0f} credits
+- Total profit: {pnl.get('total_profit', 0):.0f} credits
+- Avg profit/turn: {pnl.get('avg_profit_per_turn', 0):.0f} credits
+- Trend: {pnl.get('trend', 'unknown')}
+- Last turn: spent={pnl.get('last_turn', {}).get('bid_cost', 0):.0f}, revenue={pnl.get('last_turn', {}).get('market_income', 0):.0f}, profit={pnl.get('last_turn', {}).get('net_profit', 0):.0f}
+
+CRITICAL: If profit is negative or trending down, REDUCE bid_aggressiveness and INCREASE prices.
+If spending > revenue consistently, switch to a more conservative zone with lower bids.
+"""
+
+        # ── Vector space section ──
+        vector_text = ""
+        gaps = context.get("vector_gaps", {})
+        if gaps:
+            vector_text = "\nCOMPETITOR BEHAVIORAL SIGNATURES (top features per competitor):\n"
+            for rid, feats in list(gaps.items())[:6]:
+                feat_str = ", ".join(f"{k}={v}" for k, v in feats.items())
+                vector_text += f"  - Team {rid}: {feat_str}\n"
+            vector_text += (
+                "  Use these to identify where competition is weakest.\n"
+                "  High bid_aggr = aggressive bidder, high spec_depth = niche player.\n"
+                "  Look for underserved zones where no competitor has strong features.\n"
+            )
+
+        # ── Demand forecast section ──
+        demand_text = ""
+        top_demanded = context.get("top_demanded", [])
+        if top_demanded:
+            demand_text = "\nTOP DEMANDED INGREDIENTS:\n"
+            for d in top_demanded:
+                demand_text += f"  - {d['ingredient']}: demand_score={d['demand_score']}\n"
+            demand_text += "  Prioritize bidding on high-demand ingredients.\n"
 
         prompt = f"""You are the strategic brain of restaurant SPAM! (Team 17) in a competitive restaurant game.
 
@@ -449,13 +567,13 @@ CURRENT STATE (Turn {context['turn_id']}):
 - Cookable recipes (from inventory): {context['cookable_recipes']}/{context['total_recipes']}
 - Recipe prestige range: {context['prestige_range'][0]:.0f} - {context['prestige_range'][1]:.0f}
 - Active competitors: {context['active_competitors']}
-
+{pnl_text}
 COMPETITORS:
 {competitors_text if competitors_text else "  No active competitors detected."}
-
+{vector_text}
 PAST TURNS:
 {history_text if history_text else "  No history yet (first turn)."}
-
+{demand_text}
 CUSTOMER ARCHETYPES (all present in the game):
 - Esploratore Galattico: budget-conscious, max budget ~60 credits
 - Famiglie Orbitali: moderate budget, max ~150 credits
@@ -463,24 +581,30 @@ CUSTOMER ARCHETYPES (all present in the game):
 - Astrobarone: luxury spenders, max ~500 credits
 
 STRATEGIC PRIORITIES:
-1. MAXIMIZE REVENUE by serving the most customers possible
-2. Keep a LARGE, DIVERSE menu spanning ALL price tiers to attract ALL archetypes
-3. Keep expenses LOW — only bid what's necessary
-4. Price dishes REASONABLY — volume beats premium pricing
-5. Use diplomacy to create advantages, not waste time
+1. MAXIMIZE PROFIT (revenue minus costs). Revenue without profit is useless.
+2. MINIMIZE BID SPENDING — only bid what's necessary to win key ingredients
+3. Keep a LARGE, DIVERSE menu spanning ALL price tiers to attract ALL archetypes
+4. Price dishes to MAXIMIZE EXPECTED REVENUE (considering order probability at each price point)
+5. Use vector space intelligence to find competitive gaps and avoid direct conflicts
+6. Use diplomacy strategically to create advantages, not waste time
 
 AVAILABLE ZONES:
 - DIVERSIFIED: Targets ALL archetypes with a broad menu (15+ dishes). Best when you want maximum customer coverage.
-- PREMIUM_MONOPOLIST: High-prestige dishes for rich clients. Best when no competition.
+- PREMIUM_MONOPOLIST: High-prestige dishes for rich clients. Best when no competition in premium tier.
 - BUDGET_OPPORTUNIST: High-volume budget dishes. Best when budget gap exists.
 - SPEED_CONTENDER: Fast dishes across prestiges. Best when speed advantage matters.
 - NICHE_SPECIALIST: Focus on one underserved archetype.
 - MARKET_ARBITRAGEUR: Trade-focused, minimal menu.
 
+SKILLS YOU CAN ACTIVATE THIS TURN:
+You decide which skills run. At minimum, "intelligence_scan", "zone_selection", "menu_planning", "menu_save" should always run.
+Optional skills: "diplomacy_send" (send diplomatic messages), "market_ops" (buy/sell on market).
+During closed_bid phase: "bid_compute", "bid_submit" always run.
+
 Respond with a JSON object (no markdown, no explanation outside JSON):
 {{
   "recommended_zone": "DIVERSIFIED or one of the zones above",
-  "zone_reasoning": "brief reason for zone choice",
+  "zone_reasoning": "brief reason for zone choice, referencing P&L and vector data",
   "menu_target_size": 12-20,
   "menu_diversify": true or false,
   "menu_prestige_min": 15-40,
@@ -488,13 +612,14 @@ Respond with a JSON object (no markdown, no explanation outside JSON):
   "menu_max_prep_time": 8.0-15.0,
   "bid_aggressiveness": 0.0-1.0,
   "bid_priority_ingredients": ["top 3 ingredient names to prioritize"],
-  "bid_reasoning": "brief bid strategy",
+  "bid_reasoning": "brief bid strategy referencing P&L data and spending efficiency",
   "price_strategy": "volume_first or balanced or premium",
   "price_adjustment_factor": 0.8-1.2,
   "undercut_competitors": true or false,
   "diplomacy_priority": "aggressive or moderate or passive or silent",
   "diplomacy_targets": [competitor IDs to focus on],
   "diplomacy_reasoning": "brief diplomacy strategy",
+  "skills_to_activate": ["intelligence_scan", "zone_selection", "menu_planning", "menu_save", ...],
   "confidence": 0.3-0.9
 }}"""
 
@@ -577,6 +702,17 @@ Respond with a JSON object (no markdown, no explanation outside JSON):
                 strategy.diplomacy_priority = diplo
             strategy.diplomacy_targets = [int(t) for t in data.get("diplomacy_targets", []) if t][:5]
             strategy.diplomacy_reasoning = str(data.get("diplomacy_reasoning", ""))[:200]
+
+            # Parse skills to activate
+            requested_skills = data.get("skills_to_activate", [])
+            if isinstance(requested_skills, list) and requested_skills:
+                # Always include core skills
+                core = {"intelligence_scan", "zone_selection", "menu_planning", "menu_save"}
+                strategy.skills_to_activate = list(core | set(requested_skills))
+            else:
+                strategy.skills_to_activate = [
+                    "intelligence_scan", "zone_selection", "menu_planning", "menu_save",
+                ]
 
             # Confidence
             strategy.confidence = max(0.2, min(0.9, float(data.get("confidence", 0.5))))

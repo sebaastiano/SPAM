@@ -66,6 +66,7 @@ class SkillContext:
     our_state: dict = field(default_factory=dict)
     menu_set: bool = False  # whether a menu has been saved this turn
     restaurant_open: bool = False
+    incoming_messages: list[dict] = field(default_factory=list)  # firewall-processed messages this turn
 
 
 @dataclass
@@ -120,6 +121,7 @@ NORMAL_PHASE_SKILLS: dict[str, list[str]] = {
         "bid_submit",
         "menu_save",       # allowed in this phase
         "market_ops",
+        # diplomacy_send NOT allowed — messages only in speaking phase
     ],
     "waiting": [
         "inventory_verify",
@@ -229,13 +231,17 @@ class SkillOrchestrator:
         self.executed_this_turn.clear()
         self.results_this_turn.clear()
 
-    async def execute_for_phase(self, ctx: SkillContext) -> list[SkillResult]:
+    async def execute_for_phase(self, ctx: SkillContext, agent_skills: list[str] | None = None) -> list[SkillResult]:
         """
         Execute all applicable skills for the current phase context.
 
         Selects skills based on:
         - Normal flow: NORMAL_PHASE_SKILLS[phase]
         - Mid-turn: MID_TURN_CATCHUP_SKILLS[phase]
+
+        If agent_skills is provided, only skills in that list (plus core
+        always-run skills like strategic_plan/strategic_refine) will run.
+        This gives the strategy agent control over which optional skills execute.
 
         Respects priority ordering and dependency requirements.
         """
@@ -248,6 +254,23 @@ class SkillOrchestrator:
             )
         else:
             skill_names = NORMAL_PHASE_SKILLS.get(ctx.phase, [])
+
+        # Agent-driven skill filtering: if the agent specified which skills
+        # to activate, respect that — but always run core planning skills
+        # and phase-critical skills (bid_submit, menu_save, etc.)
+        _ALWAYS_RUN = {
+            "strategic_plan", "strategic_refine", "intelligence_scan",
+            "zone_selection", "menu_planning", "menu_save",
+            "bid_compute", "bid_submit", "restaurant_open",
+            "end_turn_snapshot", "info_gather", "serving_prep",
+            "serving_monitor", "close_decision", "inventory_verify",
+            "quick_intelligence", "emergency_menu",
+            "serving_readiness_check",
+        }
+        if agent_skills:
+            agent_set = set(agent_skills) | _ALWAYS_RUN
+            skill_names = [s for s in skill_names if s in agent_set]
+            logger.info(f"Agent filtered skills for {ctx.phase}: {skill_names}")
 
         # Resolve to Skill objects, filter already-executed + unregistered
         applicable: list[Skill] = []

@@ -98,7 +98,8 @@ class MessageLog:
         delta < 0: claim proven false
         """
         current = self._credibility.get(sender_id, 0.5)
-        self._credibility[sender_id] = max(0.0, min(1.0, current + delta * 0.1))
+        # Cap at 0.7 — we NEVER fully trust external senders
+        self._credibility[sender_id] = max(0.0, min(0.7, current + delta * 0.1))
 
     def messages_from(self, sender_id: int) -> list[MessageEntry]:
         """Get all messages from a specific sender."""
