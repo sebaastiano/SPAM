@@ -25,8 +25,11 @@ def compute_menu_prices(
     """
     Compute optimized prices for all menu items.
 
-    INTELLIGENCE-DRIVEN: uses competitor data when available.
-    When no competition: prices at archetype ceiling for max profit.
+    PROFIT-MAXIMISATION: price as HIGH as each archetype will tolerate.
+    - Astrobarone / Saggi del Cosmo don't care about price → MAX prices!
+    - Famiglie Orbitali are price-conscious → moderate-high
+    - Esploratori want cheap → keep accessible but still profitable
+    - When no competition: full monopoly pricing (no discounts at all)
     """
     target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
     if target_archetypes:
@@ -34,11 +37,10 @@ def compute_menu_prices(
     else:
         primary_archetype = "Famiglie Orbitali"
 
-    base_ceiling = ARCHETYPE_CEILINGS.get(primary_archetype, 120)
-    rep_mult = 1.0 + (reputation - 50) / 200
+    base_ceiling = ARCHETYPE_CEILINGS.get(primary_archetype, 150)
+    rep_mult = 1.0 + (reputation - 50) / 150
 
-    # Assess competition from intelligence — use CONNECTION STATUS
-    # (is_connected) instead of menu_size, which is 0 during speaking phase.
+    # Assess competition from intelligence
     active_competitors = 0
     if competitor_briefings:
         active_competitors = sum(
@@ -46,21 +48,24 @@ def compute_menu_prices(
             if b.get("is_connected", False)
         )
 
-    # When no competition, don't apply zone discount factor — price at ceiling
+    # When no competition, don't apply zone discount — monopoly pricing
     if active_competitors == 0:
         zone_factor = 1.0  # monopoly: full ceiling price
+        # For premium archetypes in monopoly, push even higher
+        if primary_archetype in ("Astrobarone", "Saggi del Cosmo"):
+            zone_factor = 1.15
     else:
-        zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.7)
+        zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.75)
 
     priced = []
     for item in menu_items:
         prestige = item.get("prestige", 50)
-        prestige_mult = 1.0 + (prestige - 50) / 200
+        prestige_mult = 1.0 + (prestige - 50) / 100  # stronger prestige effect
 
         price = int(base_ceiling * rep_mult * zone_factor * prestige_mult)
 
-        # Ensure price is within reasonable bounds
-        price = max(10, min(price, int(base_ceiling * 1.3)))
+        # Generous price bounds — let the rich pay!
+        price = max(15, min(price, int(base_ceiling * 2.0)))
 
         priced.append({
             "name": item["name"],
@@ -79,11 +84,11 @@ def adjust_prices_competitive(
     """
     Adjust prices based on competitor pricing and intelligence data.
 
-    When no active competitors: maintain ceiling prices (monopoly profit).
-    When competitors active: strategy-specific adjustment.
+    PROFIT-FIRST approach:
+    - When no active competitors: maintain ceiling prices (monopoly profit).
+    - When competitors active: stay above them for premium, mild undercut for budget.
+    - NEVER race to the bottom — our profit margin is sacred.
     """
-    # Check if there are actually active competitors — use CONNECTION
-    # STATUS, not menu_size (which is 0 during speaking phase).
     active_competitors = 0
     if competitor_briefings:
         active_competitors = sum(
@@ -106,12 +111,12 @@ def adjust_prices_competitive(
         price = item["price"]
 
         if zone == "BUDGET_OPPORTUNIST":
-            # Undercut competitors
-            price = min(price, int(avg_competitor * 0.85))
+            # Only undercut slightly — never destroy our own margins
+            price = min(price, int(avg_competitor * 0.92))
         elif zone == "PREMIUM_MONOPOLIST":
-            # Stay premium
-            price = max(price, int(avg_competitor * 1.1))
+            # Stay well ABOVE competitors — premium brand
+            price = max(price, int(avg_competitor * 1.20))
 
-        adjusted.append({"name": item["name"], "price": max(10, price)})
+        adjusted.append({"name": item["name"], "price": max(15, price)})
 
     return adjusted

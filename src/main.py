@@ -746,6 +746,10 @@ class GameOrchestrator:
         try:
             intel = await self.intelligence.run(ctx.turn_id)
             self._latest_intel = intel
+            # CRITICAL: update ctx.intel so downstream skills (zone, menu,
+            # diplomacy) see the freshly-gathered data instead of the stale
+            # empty dict that was snapshotted when the context was built.
+            ctx.intel = intel
 
             # Log connection-based competition awareness
             briefings = intel.get("briefings", {})
@@ -753,19 +757,24 @@ class GameOrchestrator:
                 1 for b in briefings.values()
                 if b.get("is_connected", False)
             )
+            non_dormant = sum(
+                1 for b in briefings.values()
+                if b.get("strategy") != "DORMANT"
+            )
             logger.info(
                 f"Intelligence: {len(briefings)} briefings, "
-                f"{connected_count} connected competitors, "
+                f"{connected_count} connected, {non_dormant} non-dormant, "
                 f"{len(intel.get('clusters', {}))} clusters"
             )
             return SkillResult(
                 skill_name="intelligence_scan",
                 success=True,
-                data={"briefings": len(intel.get("briefings", {}))},
+                data={"briefings": len(briefings)},
             )
         except Exception as e:
             logger.error(f"Intelligence pipeline failed: {e}", exc_info=True)
             self._latest_intel = {}
+            ctx.intel = {}
             return SkillResult(
                 skill_name="intelligence_scan", success=False, error=str(e)
             )
@@ -827,13 +836,17 @@ class GameOrchestrator:
                     "threat_level": 0.5,
                 }
 
-            self._latest_intel = {
+            quick_intel = {
                 "briefings": minimal_briefings,
                 "clusters": {},
                 "all_states": all_states,
                 "demand_forecast": {},
                 "features": {},
             }
+            self._latest_intel = quick_intel
+            # CRITICAL: propagate to ctx so downstream skills see the data
+            ctx.intel = quick_intel
+
             logger.info(
                 f"Quick intelligence: {len(all_states)} competitor states fetched, "
                 f"{len(minimal_briefings)} connection-based briefings generated"
@@ -846,6 +859,7 @@ class GameOrchestrator:
         except Exception as e:
             logger.warning(f"Quick intelligence failed: {e}")
             self._latest_intel = {}
+            ctx.intel = {}
             return SkillResult(
                 skill_name="quick_intelligence", success=False, error=str(e)
             )
@@ -878,10 +892,13 @@ class GameOrchestrator:
         """Compute menu via ILP solver."""
         try:
             zone = self.subagent_router.active_zone
-            spending = 0.0 if ctx.phase in ("waiting", "serving") else 0.4
+            # During waiting/serving, we can't bid anymore — spending=0.
+            # During speaking/closed_bid, let the ILP auto-select spending
+            # based on competition level (None = auto).
+            spending = 0.0 if ctx.phase in ("waiting", "serving") else None
             logger.info(
                 f"Menu planning: zone={zone}, phase={ctx.phase}, "
-                f"spending={spending}, balance={ctx.balance}, "
+                f"spending={'auto' if spending is None else spending}, balance={ctx.balance}, "
                 f"inventory_items={len(ctx.inventory)}, "
                 f"inventory_total={sum(ctx.inventory.values()) if ctx.inventory else 0}"
             )
@@ -992,12 +1009,25 @@ class GameOrchestrator:
     async def _skill_diplomacy_send(self, ctx: SkillContext) -> SkillResult:
         """Run diplomacy turn."""
         try:
+            briefings = ctx.intel.get("briefings", {})
+            all_states = ctx.intel.get("all_states", {})
+            logger.info(
+                f"Diplomacy input: {len(briefings)} briefings, "
+                f"{len(all_states)} competitor states available"
+            )
             sent = await self.diplomacy.run_diplomacy_turn(
-                competitor_briefings=ctx.intel.get("briefings", {}),
-                competitor_states=ctx.intel.get("all_states", {}),
+                competitor_briefings=briefings,
+                competitor_states=all_states,
                 turn_id=ctx.turn_id,
             )
-            logger.info(f"Diplomacy: sent {len(sent)} messages")
+            if sent:
+                for msg in sent:
+                    logger.info(
+                        f"  ✉ [{msg['arm']}] → {msg.get('target_name', msg['target_rid'])} "
+                        f"(effect={msg.get('desired_effect', '?')}): "
+                        f"'{msg['message'][:80]}'"
+                    )
+            logger.info(f"Diplomacy: sent {len(sent)} messages total")
             return SkillResult(
                 skill_name="diplomacy_send", success=True,
                 data={"messages_sent": len(sent)},
@@ -1009,22 +1039,27 @@ class GameOrchestrator:
             )
 
     async def _skill_bid_compute(self, ctx: SkillContext) -> SkillResult:
-        """Compute optimal bids via ILP."""
+        """Compute optimal bids via ILP — aggressive, value-aware bidding."""
         try:
             zone = self.subagent_router.active_zone
+            briefings = ctx.intel.get("briefings", {})
+            active = sum(1 for b in briefings.values() if b.get("is_connected", False))
             logger.info(
                 f"Bid compute: zone={zone}, balance={ctx.balance}, "
                 f"inventory={len(ctx.inventory)} types, "
-                f"recipes={len(ctx.recipes)}"
+                f"recipes={len(ctx.recipes)}, "
+                f"active_competitors={active}, spending=auto"
             )
+            # spending_fraction=None → ILP auto-selects based on competition
             decision = solve_zone_ilp(
                 zone=zone,
                 balance=ctx.balance,
                 inventory=ctx.inventory,
                 recipes=list(ctx.recipes.values()),
                 demand_forecast=ctx.intel.get("demand_forecast", {}),
-                competitor_briefings=ctx.intel.get("briefings", {}),
+                competitor_briefings=briefings,
                 reputation=ctx.reputation,
+                spending_fraction=None,
             )
             self._latest_decision = decision
             return SkillResult(
@@ -1436,17 +1471,18 @@ class GameOrchestrator:
         - BUY: ingredients we need for the menu but don't have enough of
         - SELL: ingredients we have surplus of (not needed by any menu recipe)
 
-        Prices are INTELLIGENCE-DRIVEN:
-        - Use competitor briefings to gauge demand
-        - When no competition is detected, use minimum prices (exploit monopoly)
-        - Never use wallet-based pricing
+        PROFIT-FIRST APPROACH:
+        - BUY at lowest possible price — every credit saved = pure profit
+        - SELL at high prices — extract maximum value from surplus
+        - Never overspend on market buys
         """
-        # Compute what the menu needs
+        # Compute what the menu needs (for SERVINGS_BUFFER servings each)
+        from src.config import SERVINGS_BUFFER
         needed: dict[str, int] = {}
         for item in verified_menu:
             recipe = self.recipe_db.get(item["name"], {})
             for ing, qty in recipe.get("ingredients", {}).items():
-                needed[ing] = needed.get(ing, 0) + qty
+                needed[ing] = needed.get(ing, 0) + qty * SERVINGS_BUFFER
 
         # Assess competition level from intelligence
         intel = self._latest_intel
@@ -1457,16 +1493,13 @@ class GameOrchestrator:
         )
         competition_level = min(1.0, active_competitors / 5.0)  # 0.0 = monopoly
 
-        # BUY: ingredients where inventory < needed
+        # BUY: ingredients where inventory < needed — at LOW prices
         for ing, need_qty in needed.items():
             have = inventory.get(ing, 0)
             deficit = need_qty - have
             if deficit > 0:
-                # Intelligence-driven buy price:
-                # - Base: 10 (minimum viable bid)
-                # - If competitors exist and want this ingredient, bid higher
-                # - If no competition: bid MINIMUM to maximize profit
-                base_price = 10
+                # Conservative buy: start very low, scale up only with competition
+                base_price = 8
                 if briefings:
                     from src.decision.ilp_solver import compute_bid_price
                     intel_price = compute_bid_price(
@@ -1474,12 +1507,12 @@ class GameOrchestrator:
                         briefings,
                         intel.get("demand_forecast", {}),
                     )
-                    # Scale by competition: no competition = use base, competition = use intel
-                    buy_price = int(base_price + (intel_price - base_price) * competition_level)
+                    # Only pay more if real competition demands it
+                    buy_price = int(base_price + (intel_price - base_price) * competition_level * 0.5)
                 else:
                     buy_price = base_price
 
-                buy_price = max(10, min(buy_price, 100))  # hard cap at 100
+                buy_price = max(8, min(buy_price, 100))  # tight cap
 
                 try:
                     await self.mcp_client.call_tool(
@@ -1495,12 +1528,14 @@ class GameOrchestrator:
                 except Exception as e:
                     logger.warning(f"Market BUY failed for {ing}: {e}")
 
-        # SELL: ingredients we have but no menu recipe uses
+        # SELL: ingredients we have but no menu recipe uses — at HIGH prices!
+        # These would expire anyway, so any sale is pure profit.
         needed_ings = set(needed.keys())
         for ing, qty in inventory.items():
             if ing not in needed_ings and qty > 0:
-                # Sell at a premium — let others pay more
-                sell_price = max(15, int(30 * (1 + competition_level)))
+                # Sell at aggressive markup — extract maximum value
+                # Higher prices when competition exists (others need ingredients)
+                sell_price = max(40, int(60 * (1 + competition_level * 1.5)))
                 try:
                     await self.mcp_client.call_tool(
                         "create_market_entry",

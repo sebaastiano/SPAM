@@ -146,7 +146,7 @@ def _estimate_zone_revenue(zone: str, reputation: float, balance: float) -> floa
     # Budget constraint
     budget_factor = min(1.0, balance / 5000)
 
-    return (avg_ceiling / 250) * rep_factor * budget_factor
+    return (avg_ceiling / 600) * rep_factor * budget_factor
 
 
 def _calculate_inventory_alignment(

@@ -114,6 +114,7 @@ class PseudoGAN:
             )
 
             try:
+                logger.info(f"  GAN iter {i+1}/{max_iterations}: generating message...")
                 response = await self.generator.a_invoke(gen_prompt)
                 candidate = response.text.strip().strip('"').strip("'")
 
@@ -135,9 +136,9 @@ class PseudoGAN:
                 except ValueError:
                     score = 0.3
 
-                logger.debug(
-                    f"PseudoGAN iteration {i+1}: score={score:.2f}, "
-                    f"msg='{candidate[:50]}...'"
+                logger.info(
+                    f"  GAN iter {i+1}/{max_iterations}: score={score:.2f}, "
+                    f"msg='{candidate[:60]}'"
                 )
 
                 if score > best_score:

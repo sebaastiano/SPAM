@@ -141,7 +141,9 @@ class TestDuplicateDishKey:
 class TestIngredientAccounting:
 
     @pytest.mark.asyncio
-    async def test_ingredient_exhaustion_redirects(self):
+    async def test_ingredient_exhaustion_skips_customer(self):
+        """When ingredients run out for matched dish, SKIP the customer
+        instead of serving a wrong dish (reputation protection)."""
         mcp = AsyncMock()
         mcp.call_tool = AsyncMock(return_value={"isError": False, "content": []})
         pipeline = make_pipeline(mcp)
@@ -160,9 +162,13 @@ class TestIngredientAccounting:
         await pipeline._serve_meal(meal_a, "m1")
         assert pipeline.metrics.preparations_started == 1
 
-        # Second client — ingredients insufficient → redirected to fallback
+        # Second client — ingredients insufficient → SKIP (not redirect!)
+        # Serving a wrong dish gets rejected and tanks reputation
         await pipeline._serve_meal(meal_b, "m2")
-        assert pipeline.metrics.preparations_started == 2
+        assert pipeline.metrics.preparations_started == 1, \
+            "Should NOT prepare a second dish when ingredients for matched dish are exhausted"
+        assert pipeline.metrics.clients_no_ingredients == 1, \
+            "Should count as no_ingredients skip"
 
         await pipeline.stop_serving()
 

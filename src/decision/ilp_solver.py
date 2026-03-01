@@ -32,6 +32,11 @@ from src.config import (
     ARCHETYPE_CEILINGS,
     ZONE_TARGET_ARCHETYPES,
     HIGH_DELTA_INGREDIENTS,
+    SERVINGS_BUFFER,
+    DEFAULT_SPENDING_FRACTION,
+    AGGRESSIVE_SPENDING_FRACTION,
+    BASE_BID_PRICES,
+    DEFAULT_BASE_BID,
 )
 
 logger = logging.getLogger("spam.decision.ilp_solver")
@@ -56,7 +61,7 @@ def solve_zone_ilp(
     demand_forecast: dict[str, float],
     competitor_briefings: dict[int, dict],
     reputation: float = 100.0,
-    spending_fraction: float = 0.6,
+    spending_fraction: float = None,
 ) -> ZoneDecision:
     """
     Solve the zone-specific MILP for menu selection and bid allocation.
@@ -70,11 +75,22 @@ def solve_zone_ilp(
 
     Subject to:
       menu_min ≤ Σ y_j ≤ menu_max                                      (C1)
-      Σ_j(need_{ij} · y_j) - x_i ≤ inventory_i   ∀ ingredient i       (C2)
+      SERVINGS_BUFFER * Σ_j(need_{ij} · y_j) - x_i ≤ inventory_i  ∀ i  (C2)
       Σ_i(bid_price_i · x_i) ≤ budget                                  (C3)
     """
     decision = ZoneDecision()
     decision.zone = zone
+
+    # ── Spending fraction: auto-select based on competition ──
+    if spending_fraction is None:
+        active_competitors = sum(
+            1 for b in competitor_briefings.values()
+            if b.get("is_connected", False)
+        )
+        if active_competitors >= 4:
+            spending_fraction = AGGRESSIVE_SPENDING_FRACTION
+        else:
+            spending_fraction = DEFAULT_SPENDING_FRACTION
 
     # ── Zone constraints ──
     prestige_min, prestige_max = ZONE_PRESTIGE_RANGE.get(zone, (0, 100))
@@ -119,10 +135,12 @@ def solve_zone_ilp(
     )
 
     # ── need matrix  need[i, j] = qty of ingredient i required by recipe j ──
+    # Multiply by SERVINGS_BUFFER: we need enough ingredients for multiple
+    # servings per dish (multiple customers may order the same dish).
     need = np.zeros((I, J), dtype=float)
     for j, recipe in enumerate(eligible_recipes):
         for ing, qty in recipe.get("ingredients", {}).items():
-            need[ing_idx[ing], j] = qty
+            need[ing_idx[ing], j] = qty * SERVINGS_BUFFER
 
     # ── Current inventory for each ingredient ──
     inv = np.array(
@@ -218,11 +236,12 @@ def solve_zone_ilp(
             })
 
     decision.total_bid_cost = float(bid_prices @ x_sol)
-    decision.expected_revenue = float(revenues @ y_sol) * 0.7
+    decision.expected_revenue = float(revenues @ y_sol)  # no discount — full revenue potential
 
     logger.info(
         f"MILP [{zone}]: {len(decision.menu)} menu items, "
-        f"{len(decision.bids)} bids, cost={decision.total_bid_cost:.0f}, "
+        f"{len(decision.bids)} bids (total_qty={sum(int(x) for x in x_sol)}), "
+        f"cost={decision.total_bid_cost:.0f}/{budget:.0f} budget, "
         f"expected_rev={decision.expected_revenue:.0f}"
     )
 
@@ -266,7 +285,8 @@ def _greedy_fallback(
         recipe = entry["recipe"]
         for ing, qty in recipe.get("ingredients", {}).items():
             current = inventory.get(ing, 0)
-            need = max(0, qty - current)
+            # Bid for SERVINGS_BUFFER servings, minus what we already have
+            need = max(0, qty * SERVINGS_BUFFER - current)
             needed_ingredients[ing] = needed_ingredients.get(ing, 0) + need
 
     budget = balance * spending_fraction
@@ -298,7 +318,7 @@ def _greedy_fallback(
     decision.total_bid_cost = total_bid_cost
     decision.expected_revenue = sum(
         item["price"] for item in decision.menu
-    ) * 0.7
+    )  # no discount — full revenue potential
 
     logger.info(
         f"Greedy [{zone}]: {len(decision.menu)} menu items, "
@@ -374,12 +394,12 @@ def compute_menu_price(
     """
     Compute menu price for a dish.
 
-    INTELLIGENCE-DRIVEN PRICING:
-    - Uses CONNECTION STATUS (is_connected) to detect active competitors,
-      NOT menu_size (which is 0 during speaking/closed_bid phases).
-    - When no competitors connected: price at ceiling (monopoly)
-    - When competitors connected: adjust relative to their pricing
-    - Always maximize revenue by pricing as high as customers will pay
+    PROFIT-MAXIMISATION PRICING:
+    - Astrobarone and Saggi del Cosmo do NOT care about price → charge maximum!
+    - Famiglie Orbitali are price-sensitive but tolerant → charge moderately high
+    - Esploratori want cheap → keep accessible but still profitable
+    - Every dish must generate maximum margin over ingredient cost
+    - NEVER cap prices below what the archetype will pay
     """
     target_archetypes = ZONE_TARGET_ARCHETYPES.get(zone, [])
     if target_archetypes:
@@ -387,35 +407,34 @@ def compute_menu_price(
     else:
         archetype = "Famiglie Orbitali"  # default
 
-    base_price = ARCHETYPE_CEILINGS.get(archetype, 120)
+    base_price = ARCHETYPE_CEILINGS.get(archetype, 150)
 
-    # Reputation multiplier
-    rep_mult = 1.0 + (reputation - 50) / 200
+    # Reputation multiplier — higher rep = charge more
+    rep_mult = 1.0 + (reputation - 50) / 150
 
-    # Zone factor
-    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.7)
+    # Zone factor (PREMIUM = 1.0, no discounting the rich!)
+    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.75)
 
-    # Prestige bonus
+    # Prestige bonus — high prestige dishes command premium prices
     prestige = recipe.get("prestige", 50)
-    prestige_mult = 1.0 + (prestige - 50) / 200
+    prestige_mult = 1.0 + (prestige - 50) / 100  # stronger prestige effect
 
     price = int(base_price * rep_mult * zone_factor * prestige_mult)
 
-    # INTELLIGENCE ADJUSTMENT: if we have competitor data, adjust.
-    # Use is_connected (presence in /restaurants API) to detect active
-    # competitors — this works during ALL phases including speaking,
-    # unlike menu_size which is 0 before menus are set.
+    # INTELLIGENCE ADJUSTMENT
     if competitor_briefings:
         active_competitors = sum(
             1 for b in competitor_briefings.values()
             if b.get("is_connected", False)
         )
         if active_competitors == 0:
-            # NO competition — price at ceiling for maximum profit
+            # NO competition — MONOPOLY! Price at ceiling × prestige boost
             price = int(base_price * rep_mult * prestige_mult)
-            # Don't apply zone_factor discount when we're a monopoly!
+            # Premium archetypes: push even higher (they'll pay!)
+            if archetype in ("Astrobarone", "Saggi del Cosmo"):
+                price = int(price * 1.15)
         else:
-            # Competition exists — use competitor-aware pricing
+            # Competition exists — still price high, don't race to bottom
             competitor_prices = [
                 b.get("menu_price_avg", 100)
                 for b in competitor_briefings.values()
@@ -424,14 +443,15 @@ def compute_menu_price(
             if competitor_prices:
                 avg_comp_price = sum(competitor_prices) / len(competitor_prices)
                 if zone == "PREMIUM_MONOPOLIST":
-                    # Stay premium, match or exceed competitors
-                    price = max(price, int(avg_comp_price * 1.05))
+                    # Stay premium — price ABOVE competitors
+                    price = max(price, int(avg_comp_price * 1.15))
                 elif zone == "BUDGET_OPPORTUNIST":
-                    # Undercut slightly
-                    price = min(price, int(avg_comp_price * 0.9))
+                    # Undercut only slightly — still maintain decent margin
+                    price = min(price, int(avg_comp_price * 0.92))
 
-    # Ensure price is within reasonable bounds
-    price = max(10, min(price, int(base_price * 1.3)))
+    # Price floor: never sell below minimum viable margin
+    # Price ceiling: generous — let the market decide
+    price = max(15, min(price, int(base_price * 2.0)))
 
     return price
 
@@ -444,34 +464,33 @@ def compute_bid_price(
     """
     Compute bid price for an ingredient.
 
-    STRATEGY: Scale bids proportionally to detected competition.
-    Uses CONNECTION STATUS (is_connected) to detect active competitors
-    instead of menu_size (which is 0 during speaking phase).
+    PROFIT-FIRST BIDDING: every credit spent on ingredients is a credit
+    NOT in our pocket. The real profit comes from selling dishes at high
+    prices, not from hoarding ingredients.
 
-    Bid scaling:
-    - 0 connected competitors: minimum bids (true monopoly)
-    - 1-3 competitors: moderate bids
-    - 4+ competitors: aggressive bids scaled with competition
-    - Always stay within revenue-optimising bounds
+    Strategy:
+    - Start from conservative BASE_BID_PRICES
+    - Only scale up modestly when competitors specifically target this ingredient
+    - HARD CAP: never bid more than MAX_BID_PER_INGREDIENT
+    - When no competition: bid absolute minimum
+    - The goal is to WIN cheaply, maximising dish profit margin
     """
-    # Count active competitors by CONNECTION STATUS — if a restaurant
-    # appears in /restaurants, it's connected and likely bidding.
-    # This works correctly during speaking & closed_bid phases,
-    # unlike menu_size which is 0 before menus are set.
+    MAX_BID_PER_INGREDIENT = 80  # hard ceiling — no ingredient is worth more
+
+    # Count active competitors
     active_competitors = sum(
         1 for b in competitor_briefings.values()
         if b.get("is_connected", False)
     )
 
-    # Competition intensity factor: scales from 0.0 (no competition)
-    # to 1.0 (saturated at 8 competitors)
-    competition_factor = min(active_competitors / 8.0, 1.0)
-
     high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
     is_high_delta = ingredient in high_delta_names
 
-    predicted_competitor_bids = []
+    # Start from configured base price (ingredient-specific or default)
+    base = BASE_BID_PRICES.get(ingredient, DEFAULT_BASE_BID)
 
+    # Gather competitor intelligence for this specific ingredient
+    predicted_competitor_bids = []
     for rid, brief in competitor_briefings.items():
         if not brief.get("is_connected", False):
             continue
@@ -481,39 +500,45 @@ def compute_bid_price(
             )
             strategy = brief.get("strategy", "")
             if strategy == "AGGRESSIVE_HOARDER":
-                est_bid *= 1.3
+                est_bid *= 1.2
             elif strategy == "REACTIVE_CHASER":
-                est_bid *= 1.15
+                est_bid *= 1.1
             elif strategy == "DECLINING":
-                est_bid *= 0.7
+                est_bid *= 0.6
             predicted_competitor_bids.append(est_bid)
 
     if not predicted_competitor_bids:
-        # No specific competitor intel for this ingredient.
-        # Scale base bid proportionally to competition level.
+        # No competitor specifically targeting this ingredient.
         if active_competitors == 0:
-            # True monopoly — bid at floor
-            return 25 if is_high_delta else 18
+            # True monopoly — bid bare minimum
+            return max(base * 0.3, 8) if is_high_delta else max(base * 0.25, 5)
 
-        # Proportional scaling: more connected competitors → higher bids
-        # High-delta ingredients: 25 (low comp) → 40 (high comp)
-        # Normal ingredients:     18 (low comp) → 30 (high comp)
-        if is_high_delta:
-            base = int(25 + competition_factor * 15)
-        else:
-            base = int(18 + competition_factor * 12)
-        return base
+        # Light competition — bid conservatively, just above base
+        competition_factor = min(active_competitors / 6.0, 1.0)
+        scaled = base * (1.0 + competition_factor * 0.25)
+        return int(min(max(scaled, 10), MAX_BID_PER_INGREDIENT))
 
-    # Competitors want this ingredient — bid above their predicted bid,
-    # scaled by competition intensity.
+    # Competitors target this ingredient — bid just enough to beat them.
     predicted_max = max(predicted_competitor_bids)
 
-    # Demand pressure
+    # Demand pressure (mild, we're conservative)
     demand = demand_forecast.get(ingredient, 0)
-    demand_multiplier = 1.0 + min(demand / 20, 0.3)
+    demand_multiplier = 1.0 + min(demand / 20, 0.2)
 
-    # Competition scaling: more active bidders → bid more aggressively
-    # to ensure we win. Scale from 1.0x to 1.4x.
-    competition_scale = 1.0 + 0.05 * min(active_competitors, 8)
+    # Modest overbid — just enough to win, not a penny more
+    targeting_count = len(predicted_competitor_bids)
+    overbid_factor = 1.05 + 0.03 * min(targeting_count, 5)
 
-    return int(predicted_max * demand_multiplier * competition_scale) + 1
+    bid = predicted_max * demand_multiplier * overbid_factor
+
+    # Ensure bid is at least our base price
+    bid = max(bid, base)
+
+    # Tiny premium for high-delta (they boost prestige → higher dish prices)
+    if is_high_delta:
+        bid *= 1.05
+
+    # HARD CAP: never overspend on any single ingredient
+    bid = min(bid, MAX_BID_PER_INGREDIENT)
+
+    return int(bid) + 1

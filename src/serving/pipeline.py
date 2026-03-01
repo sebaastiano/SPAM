@@ -466,27 +466,41 @@ class ServingPipeline:
             alt_dish = self._find_safe_cookable_dish(declared_intolerances)
             if alt_dish and alt_dish != dish:
                 logger.info(
-                    f"Intolerance risk for {dish} → using {alt_dish}"
+                    f"Intolerance risk for {dish} → using safe alternative {alt_dish}"
                 )
                 dish = alt_dish
                 recipe = self.recipes.get(dish, {})
                 self.metrics.intolerance_skips += 1
+            elif not alt_dish:
+                # No safe alternative available — skip this customer entirely.
+                # Serving a dish with known intolerance = guaranteed rejection.
+                logger.warning(
+                    f"Intolerance conflict for {dish} and no safe alternative — "
+                    f"SKIPPING {client_name} to avoid rejection"
+                )
+                self.metrics.intolerance_skips += 1
+                return
 
         # Step 3: Verify ingredient availability
+        # CRITICAL: If we can't cook the matched dish, DO NOT serve a random
+        # alternative. Serving the wrong dish gets REJECTED by the customer
+        # and damages our reputation. It's better to skip the customer entirely
+        # and preserve ingredients for customers whose orders we CAN fulfill.
         if not self._can_cook(dish):
-            fallback = self._find_any_cookable_dish()
-            if fallback:
-                logger.info(f"Ingredient shortage for {dish} → using {fallback}")
-                dish = fallback
-                recipe = self.recipes.get(dish, {})
-            else:
+            logger.warning(
+                f"Cannot cook matched dish '{dish}' for {client_name} — "
+                f"SKIPPING customer to preserve reputation. "
+                f"(Serving wrong dish = rejection = reputation damage)"
+            )
+            self.metrics.clients_no_ingredients += 1
+            # Check if we have ANY cookable dishes left
+            remaining = self._cookable_menu_dishes()
+            if not remaining:
                 logger.warning(
-                    f"No cookable dishes remaining — "
-                    f"skipping {client_name}, closing restaurant"
+                    f"No cookable dishes remaining at all — closing restaurant"
                 )
-                self.metrics.clients_no_ingredients += 1
                 await self._close_restaurant()
-                return
+            return
 
         # Step 4: Commit ingredients (mark as used BEFORE prepare_dish)
         self._commit_ingredients(dish)
@@ -647,11 +661,12 @@ class ServingPipeline:
                 safe,
                 key=lambda d: self.recipes.get(d, {}).get("prestige", 0),
             )
-        # No safe dish available — return any cookable as last resort
-        return max(
-            cookable,
-            key=lambda d: self.recipes.get(d, {}).get("prestige", 0),
+        # No safe dish available — do NOT serve an intolerant dish.
+        # Better to skip the customer than trigger an intolerance rejection.
+        logger.warning(
+            f"No safe cookable dish found (avoiding intolerances: {declared_intolerances})"
         )
+        return None
 
     @staticmethod
     def _extract_intolerances(order_text: str) -> list[str]:

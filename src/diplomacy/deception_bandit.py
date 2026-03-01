@@ -121,20 +121,35 @@ class DeceptionBandit:
 
         for rid, brief in competitor_briefings.items():
             if brief.get("strategy") == "DORMANT":
+                logger.debug(f"  Skip dormant target {brief.get('name', rid)}")
                 continue
 
             opportunity = brief.get("opportunity_level", 0)
             threat = brief.get("threat_level", 0)
             score = opportunity + threat * 0.7
             candidates.append((score, rid, brief))
+            logger.debug(
+                f"  Candidate {brief.get('name', rid)}: "
+                f"opp={opportunity:.2f} threat={threat:.2f} score={score:.2f}"
+            )
 
             # Threshold: opportunity > 0.3 (was 0.5 — first turns have low scores)
             if opportunity > 0.3:
                 arm = self.select_arm(rid)
+                logger.info(
+                    f"Target {brief.get('name', rid)} (opp={opportunity:.2f}): "
+                    f"sampled arm={arm}"
+                )
                 context = self._build_deception_context(rid, brief, arm)
                 if context:
                     actions.append(context)
+                else:
+                    logger.debug(f"  Arm '{arm}' returned no context for {rid}")
             elif threat > 0.5:
+                logger.info(
+                    f"Target {brief.get('name', rid)} (threat={threat:.2f}): "
+                    f"building threat response"
+                )
                 context = self._build_threat_response(rid, brief)
                 if context:
                     actions.append(context)
@@ -144,6 +159,10 @@ class DeceptionBandit:
         if not actions and candidates:
             candidates.sort(key=lambda x: x[0], reverse=True)
             _, rid, brief = candidates[0]
+            logger.info(
+                f"No high-scoring targets — fallback price_anchoring to "
+                f"{brief.get('name', rid)} (best score={candidates[0][0]:.2f})"
+            )
             context = {
                 "target_rid": rid,
                 "arm": "price_anchoring",

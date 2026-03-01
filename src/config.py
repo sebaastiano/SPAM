@@ -45,11 +45,14 @@ ZONES = [
 ]
 
 # ── Archetype price ceilings (estimated from analysis) ──
+# Astrobarone: "guarda poco al prezzo" → price very high!
+# Saggi del Cosmo: "badano poco al prezzo" → price very high!
+# These are NOT spending limits — they're our target prices.
 ARCHETYPE_CEILINGS = {
-    "Esploratore Galattico": 50,
-    "Astrobarone": 200,
-    "Saggi del Cosmo": 250,
-    "Famiglie Orbitali": 120,
+    "Esploratore Galattico": 60,
+    "Astrobarone": 500,
+    "Saggi del Cosmo": 600,
+    "Famiglie Orbitali": 150,
 }
 
 # ── Known archetypes ──
@@ -91,12 +94,14 @@ NEGATIVE_DELTA_INGREDIENTS = [
 ]
 
 # ── Zone-specific price factors ──
+# PREMIUM_MONOPOLIST: NO discount — rich clients pay full price!
+# BUDGET: slight discount to attract volume (still profitable).
 ZONE_PRICE_FACTORS = {
-    "PREMIUM_MONOPOLIST": 0.95,
-    "BUDGET_OPPORTUNIST": 0.50,
-    "NICHE_SPECIALIST": 0.80,
-    "SPEED_CONTENDER": 0.70,
-    "MARKET_ARBITRAGEUR": 0.60,
+    "PREMIUM_MONOPOLIST": 1.0,
+    "BUDGET_OPPORTUNIST": 0.60,
+    "NICHE_SPECIALIST": 0.85,
+    "SPEED_CONTENDER": 0.75,
+    "MARKET_ARBITRAGEUR": 0.65,
 }
 
 # ── Zone-specific system prompts ──
@@ -169,12 +174,14 @@ ZONE_PRESTIGE_RANGE = {
 }
 
 # ── Zone menu size constraints ──
+# More items = more customers we can serve = more revenue.
+# This is one of the most important levers for winning.
 ZONE_MENU_SIZE = {
-    "PREMIUM_MONOPOLIST": (3, 5),
-    "BUDGET_OPPORTUNIST": (6, 10),
-    "NICHE_SPECIALIST": (4, 6),
-    "SPEED_CONTENDER": (4, 8),
-    "MARKET_ARBITRAGEUR": (1, 2),
+    "PREMIUM_MONOPOLIST": (5, 8),
+    "BUDGET_OPPORTUNIST": (8, 12),
+    "NICHE_SPECIALIST": (5, 8),
+    "SPEED_CONTENDER": (6, 10),
+    "MARKET_ARBITRAGEUR": (2, 4),
 }
 
 # ── Max prep time per zone (seconds) ──
@@ -199,14 +206,34 @@ CLUSTER_STRATEGIES = {
 # ── Default starting balance ──
 DEFAULT_STARTING_BALANCE = 10000
 
+# ── Bidding strategy constants ──
+# SERVINGS_BUFFER: bid enough ingredients for N servings per menu item.
+# With buffer=2, if a dish needs 3x IngA, we bid for 6x IngA.
+# This prevents running out when multiple customers order the same dish.
+# Keep low to avoid overspending — profit = revenue - costs!
+SERVINGS_BUFFER = 2
+
+# SPENDING_FRACTION: fraction of balance allocated to bidding.
+# PROFIT = REVENUE - COSTS. Keep spending LOW to maximise profit.
+# We only need enough ingredients to cook the menu — not a war chest.
+# 0.30 = conservative: spend ≤30% of balance, keep 70% as profit buffer.
+DEFAULT_SPENDING_FRACTION = 0.30
+
+# AGGRESSIVE_SPENDING_FRACTION: used when we detect heavy competition.
+# Even under pressure, never spend more than 45% of balance.
+AGGRESSIVE_SPENDING_FRACTION = 0.45
+
 # ── Base bid prices (fallback when no competitor data) ──
+# CONSERVATIVE: bid just enough to win, not more. Every credit saved
+# on ingredients is pure profit when we sell the dish at high prices.
+# The real money comes from SELLING dishes, not winning auctions.
 BASE_BID_PRICES = {
-    "Polvere di Crononite": 60,
-    "Shard di Prisma Stellare": 55,
-    "Lacrime di Andromeda": 50,
-    "Essenza di Tachioni": 45,
-    "Frutti del Diavolo": 40,
-    "Gnocchi del Crepuscolo": 35,
-    "Polvere di Stelle": 35,
+    "Polvere di Crononite": 40,
+    "Shard di Prisma Stellare": 38,
+    "Lacrime di Andromeda": 35,
+    "Essenza di Tachioni": 32,
+    "Frutti del Diavolo": 25,
+    "Gnocchi del Crepuscolo": 22,
+    "Polvere di Stelle": 22,
 }
-DEFAULT_BASE_BID = 20
+DEFAULT_BASE_BID = 15

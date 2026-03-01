@@ -57,7 +57,10 @@ class DiplomacyAgent:
         """
         # Quick-exit: if no briefings at all, nothing to do
         if not competitor_briefings:
-            logger.info("No competitor briefings available — skipping diplomacy")
+            logger.warning(
+                "No competitor briefings available — skipping diplomacy. "
+                "This usually means intel did not propagate to the skill context."
+            )
             return []
 
         # In monopoly / low-competition, skip diplomacy entirely to save time
@@ -65,36 +68,57 @@ class DiplomacyAgent:
             b for b in competitor_briefings.values()
             if b.get("strategy") != "DORMANT"
         ]
+        logger.info(
+            f"Diplomacy candidates: {len(competitor_briefings)} total briefings, "
+            f"{len(active)} non-dormant"
+        )
         if len(active) == 0:
             logger.info(
-                f"No active competitors (all DORMANT or none tracked) — "
+                f"No active competitors (all {len(competitor_briefings)} are DORMANT) — "
                 f"skipping diplomacy"
             )
             return []
 
-        # 1. Select targets and strategies
+        # 1. Select targets and strategies via bandit
+        logger.info(f"Running DeceptionBandit target selection on {len(active)} candidates")
         actions = self.bandit.select_target_and_strategy(competitor_briefings)
         if not actions:
-            logger.info("No diplomacy actions this turn")
+            logger.info("DeceptionBandit returned no actions (all scored too low)")
             return []
+        logger.info(
+            f"DeceptionBandit selected {len(actions)} action(s): "
+            + ", ".join(
+                f"{a['arm']}→{a.get('target_name', a['target_rid'])}"
+                for a in actions
+            )
+        )
 
         sent = []
         for action in actions:
             rid = action["target_rid"]
             briefing = competitor_briefings.get(rid, {})
 
-            # 2. Craft message
+            # 2. Craft message via PseudoGAN (generator + discriminator loop)
+            logger.info(
+                f"PseudoGAN crafting [{action['arm']}] message for "
+                f"{action.get('target_name', rid)} (desired: {action.get('desired_effect', '?')})"
+            )
             try:
                 message_text = await self.pseudo_gan.craft_message(
                     deception_action=action,
                     competitor_briefing=briefing,
                     max_iterations=2,
                 )
+                logger.info(
+                    f"PseudoGAN result for {action.get('target_name', rid)}: "
+                    f"'{message_text[:100]}'"
+                )
             except Exception as e:
                 logger.warning(f"PseudoGAN failed for {rid}: {e}")
                 continue
 
             # 3. Send via MCP
+            logger.info(f"Sending message to restaurant {rid} via MCP send_message")
             success = await self._send_message(rid, message_text)
             if success:
                 record = {
