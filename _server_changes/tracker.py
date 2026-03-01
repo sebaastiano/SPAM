@@ -146,11 +146,18 @@ def sse_relay_thread():
 # Helper: safe GET
 # ──────────────────────────────────────────────
 
-def api_get(path: str, params: dict = None, silent_404: bool = False):
+def api_get(path: str, params: dict = None, silent_404: bool = False, silent_400: bool = False):
     try:
         r = requests.get(f"{BASE_URL}{path}", headers=HEADERS, params=params, timeout=10)
         if r.status_code == 404 and silent_404:
             return None
+        if r.status_code == 400:
+            if silent_400:
+                return None
+            # Return a sentinel so callers can detect 400 vs network error
+            body = r.text
+            push_event("system", {"msg": f"GET {path} returned 400: {body[:200]}"})
+            return {"__error": 400, "body": body}
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -262,6 +269,86 @@ def flatten_market_entry(e: dict) -> dict:
 
 GAME_EVENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "game_events.jsonl")
 
+# Number of recent turns to poll for bid_history and meals
+BID_HISTORY_LOOKBACK = 5
+MEALS_LOOKBACK = 3
+
+
+def _probe_turn_id() -> int | None:
+    """Probe the server to discover the actual current turn_id.
+
+    Like pipeline.py's _probe_correct_turn_id(): exponential search upward
+    from our current guess, then binary-search for the highest valid turn_id.
+    The /meals endpoint only accepts the current turn ± ~2.
+    """
+    with state_lock:
+        current_guess = state.get("turn_id") or 1
+
+    lo = max(1, current_guess)
+    hi = lo
+    found_any_valid = False
+
+    # Phase 1: exponential search upward
+    while hi <= 300:  # safety cap
+        data = api_get("/meals", params={"turn_id": hi, "restaurant_id": TEAM_ID}, silent_400=True)
+        if data is not None and not isinstance(data, dict) or (isinstance(data, (list, dict)) and "__error" not in (data if isinstance(data, dict) else {})):
+            lo = hi
+            found_any_valid = True
+            hi *= 2
+        else:
+            if not found_any_valid:
+                hi = hi + 1 if hi < 10 else hi * 2
+            else:
+                break
+
+    if not found_any_valid:
+        push_event("system", {"msg": f"turn_id probe: no valid turn_id found (searched up to {hi})"})
+        return None
+
+    # Phase 2: binary search for highest valid turn_id
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        data = api_get("/meals", params={"turn_id": mid, "restaurant_id": TEAM_ID}, silent_400=True)
+        if data is not None and not isinstance(data, dict) or (isinstance(data, (list, dict)) and "__error" not in (data if isinstance(data, dict) else {})):
+            lo = mid
+        else:
+            hi = mid - 1
+
+    push_event("system", {"msg": f"turn_id probe result: {lo}"})
+    return lo
+
+
+def _validate_and_update_turn_id():
+    """Validate current turn_id against the server and update if stale.
+
+    Called once per poll cycle. If current turn_id is None or returns 400,
+    probes for the correct one.
+    """
+    with state_lock:
+        current = state.get("turn_id")
+
+    if current is None or current <= 0:
+        # No turn_id at all — probe from scratch
+        probed = _probe_turn_id()
+        if probed:
+            with state_lock:
+                state["turn_id"] = probed
+            push_event("system", {"msg": f"turn_id probed from server: {probed}"})
+        return
+
+    # Quick validation: try current turn_id
+    data = api_get("/meals", params={"turn_id": current, "restaurant_id": TEAM_ID}, silent_400=True)
+    if data is not None and (isinstance(data, list) or (isinstance(data, dict) and "__error" not in data)):
+        return  # still valid
+
+    # Current turn_id is stale — probe for the correct one
+    push_event("system", {"msg": f"turn_id {current} is stale — probing server..."})
+    probed = _probe_turn_id()
+    if probed and probed != current:
+        with state_lock:
+            state["turn_id"] = probed
+        push_event("system", {"msg": f"turn_id corrected: {current} → {probed}"})
+
 
 def _poll_game_state():
     """Infer turn_id, phase, and messages from game_events.jsonl written by the bot's SSE connection."""
@@ -317,6 +404,7 @@ def _poll_game_state():
                             "recipient_name": data.get("recipientName") or data.get("recipient_name", "?"),
                             "text": data.get("text") or data.get("content") or str(data),
                             "turn_id": current_turn,
+                            "direction": "received",
                             "message_id": mid,
                         })
     except FileNotFoundError:
@@ -349,6 +437,11 @@ def polling_thread():
                 _poll_game_state()
             except Exception as e:
                 push_event("system", {"msg": f"Poll game state error: {e}"})
+        # Validate / probe turn_id against the server each cycle
+        try:
+            _validate_and_update_turn_id()
+        except Exception as e:
+            push_event("system", {"msg": f"turn_id validation error: {e}"})
         try:
             _poll_restaurants()
         except Exception as e:
@@ -449,33 +542,44 @@ def _poll_meals():
         restaurant_ids = list(state["restaurants"].keys())
     if not turn_id or not restaurant_ids:
         return
-    for rid in restaurant_ids:
-        data = api_get("/meals", params={"turn_id": turn_id, "restaurant_id": rid})
-        if not data:
-            continue
-        meals = data if isinstance(data, list) else data.get("meals", [])
-        with state_lock:
-            rname = state["restaurants_names"].get(rid, f"team {rid}")
-            for m in meals:
-                mid = m.get("id") or m.get("client_id")
-                key = (turn_id, rid, mid)
-                flat_new = {
-                    "restaurant_id": rid,
-                    "restaurant_name": rname,
-                    "client_id": m.get("client_id"),
-                    "order": m.get("orderText") or m.get("order"),
-                    "executed": m.get("executed"),
-                    "dish": m.get("dish_name") or m.get("dish"),
-                }
-                flat_old = state["meals"].get(key)
-                if flat_old is None:
-                    state["meals"][key] = flat_new
-                    push_event("meal_new", {"turn": turn_id, "restaurant_id": rid, "restaurant_name": rname, "meal": flat_new})
-                else:
-                    changes = diff_dict(flat_old, flat_new, f"meal#{mid}")
-                    if changes:
+
+    # Poll current turn and a few recent ones to catch data we may have missed
+    turns_to_poll = list(range(max(1, turn_id - MEALS_LOOKBACK + 1), turn_id + 1))
+
+    for tid in turns_to_poll:
+        for rid in restaurant_ids:
+            data = api_get("/meals", params={"turn_id": tid, "restaurant_id": rid}, silent_400=True)
+            if not data or (isinstance(data, dict) and "__error" in data):
+                continue
+            meals = data if isinstance(data, list) else data.get("meals", [])
+            with state_lock:
+                rname = state["restaurants_names"].get(rid, f"team {rid}")
+                for m in meals:
+                    mid = m.get("id") or m.get("customerId") or m.get("client_id")
+                    key = (tid, rid, mid)
+                    # Server uses 'request' for order text, customer.name for client name
+                    customer = m.get("customer")
+                    client_name = customer.get("name", "?") if isinstance(customer, dict) else m.get("clientName", "?")
+                    flat_new = {
+                        "turn_id": tid,
+                        "restaurant_id": rid,
+                        "restaurant_name": rname,
+                        "client_id": m.get("customerId") or m.get("client_id"),
+                        "client_name": client_name,
+                        "order": m.get("request") or m.get("orderText") or m.get("order", ""),
+                        "executed": m.get("executed"),
+                        "status": m.get("status"),
+                        "dish": m.get("servedDishId") or m.get("dish_name") or m.get("dish"),
+                    }
+                    flat_old = state["meals"].get(key)
+                    if flat_old is None:
                         state["meals"][key] = flat_new
-                        push_event("meal_changed", {"turn": turn_id, "restaurant_id": rid, "restaurant_name": rname, "changes": changes, "meal": flat_new})
+                        push_event("meal_new", {"turn": tid, "restaurant_id": rid, "restaurant_name": rname, "meal": flat_new})
+                    else:
+                        changes = diff_dict(flat_old, flat_new, f"meal#{mid}")
+                        if changes:
+                            state["meals"][key] = flat_new
+                            push_event("meal_changed", {"turn": tid, "restaurant_id": rid, "restaurant_name": rname, "changes": changes, "meal": flat_new})
 
 
 def _poll_bid_history():
@@ -483,17 +587,30 @@ def _poll_bid_history():
         turn_id = state.get("turn_id")
     if not turn_id:
         return
-    data = api_get("/bid_history", params={"turn_id": turn_id})
-    if not data:
-        return
-    bids = data if isinstance(data, list) else data.get("bids", [])
-    with state_lock:
-        for b in bids:
-            bid_id = b.get("id") or id(b)
-            key = (turn_id, bid_id)
-            if key not in state["bid_history"]:
-                state["bid_history"][key] = b
-                push_event("bid_history", {"turn": turn_id, "bid": b})
+
+    # Poll current turn and several recent turns for historical bid data
+    turns_to_poll = list(range(max(1, turn_id - BID_HISTORY_LOOKBACK + 1), turn_id + 1))
+
+    for tid in turns_to_poll:
+        data = api_get("/bid_history", params={"turn_id": tid}, silent_400=True)
+        if not data or (isinstance(data, dict) and "__error" in data):
+            continue
+        bids = data if isinstance(data, list) else data.get("bids", [])
+        with state_lock:
+            for b in bids:
+                bid_id = b.get("id") or id(b)
+                key = (tid, bid_id)
+                if key not in state["bid_history"]:
+                    # Enrich with restaurant name from nested object
+                    restaurant_obj = b.get("restaurant")
+                    if isinstance(restaurant_obj, dict) and "name" in restaurant_obj:
+                        b["restaurant_name"] = restaurant_obj["name"]
+                    # Enrich ingredient name from nested object
+                    ingredient_obj = b.get("ingredient")
+                    if isinstance(ingredient_obj, dict) and "name" in ingredient_obj:
+                        b["ingredient_name"] = ingredient_obj["name"]
+                    state["bid_history"][key] = b
+                    push_event("bid_history", {"turn": tid, "bid": b})
 
 
 # ──────────────────────────────────────────────
