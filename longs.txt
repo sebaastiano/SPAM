@@ -1,39 +1,764 @@
-2026-03-01 04:15:06,407 spam.main                      INFO    Game started event received (= speaking phase)
-2026-03-01 04:15:06,407 spam.phase_router              INFO    Game started — turn_id=53, awaiting first phase
-2026-03-01 04:15:06,762 spam.recipe_loader             INFO    Loaded 287 raw recipes from server
-2026-03-01 04:15:06,763 spam.recipe_loader             INFO    Normalised 287 recipes
-2026-03-01 04:15:06,764 spam.main                      INFO    Probing server to discover current turn_id...
-2026-03-01 04:15:06,936 spam.main                      INFO    Discovered current turn_id=1
-2026-03-01 04:15:06,937 spam.main                      INFO    Dispatching speaking phase with turn_id=53
-2026-03-01 04:15:06,937 spam.main                      INFO    [SPEAKING] Turn 53
-2026-03-01 04:15:07,147 spam.main                      INFO    Context built: turn=53, phase=speaking, balance=43155, reputation=98, inventory=0 types/0 units, menu=12 items, open=False, mid_turn=False
-2026-03-01 04:15:07,148 spam.skills                    INFO    ▸ Executing skill: strategic_plan
-2026-03-01 04:15:07,150 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 53...
-2026-03-01 04:15:10,737 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-01 04:15:10,743 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=16, bid_aggr=0.40, price=volume_first, diplomacy=silent, confidence=0.75
-2026-03-01 04:15:10,743 spam.main                      INFO    Strategic plan: zone=DIVERSIFIED, menu_size=16, bid_aggr=0.40, price=volume_first, diplo=silent, confidence=0.75
-2026-03-01 04:15:10,743 spam.main                      INFO      Zone reasoning: No competition and a full range of customer archetypes present; a broad menu maximizes foot traffic and revenue.
-2026-03-01 04:15:10,743 spam.main                      INFO      Bid reasoning: Secure core high-demand ingredients at modest bids to ensure menu variety without overspending.
-2026-03-01 04:15:10,743 spam.skills                    INFO      ✓ strategic_plan succeeded
-2026-03-01 04:15:10,743 spam.skills                    INFO    ▸ Executing skill: intelligence_scan
-2026-03-01 04:15:10,743 spam.intelligence.pipeline     INFO    Running intelligence pipeline (DagPipeline) for turn 53
-2026-03-01 04:15:10,765 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/bid_history "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,766 spam.intelligence.tracker_bridge WARNING Failed to fetch bid history: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/bid_history'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,767 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/market "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,767 spam.intelligence.tracker_bridge WARNING Failed to fetch market entries: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/market'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,768 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/meals "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,768 spam.intelligence.tracker_bridge WARNING Failed to fetch meals: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/meals'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,769 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/all_restaurants "HTTP/1.1 500 INTERNAL SERVER ERROR"
-2026-03-01 04:15:10,769 spam.intelligence.tracker_bridge WARNING Failed to fetch restaurants from tracker: Server error '500 INTERNAL SERVER ERROR' for url 'http://localhost:5555/api/all_restaurants'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
-2026-03-01 04:15:10,769 spam.intelligence.pipeline     INFO    Intelligence: 0 competitors analyzed, clusters: {}
-2026-03-01 04:15:10,769 spam.main                      INFO    Intelligence: 0 briefings, 0 connected, 0 non-dormant, 0 clusters
-2026-03-01 04:15:10,769 spam.skills                    INFO      ✓ intelligence_scan succeeded
-2026-03-01 04:15:10,769 spam.skills                    INFO    ▸ Executing skill: strategic_refine
-2026-03-01 04:15:10,770 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 53...
-2026-03-01 04:15:12,967 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-01 04:15:12,979 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=18, bid_aggr=0.45, price=volume_first, diplomacy=silent, confidence=0.78
-2026-03-01 04:15:12,979 spam.main                      INFO    Strategy refined with intel: zone=DIVERSIFIED, confidence=0.78
+
+(.venv) pietrosaveri@Pietros-MacBook-Pro SPAM % python3 -m src.main                                        
+2026-03-01 05:22:30,717 spam.main                      INFO    Tracker already running on port 5555 — reusing existing instance
+2026-03-01 05:22:30,717 spam.main                      INFO    Dashboard already running on port 5556 — reusing
+2026-03-01 05:22:30,771 spam.intelligence.pipeline     INFO    Intelligence DagPipeline built with 8 modules, 10 connections
+2026-03-01 05:22:30,791 spam.main                      INFO    Registered 20 skills
+2026-03-01 05:22:30,791 spam.main                      INFO    === SPAM! (Team 17) Starting ===
+2026-03-01 05:22:30,967 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:22:30,968 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:22:31,024 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:22:31,177 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:22:31,179 spam.main                      INFO    MCP tools available: ['closed_bid', 'save_menu', 'create_market_entry', 'execute_transaction', 'delete_market_entry', 'prepare_dish', 'serve_dish', 'update_restaurant_is_open', 'send_message']
+2026-03-01 05:22:31,290 spam.decision.subagent_router  INFO    Initialized 6 zone agents + strategy agent
+2026-03-01 05:22:31,540 spam.recipe_loader             INFO    Loaded 287 raw recipes from server
+2026-03-01 05:22:31,541 spam.recipe_loader             INFO    Normalised 287 recipes
+2026-03-01 05:22:31,541 spam.main                      INFO    Loaded 287 recipes
+2026-03-01 05:22:31,712 spam.main                      INFO    Initial state: balance=40900, reputation=99
+2026-03-01 05:22:31,712 spam.main                      INFO    Connecting to SSE stream...
+2026-03-01 05:22:31,713 spam.event_bus                 INFO    Connecting to SSE at https://hackapizza.datapizza.tech/events/17
+2026-03-01 05:22:31,918 spam.event_bus                 INFO    SSE connection established
+2026-03-01 05:22:31,919 spam.event_bus                 INFO    SSE connected acknowledgement
+2026-03-01 05:22:53,347 spam.phase_router              WARNING ⚠ MID-TURN ENTRY detected! Joining at phase 'stopped' (turn 0). Skipped phases: ['speaking', 'closed_bid', 'waiting', 'serving']
+2026-03-01 05:22:53,347 spam.phase_router              INFO    Phase: None → stopped (turn 0)
+2026-03-01 05:22:53,347 spam.main                      INFO    [STOPPED/MID-TURN] Turn 0
+2026-03-01 05:22:53,347 spam.serving.pipeline          INFO    Serving ended: received=0 matched=0 prepared=0 served=0 failed=0 no_match=0 no_ingredients=0 timeouts=0 mcp_retries=0 mcp_errors=0 intolerance_skips=0 polls=0
+2026-03-01 05:22:53,680 spam.main                      INFO    Probing server to discover current turn_id...
+2026-03-01 05:22:53,867 spam.main                      INFO    Discovered current turn_id=1
+2026-03-01 05:22:53,868 spam.main                      INFO    Using discovered turn_id=1
+2026-03-01 05:22:53,868 spam.main                      INFO    Context built: turn=1, phase=stopped, balance=41558, reputation=99, inventory=0 types/0 units, menu=22 items, open=False, mid_turn=True
+2026-03-01 05:22:53,868 spam.skills                    INFO    [MID-TURN CATCHUP] Phase=stopped, skipped=['speaking', 'closed_bid', 'waiting', 'serving'], skills to run: ['end_turn_snapshot', 'info_gather']
+2026-03-01 05:22:53,868 spam.skills                    INFO    ▸ Executing skill: end_turn_snapshot
+2026-03-01 05:22:53,868 spam.memory.game_state         INFO    Turn 1 ended — inventory expired
+2026-03-01 05:22:53,868 spam.main                      INFO    Turn 1 complete: served=0, balance=41558, reputation=99
+2026-03-01 05:22:53,868 spam.skills                    INFO      ✓ end_turn_snapshot succeeded
+2026-03-01 05:22:53,868 spam.skills                    INFO    ▸ Executing skill: info_gather
+2026-03-01 05:22:54,033 spam.decision.strategy_agent   INFO    Turn 1 result recorded: rev=41558, customers=0, delta=+41558, strategy=unknown
+2026-03-01 05:22:54,034 spam.skills                    INFO      ✓ info_gather succeeded
+2026-03-01 05:22:54,034 spam.main                      INFO    Skills executed: 2/2 OK (end_turn_snapshot, info_gather)
+2026-03-01 05:27:53,163 spam.main                      INFO    Game started event received (= speaking phase)
+2026-03-01 05:27:53,164 spam.phase_router              INFO    Game started — turn_id=59, awaiting first phase
+2026-03-01 05:27:53,452 spam.recipe_loader             INFO    Loaded 287 raw recipes from server
+2026-03-01 05:27:53,454 spam.recipe_loader             INFO    Normalised 287 recipes
+2026-03-01 05:27:53,455 spam.main                      INFO    Probing server to discover current turn_id...
+2026-03-01 05:27:53,708 spam.main                      INFO    Discovered current turn_id=1
+2026-03-01 05:27:53,708 spam.main                      INFO    Dispatching speaking phase with turn_id=59
+2026-03-01 05:27:53,708 spam.main                      INFO    [SPEAKING] Turn 59
+2026-03-01 05:27:53,946 spam.main                      INFO    Context built: turn=59, phase=speaking, balance=42558, reputation=99, inventory=0 types/0 units, menu=22 items, open=False, mid_turn=False
+2026-03-01 05:27:53,946 spam.skills                    INFO    ▸ Executing skill: strategic_plan
+2026-03-01 05:27:53,946 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 59...
+2026-03-01 05:27:57,681 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:27:57,690 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=15, bid_aggr=0.30, price=balanced, diplomacy=silent, confidence=0.78
+2026-03-01 05:27:57,691 spam.main                      INFO    Strategic plan: zone=DIVERSIFIED, menu_size=15, bid_aggr=0.30, price=balanced, diplo=silent, confidence=0.78
+2026-03-01 05:27:57,691 spam.main                      INFO      Zone reasoning: With no active competitors and a strong reputation, the diversified zone maximizes exposure to all archetypes and levera
+2026-03-01 05:27:57,691 spam.main                      INFO      Bid reasoning: No price history yet, so we place moderate bids (~30% of balance per ingredient) on the three highest‑margin ingredients
+2026-03-01 05:27:57,691 spam.skills                    INFO      ✓ strategic_plan succeeded
+2026-03-01 05:27:57,691 spam.skills                    INFO    ▸ Executing skill: intelligence_scan
+2026-03-01 05:27:57,691 spam.intelligence.pipeline     INFO    Running intelligence pipeline (DagPipeline) for turn 59
+2026-03-01 05:27:57,722 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/all_restaurants "HTTP/1.1 200 OK"
+2026-03-01 05:27:57,723 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/bid_history "HTTP/1.1 200 OK"
+2026-03-01 05:27:57,723 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/market "HTTP/1.1 200 OK"
+2026-03-01 05:27:57,723 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/meals "HTTP/1.1 200 OK"
+2026-03-01 05:28:01,940 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/22 "HTTP/1.1 200 OK"
+2026-03-01 05:28:02,139 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/16 "HTTP/1.1 200 OK"
+2026-03-01 05:28:02,316 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/24 "HTTP/1.1 200 OK"
+2026-03-01 05:28:02,678 httpx                          INFO    HTTP Request: GET http://localhost:5555/api/restaurant/4 "HTTP/1.1 200 OK"
+2026-03-01 05:28:02,752 spam.intelligence.pipeline     INFO    Intelligence: 24 competitors analyzed, clusters: {'UNCLASSIFIED': 16, 'STABLE_SPECIALIST': 5, 'DORMANT': 3}
+2026-03-01 05:28:02,752 spam.main                      INFO    Intelligence: 24 briefings, 24 connected, 21 non-dormant, 24 clusters
+2026-03-01 05:28:02,752 spam.skills                    INFO      ✓ intelligence_scan succeeded
+2026-03-01 05:28:02,752 spam.skills                    INFO    ▸ Executing skill: strategic_refine
+2026-03-01 05:28:02,752 spam.decision.strategy_agent   INFO    Consulting strategy agent for turn 59...
+2026-03-01 05:28:07,573 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:07,585 spam.decision.strategy_agent   INFO    Strategy agent plan: zone=DIVERSIFIED, menu_size=14, bid_aggr=0.40, price=volume_first, diplomacy=moderate, confidence=0.78
+2026-03-01 05:28:07,585 spam.main                      INFO    Strategy refined with intel: zone=DIVERSIFIED, confidence=0.78
+2026-03-01 05:28:07,585 spam.skills                    INFO      ✓ strategic_refine succeeded
+2026-03-01 05:28:07,585 spam.skills                    INFO    ▸ Executing skill: zone_selection
+2026-03-01 05:28:07,588 spam.decision.zone_selector    INFO    Selected zone: DIVERSIFIED (score=0.48, active_competitors=21)
+2026-03-01 05:28:07,588 spam.decision.subagent_router  INFO    Active zone: DIVERSIFIED
+2026-03-01 05:28:07,588 spam.main                      INFO    Zone selected: DIVERSIFIED (agent agrees)
+2026-03-01 05:28:07,588 spam.skills                    INFO      ✓ zone_selection succeeded
+2026-03-01 05:28:07,588 spam.skills                    INFO    ▸ Executing skill: menu_planning
+2026-03-01 05:28:07,588 spam.decision.strategy_agent   INFO    Menu guidance from agent: size=14, prestige=[20-90], prep≤12.0s, focus=budget, tiers={'budget': 5, 'mid': 4, 'mid_high': 2, 'premium': 2}, expected_customers=9
+2026-03-01 05:28:07,589 spam.decision.strategy_agent   INFO    Bid guidance from agent: spending=0.51, aggr=0.40, priority=['Rice', 'Chicken', 'Truffle'], price_caps=0 ingredients capped, cheap=0, expected_servings=9
+2026-03-01 05:28:07,589 spam.main                      INFO    Menu planning: zone=DIVERSIFIED, phase=speaking, spending=0.51, balance=42558, inventory_items=0, inventory_total=0
+2026-03-01 05:28:07,589 spam.main                      INFO      Agent guidance: size=14, prestige=[20-90], prep≤12.0s, diversify=True
+2026-03-01 05:28:07,589 spam.decision.ilp_solver       INFO    Agent guidance applied: prestige=[10,100], menu=[12,22], prep≤12.0s
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Eterea Sinfonia di Gravità con Infusione Temp price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia del Multiverso Calante               price= 227, ing_cost=98, margin=+132%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Quantica dell'Oceano Interstellare   price= 227, ing_cost=90, margin=+152%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Temporale di Fenice e Xenodonte su P price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Celestiale di Gnocchi del Crepuscolo price= 227, ing_cost=97, margin=+134%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Plasma Celestiale al Risotto di Kraken nell'A price= 227, ing_cost=105, margin=+116%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Luminiscenze e Contrasti  price= 227, ing_cost=112, margin=+103%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Portale Cosmico: Sinfonia di Gnocchi del Crep price= 227, ing_cost=99, margin=+129%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica: Versione Data               price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia di Multiverso: La Danza degli Elemen price= 227, ing_cost=98, margin=+132%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Aromatica del Multiverso             price= 227, ing_cost=75, margin=+203%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Terracotta                price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Viaggio Cosmico nel Multiverso                price= 227, ing_cost=98, margin=+132%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica ma Fatta Bene                price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Galassia a Tavola: Sinfonia di Tempeste Cosmi price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Andromeda                 price= 227, ing_cost=105, margin=+116%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Galassia nel Piatto: Sinfonia di Sapori e Dim price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Astrale                              price= 227, ing_cost=112, margin=+103%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Piastrella Celestiale di Gnocchi del Crepusco price= 227, ing_cost=82, margin=+177%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica: il Ritorno dell'Imperatore  price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica all'Alba di Fenice           price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO      Menu: Sinfonia Temporale delle Profondità Infrasoni price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:07,608 spam.decision.ilp_solver       INFO    MILP [DIVERSIFIED]: 22 menu items, 48 bids (total_qty=124), cost=2463/21705 budget, expected_rev=4994, NET PROFIT=+2531
+2026-03-01 05:28:07,608 spam.main                      INFO    Menu planned: 22 items — ['Eterea Sinfonia di Gravità con Infusione', 'Sinfonia del Multiverso Calante', "Sinfonia Quantica dell'Oceano Interstell", 'Sinfonia Temporale di Fenice e Xenodonte', 'Sinfonia Celestiale di Gnocchi del Crepu', 'Plasma Celestiale al Risotto di Kraken n', 'Sinfonia Cosmica di Luminiscenze e Contr', 'Portale Cosmico: Sinfonia di Gnocchi del', 'Sinfonia Cosmica: Versione Data', 'Sinfonia di Multiverso: La Danza degli E', 'Sinfonia Aromatica del Multiverso', 'Sinfonia Cosmica di Terracotta', 'Viaggio Cosmico nel Multiverso', 'Sinfonia Cosmica ma Fatta Bene', 'Galassia a Tavola: Sinfonia di Tempeste ', 'Sinfonia Cosmica di Andromeda', 'Galassia nel Piatto: Sinfonia di Sapori ', 'Sinfonia Astrale', 'Piastrella Celestiale di Gnocchi del Cre', "Sinfonia Cosmica: il Ritorno dell'Impera", "Sinfonia Cosmica all'Alba di Fenice", 'Sinfonia Temporale delle Profondità Infr']
+2026-03-01 05:28:07,608 spam.skills                    INFO      ✓ menu_planning succeeded
+2026-03-01 05:28:07,609 spam.skills                    INFO    ▸ Executing skill: menu_save
+2026-03-01 05:28:07,762 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:07,764 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:07,817 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:08,243 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:08,306 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:08,307 spam.serving.pipeline          INFO    Menu set with 22 items
+2026-03-01 05:28:08,307 spam.main                      INFO    Menu saved: 22 items
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Eterea Sinfonia di Gravità con Infusione Temporale @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia del Multiverso Calante @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia Quantica dell'Oceano Interstellare @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia Temporale di Fenice e Xenodonte su Pane d @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia Celestiale di Gnocchi del Crepuscolo @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Plasma Celestiale al Risotto di Kraken nell'Aura d @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia Cosmica di Luminiscenze e Contrasti @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Portale Cosmico: Sinfonia di Gnocchi del Crepuscol @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia Cosmica: Versione Data @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia di Multiverso: La Danza degli Elementi @ 227
+2026-03-01 05:28:08,307 spam.main                      INFO      Menu item: Sinfonia Aromatica del Multiverso @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Sinfonia Cosmica di Terracotta @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Viaggio Cosmico nel Multiverso @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Sinfonia Cosmica ma Fatta Bene @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Galassia a Tavola: Sinfonia di Tempeste Cosmiche @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Sinfonia Cosmica di Andromeda @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Galassia nel Piatto: Sinfonia di Sapori e Dimensio @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Sinfonia Astrale @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Piastrella Celestiale di Gnocchi del Crepuscolo co @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Sinfonia Cosmica: il Ritorno dell'Imperatore @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Sinfonia Cosmica all'Alba di Fenice @ 227
+2026-03-01 05:28:08,308 spam.main                      INFO      Menu item: Sinfonia Temporale delle Profondità Infrasoniche @ 227
+2026-03-01 05:28:08,308 spam.skills                    INFO      ✓ menu_save succeeded
+2026-03-01 05:28:08,308 spam.skills                    INFO    ▸ Executing skill: market_ops
+2026-03-01 05:28:08,478 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:08,480 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:08,531 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:08,684 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:08,736 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:08,738 spam.main                      INFO    Market BUY: 3x Colonia di Mycoflora @ 13
+2026-03-01 05:28:08,934 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:08,935 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:08,992 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:09,150 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:09,204 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:09,205 spam.main                      INFO    Market BUY: 3x Radici di Gravità @ 12
+2026-03-01 05:28:09,358 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:09,358 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:09,410 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:09,583 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:09,640 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:09,641 spam.main                      INFO    Market BUY: 4x Carne di Xenodonte @ 12
+2026-03-01 05:28:09,797 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:09,797 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:09,844 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:10,032 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:10,086 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:10,089 spam.main                      INFO    Market BUY: 4x Teste di Idra @ 12
+2026-03-01 05:28:10,253 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:10,255 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:10,311 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:10,475 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:10,536 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:10,537 spam.main                      INFO    Market BUY: 2x Funghi dell’Etere @ 12
+2026-03-01 05:28:10,714 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:10,715 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:10,764 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:10,947 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,024 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,025 spam.main                      INFO    Market BUY: 5x Essenza di Tachioni @ 21
+2026-03-01 05:28:11,172 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,172 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:11,230 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:11,412 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,474 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,478 spam.main                      INFO    Market BUY: 3x Shard di Prisma Stellare @ 26
+2026-03-01 05:28:11,666 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,668 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:11,726 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:11,916 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,991 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:11,993 spam.main                      INFO    Market BUY: 3x Granuli di Nebbia Arcobaleno @ 13
+2026-03-01 05:28:12,191 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:12,192 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:12,253 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:12,456 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:12,526 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:12,529 spam.main                      INFO    Market BUY: 2x Fusilli del Vento @ 13
+2026-03-01 05:28:12,699 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:12,700 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:12,755 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:12,941 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,000 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,001 spam.main                      INFO    Market BUY: 4x Pane degli Abissi @ 12
+2026-03-01 05:28:13,162 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,163 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:13,212 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:13,378 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,432 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,434 spam.main                      INFO    Market BUY: 3x Lacrime di Unicorno @ 13
+2026-03-01 05:28:13,616 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,618 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:13,675 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:13,850 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,912 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:13,914 spam.main                      INFO    Market BUY: 1x Vero Ghiaccio @ 13
+2026-03-01 05:28:14,083 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:14,084 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:14,133 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:14,308 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:14,359 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:14,361 spam.main                      INFO    Market BUY: 5x Carne di Kraken @ 12
+2026-03-01 05:28:14,539 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:14,543 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:14,603 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:14,812 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:14,873 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:14,876 spam.main                      INFO    Market BUY: 3x Nettare di Sirena @ 12
+2026-03-01 05:28:15,033 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:15,035 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:15,083 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:15,269 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:15,345 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:15,348 spam.main                      INFO    Market BUY: 3x Essenza di Vuoto @ 13
+2026-03-01 05:28:15,532 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:15,534 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:15,597 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:15,773 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:15,835 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:15,838 spam.main                      INFO    Market BUY: 4x Polvere di Crononite @ 25
+2026-03-01 05:28:16,007 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:16,009 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:16,059 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:16,238 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:16,297 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:16,299 spam.main                      INFO    Market BUY: 5x Uova di Fenice @ 12
+2026-03-01 05:28:16,459 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:16,461 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:16,517 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:16,696 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:16,752 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:16,756 spam.main                      INFO    Market BUY: 3x Plasma Vitale @ 12
+2026-03-01 05:28:16,945 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:16,946 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:17,000 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:17,171 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:17,220 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:17,223 spam.main                      INFO    Market BUY: 4x Shard di Materia Oscura @ 13
+2026-03-01 05:28:17,400 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:17,402 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:17,461 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:17,639 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:17,691 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:17,694 spam.main                      INFO    Market BUY: 4x Foglie di Mandragora @ 13
+2026-03-01 05:28:17,897 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:17,899 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:17,964 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:18,127 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:18,178 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:18,181 spam.main                      INFO    Market BUY: 5x Gnocchi del Crepuscolo @ 15
+2026-03-01 05:28:18,336 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:18,337 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:18,388 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:18,584 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:18,641 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:18,644 spam.main                      INFO    Market BUY: 1x Farina di Nettuno @ 13
+2026-03-01 05:28:18,838 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:18,839 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:18,954 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:19,253 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:19,315 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:19,316 spam.main                      INFO    Market BUY: 3x Essenza di Speziaria @ 13
+2026-03-01 05:28:19,501 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:19,502 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:19,607 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:19,795 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:19,847 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:19,848 spam.main                      INFO    Market BUY: 2x Petali di Eco @ 13
+2026-03-01 05:28:20,088 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:20,090 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:20,157 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:20,385 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:20,472 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:20,476 spam.main                      INFO    Market BUY: 1x Fibra di Sintetex @ 13
+2026-03-01 05:28:20,640 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:20,641 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:20,690 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:20,849 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:20,939 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:20,941 spam.main                      INFO    Market BUY: 1x Spaghi del Sole @ 13
+2026-03-01 05:28:21,106 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:21,107 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:21,155 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:21,318 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:21,372 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:21,374 spam.main                      INFO    Market BUY: 1x Biscotti della Galassia @ 12
+2026-03-01 05:28:21,528 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:21,529 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:21,636 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:21,814 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:21,867 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:21,871 spam.main                      INFO    Market BUY: 2x Carne di Drago @ 12
+2026-03-01 05:28:22,049 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:22,050 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:22,096 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:22,291 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:22,350 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:22,351 spam.main                      INFO    Market BUY: 2x Amido di Stellarion @ 12
+2026-03-01 05:28:22,579 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:22,581 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:22,635 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:22,842 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:22,900 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:22,902 spam.main                      INFO    Market BUY: 4x Riso di Cassandra @ 12
+2026-03-01 05:28:23,076 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:23,077 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:23,132 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:23,307 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:23,358 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:23,359 spam.main                      INFO    Market BUY: 1x Polvere di Stelle @ 15
+2026-03-01 05:28:23,530 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:23,531 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:23,585 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:23,772 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:23,834 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:23,838 spam.main                      INFO    Market BUY: 1x Slurm @ 13
+2026-03-01 05:28:24,013 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:24,015 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:24,066 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:24,230 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:24,296 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:24,297 spam.main                      INFO    Market BUY: 1x Cristalli di Memoria @ 13
+2026-03-01 05:28:24,456 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:24,458 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:24,502 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:24,661 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:24,727 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:24,728 spam.main                      INFO    Market BUY: 4x Carne di Balena spaziale @ 12
+2026-03-01 05:28:24,885 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:24,886 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:24,936 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:25,117 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:25,171 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:25,173 spam.main                      INFO    Market BUY: 3x Foglie di Nebulosa @ 12
+2026-03-01 05:28:25,343 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:25,343 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:25,387 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:25,614 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:25,674 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:25,675 spam.main                      INFO    Market BUY: 2x Lattuga Namecciana @ 13
+2026-03-01 05:28:25,852 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:25,852 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:25,949 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:26,139 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:26,198 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:26,207 spam.main                      INFO    Market BUY: 2x Spore Quantiche @ 12
+2026-03-01 05:28:26,382 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:26,382 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:26,432 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:26,602 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:26,654 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:26,655 spam.main                      INFO    Market BUY: 3x Sale Temporale @ 12
+2026-03-01 05:28:26,809 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:26,809 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:26,875 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:27,093 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:27,150 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:27,151 spam.main                      INFO    Market BUY: 3x Carne di Mucca @ 13
+2026-03-01 05:28:27,376 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:27,378 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:27,445 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:27,604 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:27,664 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:27,665 spam.main                      INFO    Market BUY: 3x Frutti del Diavolo @ 19
+2026-03-01 05:28:27,858 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:27,858 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:27,914 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:28,082 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:28,130 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:28,132 spam.main                      INFO    Market BUY: 1x Liane di Plasmodio @ 13
+2026-03-01 05:28:28,316 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:28,316 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:28,383 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:28,563 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:28,630 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:28,633 spam.main                      INFO    Market BUY: 2x Funghi Orbitali @ 12
+2026-03-01 05:28:28,843 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:28,844 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:28,914 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:29,103 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:29,172 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:29,174 spam.main                      INFO    Market BUY: 2x Radici di Singolarità @ 13
+2026-03-01 05:28:29,378 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:29,379 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:29,421 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:29,609 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:29,660 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:29,662 spam.main                      INFO    Market BUY: 1x Lacrime di Andromeda @ 25
+2026-03-01 05:28:30,030 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:30,031 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:30,089 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:30,308 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:30,389 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:30,392 spam.main                      INFO    Market BUY: 2x Frammenti di Supernova @ 12
+2026-03-01 05:28:30,748 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:30,749 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:30,809 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:31,074 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:31,134 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:31,136 spam.main                      INFO    Market BUY: 1x Nduja Fritta Tanto @ 12
+2026-03-01 05:28:31,381 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:31,382 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:31,448 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:31,690 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:31,777 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:31,780 spam.main                      INFO    Market BUY: 1x Erba Pipa @ 12
+2026-03-01 05:28:32,008 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:32,009 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:32,068 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:32,426 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:32,547 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:32,551 spam.main                      INFO    Market BUY: 1x Cristalli di Nebulite @ 13
+2026-03-01 05:28:32,551 spam.skills                    INFO      ✓ market_ops succeeded
+2026-03-01 05:28:32,551 spam.skills                    INFO    ▸ Executing skill: diplomacy_send
+2026-03-01 05:28:32,551 spam.main                      INFO    Diplomacy agent guidance: priority=moderate, max_messages=2, targets=[]
+2026-03-01 05:28:32,551 spam.main                      INFO    Diplomacy input: 24 briefings, 24 competitor states available
+2026-03-01 05:28:32,551 spam.diplomacy.agent           INFO    Diplomacy candidates: 24 total briefings, 21 non-dormant
+2026-03-01 05:28:32,551 spam.diplomacy.agent           INFO    Running DeceptionBandit target selection on 21 candidates
+2026-03-01 05:28:32,551 spam.diplomacy.deception_bandit INFO    Target Samur_ai (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target AIS Privè (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Bluers (threat=0.60): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Cavalli al trotto (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Claudio Opuscoli (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target DeepAiUG (threat=0.60): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Desf-AI (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target sphacketti (threat=0.60): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target MARADONA (threat=0.60): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target AI Caramba (threat=0.60): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Accattoni (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Prompt in the shell (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Domenicaln (threat=0.60): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Neural Nomads (threat=0.70): building threat response
+2026-03-01 05:28:32,552 spam.diplomacy.deception_bandit INFO    Target Piadina as a Service (PaaS) (threat=0.60): building threat response
+2026-03-01 05:28:32,553 spam.diplomacy.deception_bandit INFO    Target RAGù (threat=0.60): building threat response
+2026-03-01 05:28:32,553 spam.diplomacy.deception_bandit INFO    Target Siesta dopo pizza (threat=0.60): building threat response
+2026-03-01 05:28:32,553 spam.diplomacy.deception_bandit INFO    Target Synapse AI (threat=0.70): building threat response
+2026-03-01 05:28:32,553 spam.diplomacy.deception_bandit INFO    Target The Hallucinators (threat=0.60): building threat response
+2026-03-01 05:28:32,553 spam.diplomacy.agent           INFO    DeceptionBandit selected 3 action(s): manufactured_scarcity→Samur_ai, manufactured_scarcity→AIS Privè, manufactured_scarcity→Cavalli al trotto
+2026-03-01 05:28:32,553 spam.diplomacy.agent           INFO    PseudoGAN crafting [manufactured_scarcity] message for Samur_ai (desired: overbid_on_ingredient)
+2026-03-01 05:28:32,553 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: generating message...
+2026-03-01 05:28:34,135 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:36,215 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:36,216 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: score=0.40, msg='Ciao Samur_ai! Ho notato che il tuo menù medio è 187 e ami i'
+2026-03-01 05:28:36,216 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: generating message...
+2026-03-01 05:28:38,120 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:39,748 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:39,754 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: score=0.30, msg='Ciao Samur_ai! Ho visto che il Riso di Cassandra è tra i tuo'
+2026-03-01 05:28:39,754 spam.diplomacy.agent           INFO    PseudoGAN result for Samur_ai: 'Ciao Samur_ai! Ho notato che il tuo menù medio è 187 e ami il Riso di Cassandra. Stiamo facendo scor'
+2026-03-01 05:28:39,754 spam.diplomacy.agent           INFO    Sending message to restaurant 10 via MCP send_message
+2026-03-01 05:28:39,968 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:39,970 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:40,042 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:40,314 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:40,379 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:40,382 spam.diplomacy.agent           INFO    Message sent to 10 (confirmed by server)
+2026-03-01 05:28:40,409 httpx                          INFO    HTTP Request: POST http://localhost:5555/api/messages/sent "HTTP/1.1 200 OK"
+2026-03-01 05:28:40,409 spam.diplomacy.agent           INFO    Sent [manufactured_scarcity] to Samur_ai: 'Ciao Samur_ai! Ho notato che il tuo menù medio è 1...'
+2026-03-01 05:28:40,409 spam.diplomacy.agent           INFO    PseudoGAN crafting [manufactured_scarcity] message for AIS Privè (desired: overbid_on_ingredient)
+2026-03-01 05:28:40,409 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: generating message...
+2026-03-01 05:28:43,208 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:45,114 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:45,116 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: score=0.15, msg='Ciao team AIS Privè! Abbiamo appena messo da parte una buona'
+2026-03-01 05:28:45,117 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: generating message...
+2026-03-01 05:28:46,689 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:49,711 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:49,714 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: score=0.15, msg='Ciao team AIS Privè! Ho notato che la vostra Polvere di Cron'
+2026-03-01 05:28:49,714 spam.diplomacy.agent           INFO    PseudoGAN result for AIS Privè: 'Ciao team AIS Privè! Abbiamo appena messo da parte una buona scorta di Polvere di Crononite per il p'
+2026-03-01 05:28:49,714 spam.diplomacy.agent           INFO    Sending message to restaurant 11 via MCP send_message
+2026-03-01 05:28:49,883 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:49,883 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:49,935 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:50,217 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:50,324 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:50,327 spam.diplomacy.agent           INFO    Message sent to 11 (confirmed by server)
+2026-03-01 05:28:50,355 httpx                          INFO    HTTP Request: POST http://localhost:5555/api/messages/sent "HTTP/1.1 200 OK"
+2026-03-01 05:28:50,356 spam.diplomacy.agent           INFO    Sent [manufactured_scarcity] to AIS Privè: 'Ciao team AIS Privè! Abbiamo appena messo da parte...'
+2026-03-01 05:28:50,356 spam.diplomacy.agent           INFO    PseudoGAN crafting [manufactured_scarcity] message for Cavalli al trotto (desired: overbid_on_ingredient)
+2026-03-01 05:28:50,356 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: generating message...
+2026-03-01 05:28:53,176 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:54,232 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:54,336 spam.diplomacy.pseudo_gan      INFO      GAN iter 1/2: score=0.10, msg='Ciao Cavalli al trotto! Ho notato il vostro amore per i Fram'
+2026-03-01 05:28:54,336 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: generating message...
+2026-03-01 05:28:56,551 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:58,067 httpx                          INFO    HTTP Request: POST https://api.regolo.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-01 05:28:58,068 spam.diplomacy.pseudo_gan      INFO      GAN iter 2/2: score=0.55, msg='Ciao Cavalli al trotto! Ho notato che il vostro menù a 267 €'
+2026-03-01 05:28:58,068 spam.diplomacy.agent           INFO    PseudoGAN result for Cavalli al trotto: 'Ciao Cavalli al trotto! Ho notato che il vostro menù a 267 € punta su Frammenti di Supernova e Riso '
+2026-03-01 05:28:58,068 spam.diplomacy.agent           INFO    Sending message to restaurant 13 via MCP send_message
+2026-03-01 05:28:58,246 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:58,247 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:58,302 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:58,523 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:58,581 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:58,583 spam.diplomacy.agent           INFO    Message sent to 13 (confirmed by server)
+2026-03-01 05:28:58,608 httpx                          INFO    HTTP Request: POST http://localhost:5555/api/messages/sent "HTTP/1.1 200 OK"
+2026-03-01 05:28:58,608 spam.diplomacy.agent           INFO    Sent [manufactured_scarcity] to Cavalli al trotto: 'Ciao Cavalli al trotto! Ho notato che il vostro me...'
+2026-03-01 05:28:58,608 spam.main                      INFO    Agent caps diplomacy to 2 messages (was 3)
+2026-03-01 05:28:58,608 spam.main                      INFO      ✉ [manufactured_scarcity] → Samur_ai (effect=overbid_on_ingredient): 'Ciao Samur_ai! Ho notato che il tuo menù medio è 187 e ami il Riso di Cassandra.'
+2026-03-01 05:28:58,608 spam.main                      INFO      ✉ [manufactured_scarcity] → AIS Privè (effect=overbid_on_ingredient): 'Ciao team AIS Privè! Abbiamo appena messo da parte una buona scorta di Polvere d'
+2026-03-01 05:28:58,608 spam.main                      INFO    Diplomacy: sent 2 messages total
+2026-03-01 05:28:58,608 spam.skills                    INFO      ✓ diplomacy_send succeeded
+2026-03-01 05:28:58,608 spam.main                      INFO    Skills executed: 8/8 OK (strategic_plan, intelligence_scan, strategic_refine, zone_selection, menu_planning, menu_save, market_ops, diplomacy_send)
+2026-03-01 05:28:58,610 spam.memory.message_log        INFO    Received message from Piadina as a Service (PaaS) (5): FLASH — Cronache dal Cosmo (aggiornamento urgente #22):
+Come riportato nell'ulti...
+2026-03-01 05:28:58,610 spam.memory.message_log        INFO    Received message from Piadina as a Service (PaaS) (5): FLASH — Cronache dal Cosmo (aggiornamento urgente #22):
+Come riportato nell'ulti...
+2026-03-01 05:28:58,610 spam.main                      INFO    Message from Piadina as a Service (PaaS): 'FLASH — Cronache dal Cosmo (aggiornamento urgente #22):
+Come riportato nell'ulti' (credibility=0.50)
+2026-03-01 05:28:58,612 spam.phase_router              INFO    Phase: speaking → closed_bid (turn 59)
+2026-03-01 05:28:58,612 spam.main                      INFO    [CLOSED_BID] Turn 59
+2026-03-01 05:28:58,765 spam.main                      INFO    Context built: turn=59, phase=closed_bid, balance=41804, reputation=99, inventory=0 types/0 units, menu=22 items, open=False, mid_turn=False
+2026-03-01 05:28:58,766 spam.skills                    INFO    ▸ Executing skill: bid_compute
+2026-03-01 05:28:58,766 spam.decision.strategy_agent   INFO    Bid guidance from agent: spending=0.51, aggr=0.40, priority=['Rice', 'Chicken', 'Truffle'], price_caps=0 ingredients capped, cheap=0, expected_servings=9
+2026-03-01 05:28:58,766 spam.main                      INFO    Bid compute: agent-guided spending=0.51, aggressiveness=0.40
+2026-03-01 05:28:58,766 spam.decision.strategy_agent   INFO    Menu guidance from agent: size=14, prestige=[20-90], prep≤12.0s, focus=budget, tiers={'budget': 5, 'mid': 4, 'mid_high': 2, 'premium': 2}, expected_customers=9
+2026-03-01 05:28:58,766 spam.main                      INFO    Bid compute: zone=DIVERSIFIED, balance=41804, inventory=0 types, recipes=287, active_competitors=24, spending=0.51, agent_guidance=yes
+2026-03-01 05:28:58,766 spam.decision.ilp_solver       INFO    Agent guidance applied: prestige=[10,100], menu=[12,22], prep≤12.0s
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Eterea Sinfonia di Gravità con Infusione Temp price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia del Multiverso Calante               price= 227, ing_cost=98, margin=+132%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Quantica dell'Oceano Interstellare   price= 227, ing_cost=90, margin=+152%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Temporale di Fenice e Xenodonte su P price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Celestiale di Gnocchi del Crepuscolo price= 227, ing_cost=97, margin=+134%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Plasma Celestiale al Risotto di Kraken nell'A price= 227, ing_cost=105, margin=+116%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Luminiscenze e Contrasti  price= 227, ing_cost=112, margin=+103%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Portale Cosmico: Sinfonia di Gnocchi del Crep price= 227, ing_cost=99, margin=+129%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica: Versione Data               price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia di Multiverso: La Danza degli Elemen price= 227, ing_cost=98, margin=+132%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Aromatica del Multiverso             price= 227, ing_cost=75, margin=+203%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Terracotta                price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Viaggio Cosmico nel Multiverso                price= 227, ing_cost=98, margin=+132%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica ma Fatta Bene                price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Galassia a Tavola: Sinfonia di Tempeste Cosmi price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica di Andromeda                 price= 227, ing_cost=105, margin=+116%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Galassia nel Piatto: Sinfonia di Sapori e Dim price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Sinfonia Astrale                              price= 227, ing_cost=112, margin=+103%
+2026-03-01 05:28:58,783 spam.decision.ilp_solver       INFO      Menu: Piastrella Celestiale di Gnocchi del Crepusco price= 227, ing_cost=82, margin=+177%
+2026-03-01 05:28:58,784 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica: il Ritorno dell'Imperatore  price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:58,784 spam.decision.ilp_solver       INFO      Menu: Sinfonia Cosmica all'Alba di Fenice           price= 227, ing_cost=107, margin=+112%
+2026-03-01 05:28:58,784 spam.decision.ilp_solver       INFO      Menu: Sinfonia Temporale delle Profondità Infrasoni price= 227, ing_cost=100, margin=+127%
+2026-03-01 05:28:58,784 spam.decision.ilp_solver       INFO    MILP [DIVERSIFIED]: 22 menu items, 48 bids (total_qty=124), cost=2463/21320 budget, expected_rev=4994, NET PROFIT=+2531
+2026-03-01 05:28:58,784 spam.skills                    INFO      ✓ bid_compute succeeded
+2026-03-01 05:28:58,784 spam.skills                    INFO    ▸ Executing skill: bid_submit
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Amido di Stellarion @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Biscotti della Galassia @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 4x Carne di Balena spaziale @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Carne di Drago @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 5x Carne di Kraken @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Carne di Mucca @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 4x Carne di Xenodonte @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Colonia di Mycoflora @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Cristalli di Memoria @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Cristalli di Nebulite @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Erba Pipa @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Essenza di Speziaria @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 5x Essenza di Tachioni @ 34 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Essenza di Vuoto @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Farina di Nettuno @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Fibra di Sintetex @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 4x Foglie di Mandragora @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Foglie di Nebulosa @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Frammenti di Supernova @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Frutti del Diavolo @ 30 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Funghi Orbitali @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Funghi dell’Etere @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Fusilli del Vento @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 5x Gnocchi del Crepuscolo @ 23 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Granuli di Nebbia Arcobaleno @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Lacrime di Andromeda @ 42 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Lacrime di Unicorno @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Lattuga Namecciana @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Liane di Plasmodio @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Nduja Fritta Tanto @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Nettare di Sirena @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 4x Pane degli Abissi @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Petali di Eco @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Plasma Vitale @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 4x Polvere di Crononite @ 43 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 1x Polvere di Stelle @ 23 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 3x Radici di Gravità @ 16 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 2x Radici di Singolarità @ 18 each
+2026-03-01 05:28:58,784 spam.main                      INFO      Bid: 4x Riso di Cassandra @ 16 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 3x Sale Temporale @ 16 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 4x Shard di Materia Oscura @ 18 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 3x Shard di Prisma Stellare @ 45 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 1x Slurm @ 18 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 1x Spaghi del Sole @ 18 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 2x Spore Quantiche @ 16 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 4x Teste di Idra @ 16 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 5x Uova di Fenice @ 16 each
+2026-03-01 05:28:58,785 spam.main                      INFO      Bid: 1x Vero Ghiaccio @ 18 each
+2026-03-01 05:28:58,967 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:58,968 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:28:59,021 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:28:59,234 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:59,288 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:28:59,292 spam.main                      INFO    Bids submitted: 48 items, total cost=2463
+2026-03-01 05:28:59,292 spam.skills                    INFO      ✓ bid_submit succeeded
+2026-03-01 05:28:59,292 spam.main                      INFO    Skills executed: 2/2 OK (bid_compute, bid_submit)
+2026-03-01 05:30:08,188 spam.phase_router              INFO    Phase: closed_bid → waiting (turn 59)
+2026-03-01 05:30:08,188 spam.main                      INFO    [WAITING] Turn 59
+2026-03-01 05:30:08,722 spam.main                      INFO    Context built: turn=59, phase=waiting, balance=39341, reputation=99, inventory=48 types/124 units, menu=22 items, open=False, mid_turn=False
+2026-03-01 05:30:08,722 spam.skills                    INFO    ▸ Executing skill: inventory_verify
+2026-03-01 05:30:08,722 spam.main                      INFO    Inventory verify: 48 ingredient types, 124 total units
+2026-03-01 05:30:08,722 spam.main                      INFO    Current menu has 22 items to verify
+2026-03-01 05:30:08,722 spam.serving.pipeline          INFO    Menu set with 22 items
+2026-03-01 05:30:08,722 spam.skills                    INFO      ✓ inventory_verify succeeded
+2026-03-01 05:30:08,722 spam.skills                    INFO    ▸ Executing skill: restaurant_open
+2026-03-01 05:30:08,904 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:30:08,905 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:30:08,961 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:30:09,147 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:30:09,205 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:30:09,206 spam.main                      INFO    Restaurant opened (server confirmed)
+2026-03-01 05:30:09,206 spam.skills                    INFO      ✓ restaurant_open succeeded
+2026-03-01 05:30:09,206 spam.skills                    INFO    ▸ Executing skill: serving_prep
+2026-03-01 05:30:09,367 spam.serving.pipeline          INFO    Serving started for turn 59 (poll-driven)
+2026-03-01 05:30:09,368 spam.serving.pipeline          INFO    Inventory snapshot: 124 total items
+2026-03-01 05:30:09,368 spam.main                      INFO    Serving pipeline ready: menu=22 items, inventory=124 units
+2026-03-01 05:30:09,368 spam.skills                    INFO      ✓ serving_prep succeeded
+2026-03-01 05:30:09,368 spam.main                      INFO    Skills executed: 3/3 OK (inventory_verify, restaurant_open, serving_prep)
+2026-03-01 05:30:55,182 spam.phase_router              INFO    Phase: waiting → serving (turn 59)
+2026-03-01 05:30:55,182 spam.main                      INFO    [SERVING] Turn 59
+2026-03-01 05:30:55,422 spam.main                      INFO    Context built: turn=59, phase=serving, balance=39341, reputation=99, inventory=48 types/124 units, menu=22 items, open=True, mid_turn=False
+2026-03-01 05:30:55,422 spam.skills                    INFO    ▸ Executing skill: serving_monitor
+2026-03-01 05:30:55,422 spam.main                      INFO    [SERVING] Turn 59 — menu=22, awaiting clients
+2026-03-01 05:30:55,422 spam.skills                    INFO      ✓ serving_monitor succeeded
+2026-03-01 05:30:55,422 spam.skills                    INFO    ▸ Executing skill: close_decision
+2026-03-01 05:30:55,422 spam.skills                    INFO      ✓ close_decision succeeded
+2026-03-01 05:30:55,422 spam.main                      INFO    Skills executed: 2/2 OK (serving_monitor, close_decision)
+2026-03-01 05:30:57,260 spam.serving.pipeline          INFO    Client spawned: Dorian Sawyer — 'I want to eat Galassia a Tavola: Sinfonia di Tempeste Cosmiche. I'm intolerant to Farina di Nettuno'
+2026-03-01 05:30:57,621 spam.serving.pipeline          INFO    Client Dorian Sawyer declared intolerances: ['farina di nettuno', 'farina di nettuno']
+2026-03-01 05:30:57,807 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:30:57,807 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:30:57,860 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:30:58,136 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:30:58,219 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:30:58,220 spam.serving.pipeline          INFO    Preparing Galassia a Tavola: Sinfonia di Tempeste Cosmiche for Dorian Sawyer (client_id=431, prep≈5.0s)
+2026-03-01 05:31:03,288 spam.serving.pipeline          INFO    Client spawned: Lenn Vox — 'Sinfonia Cosmica: il Ritorno dell'Imperatore'
+2026-03-01 05:31:03,848 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:03,850 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:31:03,898 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:31:04,075 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:04,130 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:04,133 spam.serving.pipeline          INFO    Preparing Sinfonia Cosmica: il Ritorno dell'Imperatore for Lenn Vox (client_id=40, prep≈5.0s)
+2026-03-01 05:31:07,500 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:07,500 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:31:07,548 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:31:07,752 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:07,815 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:07,819 spam.serving.pipeline          INFO    Served Galassia a Tavola: Sinfonia di Tempeste Cosmiche to Dorian Sawyer (client_id=431, elapsed=10.2s)
+2026-03-01 05:31:17,482 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:17,483 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:31:17,558 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:31:17,775 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:17,830 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:17,832 spam.serving.pipeline          INFO    Served Sinfonia Cosmica: il Ritorno dell'Imperatore to Lenn Vox (client_id=40, elapsed=14.2s)
+2026-03-01 05:31:21,285 spam.serving.pipeline          INFO    Client spawned: Renna Kade — 'Plasma Celestiale al Risotto di Kraken nell'Aura del Sole'
+2026-03-01 05:31:21,862 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:21,863 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:31:21,926 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:31:22,112 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:22,162 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:22,164 spam.serving.pipeline          INFO    Preparing Plasma Celestiale al Risotto di Kraken nell'Aura del Sole for Renna Kade (client_id=322, prep≈5.0s)
+2026-03-01 05:31:25,312 spam.serving.pipeline          INFO    Client Dara Korr declared intolerances: ['funghi dell’etere', 'funghi dell’etere']
+2026-03-01 05:31:25,313 spam.serving.pipeline          WARNING Cannot cook matched dish 'Plasma Celestiale al Risotto di Kraken nell'Aura del Sole' for Dara Korr — SKIPPING customer to preserve reputation. (Serving wrong dish = rejection = reputation damage)
+2026-03-01 05:31:25,325 spam.serving.pipeline          INFO    Client spawned: Dara Korr — 'I want to eat Plasma Celestiale al Risotto di Kraken nell'Aura del Sole. I'm intolerant to Funghi dell’Etere'
+2026-03-01 05:31:25,673 spam.serving.pipeline          ERROR   GET /meals returned 429
+2026-03-01 05:31:27,456 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:27,456 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:31:27,522 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:31:27,779 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:27,842 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:27,844 spam.serving.pipeline          INFO    Served Plasma Celestiale al Risotto di Kraken nell'Aura del Sole to Renna Kade (client_id=322, elapsed=6.2s)
+2026-03-01 05:31:33,358 spam.serving.pipeline          INFO    Client spawned: Tessa Wick — 'Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura'
+2026-03-01 05:31:33,814 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:33,815 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:31:33,950 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:31:34,231 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:34,302 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:34,305 spam.serving.pipeline          INFO    Preparing Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura for Tessa Wick (client_id=398, prep≈5.0s)
+2026-03-01 05:31:45,585 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:45,591 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:31:45,645 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:31:45,859 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:45,923 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:31:45,924 spam.serving.pipeline          INFO    Served Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura to Tessa Wick (client_id=398, elapsed=12.3s)
+2026-03-01 05:32:01,330 spam.serving.pipeline          INFO    Client spawned: Tess Orbit — 'Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura'
+2026-03-01 05:32:01,681 spam.serving.pipeline          ERROR   GET /meals returned 429
+2026-03-01 05:32:03,419 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:03,419 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:32:03,479 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:32:03,677 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:03,732 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:03,735 spam.serving.pipeline          INFO    Preparing Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura for Tess Orbit (client_id=74, prep≈5.0s)
+2026-03-01 05:32:11,346 spam.serving.pipeline          INFO    Client spawned: Elira Nero — 'Portale Cosmico: Sinfonia di Gnocchi del Crepuscolo con Essenza di Tachioni e Sfumature di Fenice'
+2026-03-01 05:32:11,550 spam.serving.pipeline          ERROR   GET /meals returned 429
+2026-03-01 05:32:11,889 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:11,890 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:32:11,946 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:32:12,168 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:12,232 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:12,233 spam.serving.pipeline          INFO    Preparing Portale Cosmico: Sinfonia di Gnocchi del Crepuscolo con Essenza di Tachioni e Sfumature di Fenice for Elira Nero (client_id=379, prep≈5.0s)
+2026-03-01 05:32:15,511 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:15,513 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:32:15,541 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:15,542 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:32:15,569 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:32:15,595 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:32:15,788 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:15,800 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:15,848 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:15,850 spam.serving.pipeline          INFO    Served Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura to Tess Orbit (client_id=74, elapsed=12.6s)
+2026-03-01 05:32:15,850 spam.serving.pipeline          INFO    Client spawned: Vela Croft — 'Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura'
+2026-03-01 05:32:15,853 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:15,854 spam.serving.pipeline          INFO    Preparing Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura for Vela Croft (client_id=575, prep≈5.0s)
+2026-03-01 05:32:19,519 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:19,520 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:32:19,579 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:32:19,792 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:19,873 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:19,874 spam.serving.pipeline          INFO    Served Portale Cosmico: Sinfonia di Gnocchi del Crepuscolo con Essenza di Tachioni e Sfumature di Fenice to Elira Nero (client_id=379, elapsed=8.2s)
+2026-03-01 05:32:21,266 spam.serving.pipeline          INFO    Client spawned: Galen Wren — 'Sinfonia Astrale'
+2026-03-01 05:32:21,638 spam.serving.pipeline          WARNING Cannot cook matched dish 'Sinfonia Astrale' for Galen Wren — SKIPPING customer to preserve reputation. (Serving wrong dish = rejection = reputation damage)
+2026-03-01 05:32:27,437 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:27,437 mcp.client.streamable_http     INFO    Negotiated protocol version: 2025-06-18
+2026-03-01 05:32:27,515 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 202 Accepted"
+2026-03-01 05:32:27,795 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:27,867 httpx                          INFO    HTTP Request: POST https://hackapizza.datapizza.tech/mcp "HTTP/1.1 200 OK"
+2026-03-01 05:32:27,869 spam.serving.pipeline          INFO    Served Piastrella Celestiale di Gnocchi del Crepuscolo con Nebulosa di Riso di Cassandra, Lacrime di Unicorno e Velo di Materia Oscura to Vela Croft (client_id=575, elapsed=12.5s)
+2026-03-01 05:33:55,420 spam.phase_router              INFO    Phase: serving → stopped (turn 59)
+2026-03-01 05:33:55,421 spam.main                      INFO    [STOPPED] Turn 59
+2026-03-01 05:33:55,423 spam.serving.pipeline          INFO    Serving ended: received=9 matched=9 prepared=7 served=7 failed=0 no_match=0 no_ingredients=2 timeouts=0 mcp_retries=0 mcp_errors=0 intolerance_skips=0 polls=143
+2026-03-01 05:33:55,677 spam.main                      INFO    Context built: turn=59, phase=stopped, balance=41588, reputation=97, inventory=0 types/0 units, menu=22 items, open=True, mid_turn=False
+2026-03-01 05:33:55,677 spam.skills                    INFO    ▸ Executing skill: end_turn_snapshot
+2026-03-01 05:33:55,678 spam.diplomacy.agent           INFO    Deception reward for Samur_ai [manufactured_scarcity]: 0.0
+2026-03-01 05:33:55,678 spam.diplomacy.agent           INFO    Deception reward for AIS Privè [manufactured_scarcity]: 0.0
+2026-03-01 05:33:55,678 spam.diplomacy.agent           INFO    Deception reward for Cavalli al trotto [manufactured_scarcity]: 0.0
+2026-03-01 05:33:55,679 spam.memory.game_state         INFO    Turn 59 ended — inventory expired
+2026-03-01 05:33:55,679 spam.main                      INFO    Turn 59 complete: served=7, balance=41588, reputation=97
+2026-03-01 05:33:55,679 spam.skills                    INFO      ✓ end_turn_snapshot succeeded
+2026-03-01 05:33:55,679 spam.skills                    INFO    ▸ Executing skill: info_gather
+2026-03-01 05:33:55,963 spam.main                      INFO    Bid history: 683 entries for turn 59
+2026-03-01 05:33:55,963 spam.decision.strategy_agent   INFO    Bid history processed: 0 ingredients with wins, avg prices: {}
+2026-03-01 05:33:55,964 spam.main                      INFO    Bid history fed to strategy agent for price learning
+2026-03-01 05:33:55,964 spam.decision.strategy_agent   INFO    Turn 59 result recorded: rev=2493, customers=9, delta=+30, strategy=volume_first
+2026-03-01 05:33:55,964 spam.skills                    INFO      ✓ info_gather succeeded
+2026-03-01 05:33:55,964 spam.main                      INFO    Skills executed: 2/2 OK (end_turn_snapshot, info_gather)
