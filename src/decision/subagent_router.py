@@ -119,6 +119,11 @@ class SubagentRouter:
         competitor_clusters: dict,
         competitor_briefings: dict,
         all_states: dict | None = None,
+        # ── vector-space inputs ──
+        embeddings: dict | None = None,
+        features: dict | None = None,
+        demand_forecast: dict | None = None,
+        trajectory_predictor=None,
     ) -> str:
         """
         Select the active zone for this turn.
@@ -135,6 +140,10 @@ class SubagentRouter:
             competitor_clusters=competitor_clusters,
             competitor_briefings=competitor_briefings,
             all_states=all_states,
+            embeddings=embeddings,
+            features=features,
+            demand_forecast=demand_forecast,
+            trajectory_predictor=trajectory_predictor,
         )
 
         # If strategy agent has a recommendation with sufficient confidence,

@@ -1026,6 +1026,13 @@ class GameOrchestrator:
                 competitor_clusters=ctx.intel.get("clusters", {}),
                 competitor_briefings=ctx.intel.get("briefings", {}),
                 all_states=ctx.intel.get("all_states"),
+                embeddings=ctx.intel.get("embeddings"),
+                features=ctx.intel.get("features"),
+                demand_forecast=ctx.intel.get("demand_forecast"),
+                trajectory_predictor=(
+                    self.intelligence.trajectory_predictor
+                    if hasattr(self, "intelligence") else None
+                ),
             )
             # Log agent influence
             strategy = self._current_strategy
