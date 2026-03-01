@@ -10,6 +10,7 @@ NO browser UI — all visualisation lives in dashboard/.
 """
 
 import json
+import os
 import threading
 import time
 import copy
@@ -253,30 +254,49 @@ def flatten_market_entry(e: dict) -> dict:
 # Polling thread
 # ──────────────────────────────────────────────
 
-def _poll_game_state():
-    """Infer turn_id from our own restaurant data (no dedicated game-state endpoint)."""
-    # Try /restaurant/{TEAM_ID} — our own record often contains turnId / currentTurn
-    data = api_get(f"/restaurant/{TEAM_ID}", silent_404=True)
-    if data:
-        turn = (data.get("turn_id") or data.get("turnId") or
-                data.get("currentTurn") or data.get("current_turn"))
-        if turn:
-            with state_lock:
-                if state["turn_id"] != turn:
-                    state["turn_id"] = turn
-                    push_event("system", {"msg": f"turn_id detected from restaurant data: {turn}"})
-            return
+GAME_EVENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "game_events.jsonl")
 
-    # Fallback: scan the last polled raw restaurant snapshots for any turnId field
+
+def _poll_game_state():
+    """Infer turn_id and phase from game_events.jsonl written by the bot's SSE connection."""
+    best_turn_id = None
+    best_phase = None
+    try:
+        with open(GAME_EVENTS_PATH, "r") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    evt = json.loads(raw)
+                except Exception:
+                    continue
+                etype = evt.get("type")
+                data = evt.get("data") or {}
+                if etype == "game_started":
+                    tid = data.get("turn_id")
+                    if tid is not None:
+                        best_turn_id = tid
+                        best_phase = "speaking"
+                elif etype == "game_phase_changed":
+                    ph = data.get("phase")
+                    if ph:
+                        best_phase = ph
+                elif etype == "game_reset":
+                    best_turn_id = None
+                    best_phase = "reset"
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        push_event("system", {"msg": f"game_events.jsonl read error: {e}"})
+
     with state_lock:
-        for r in state["restaurants_raw"].values():
-            turn = (r.get("turn_id") or r.get("turnId") or
-                    r.get("currentTurn") or r.get("current_turn"))
-            if turn:
-                if state["turn_id"] != turn:
-                    state["turn_id"] = turn
-                    push_event("system", {"msg": f"turn_id inferred from restaurants: {turn}"})
-                break
+        if best_turn_id is not None and state["turn_id"] != best_turn_id:
+            state["turn_id"] = best_turn_id
+            push_event("system", {"msg": f"turn_id from game_events.jsonl: {best_turn_id}"})
+        if best_phase is not None and state["phase"] != best_phase:
+            state["phase"] = best_phase
+            push_event("system", {"msg": f"phase from game_events.jsonl: {best_phase}"})
 
 
 def polling_thread():
