@@ -29,6 +29,8 @@ Integration points:
 
 import json
 import logging
+import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,6 +71,14 @@ class TurnStrategy:
     diplomacy_targets: list[int] = field(default_factory=list)
     diplomacy_reasoning: str = ""
 
+    # Focus archetype for this turn (rotate to capture different segments)
+    focus_archetype: str = "all"  # all | budget | mid | premium | luxury
+
+    # Expected customer flow estimate
+    expected_customers: int = 8  # total customers expected this turn
+    expected_high_value: int = 2  # Saggi + Astrobaroni
+    expected_budget: int = 4  # Esploratori + Famiglie
+
     # Overall confidence (how much to trust agent vs. algorithmic defaults)
     confidence: float = 0.5  # 0.0 = use defaults, 1.0 = fully trust agent
 
@@ -97,6 +107,15 @@ class StrategyAgent:
         self.fast_client = fast_client or llm_client
         self._last_strategy: TurnStrategy | None = None
         self._turn_history: list[dict] = []  # track strategies across turns
+
+        # ── Revenue Tracking (what worked?) ──
+        self._turn_results: list[dict] = []  # [{turn_id, revenue, customers, balance_delta, strategy, zone}]
+        self._strategy_performance: dict[str, list[float]] = defaultdict(list)  # strategy → [revenues]
+
+        # ── Bid History Tracking (don't overbid) ──
+        self._bid_price_history: dict[str, list[float]] = defaultdict(list)  # ingredient → [winning prices]
+        self._ingredient_avg_prices: dict[str, float] = {}  # ingredient → rolling avg
+        self._ingredient_availability: dict[str, float] = defaultdict(float)  # ingredient → avg availability
 
     @property
     def last_strategy(self) -> TurnStrategy | None:
@@ -172,9 +191,90 @@ class StrategyAgent:
             "zone": strategy.recommended_zone,
             "menu_size": strategy.menu_target_size,
             "bid_aggr": strategy.bid_aggressiveness,
+            "focus": strategy.focus_archetype,
+            "price_strategy": strategy.price_strategy,
         })
 
         return strategy
+
+    def record_turn_result(
+        self,
+        turn_id: int,
+        revenue: float,
+        customers_served: int,
+        balance_delta: float,
+        strategy_used: str = "unknown",
+        zone_used: str = "DIVERSIFIED",
+    ):
+        """Record the outcome of a completed turn for future strategy decisions."""
+        result = {
+            "turn_id": turn_id,
+            "revenue": revenue,
+            "customers_served": customers_served,
+            "balance_delta": balance_delta,
+            "strategy": strategy_used,
+            "zone": zone_used,
+        }
+        self._turn_results.append(result)
+        self._strategy_performance[strategy_used].append(revenue)
+        logger.info(
+            f"Turn {turn_id} result recorded: rev={revenue:.0f}, "
+            f"customers={customers_served}, delta={balance_delta:+.0f}, "
+            f"strategy={strategy_used}"
+        )
+
+    def record_bid_history(self, bid_entries: list[dict]):
+        """Process bid history from the server to learn ingredient pricing patterns.
+
+        bid_entries: list of dicts like {ingredient, bid, quantity, status, restaurant_id}.
+        """
+        if not bid_entries:
+            return
+
+        # Group by ingredient
+        ingredient_bids: dict[str, list[float]] = defaultdict(list)
+        ingredient_wins: dict[str, list[float]] = defaultdict(list)
+
+        for entry in bid_entries:
+            ing = entry.get("ingredient", "")
+            bid_price = entry.get("bid", 0)
+            status = entry.get("status", "")
+            if ing and bid_price > 0:
+                ingredient_bids[ing].append(bid_price)
+                if status == "completed":
+                    ingredient_wins[ing].append(bid_price)
+
+        # Update rolling averages
+        for ing, prices in ingredient_wins.items():
+            self._bid_price_history[ing].extend(prices)
+            # Keep last 30 data points per ingredient
+            if len(self._bid_price_history[ing]) > 30:
+                self._bid_price_history[ing] = self._bid_price_history[ing][-30:]
+            self._ingredient_avg_prices[ing] = (
+                sum(self._bid_price_history[ing]) / len(self._bid_price_history[ing])
+            )
+
+        # Track availability (ratio of bids that won)
+        for ing, all_prices in ingredient_bids.items():
+            wins = len(ingredient_wins.get(ing, []))
+            total = len(all_prices)
+            self._ingredient_availability[ing] = wins / max(total, 1)
+
+        logger.info(
+            f"Bid history processed: {len(ingredient_wins)} ingredients with wins, "
+            f"avg prices: {dict(list(self._ingredient_avg_prices.items())[:5])}"
+        )
+
+    def get_bid_price_intelligence(self) -> dict:
+        """Return bid pricing intelligence for use by ILP solver."""
+        return {
+            "avg_prices": dict(self._ingredient_avg_prices),
+            "availability": dict(self._ingredient_availability),
+            "history_depth": {
+                ing: len(prices)
+                for ing, prices in self._bid_price_history.items()
+            },
+        }
 
     async def consult_zone(
         self,
@@ -208,17 +308,52 @@ class StrategyAgent:
         balance: float,
     ) -> dict:
         """
-        Provide menu composition guidance.
+        Provide menu composition guidance with MULTI-LAYER enforcement.
+
+        Always ensures the menu spans multiple price tiers to capture
+        customers from ALL archetypes. The distribution adapts based on
+        the agent's focus_archetype and expected customer flow.
 
         Returns dict with keys:
           - target_size: int
-          - prestige_min: int
-          - prestige_max: int
+          - prestige_min, prestige_max: int
           - max_prep_time: float
           - priority_recipes: list[str]
-          - diversity_bonus: float (0.0-1.0, how much to reward prestige spread)
+          - diversity_bonus: float (0.0-1.0)
+          - tier_targets: dict  # min dishes per price tier
+          - expected_customers: int
+          - bid_price_intelligence: dict  # historical bid data
+          - price_strategy, price_adjustment, undercut: pricing params
         """
         strat = self._last_strategy or TurnStrategy()
+
+        # ── Multi-layer tier targets based on focus ──
+        # Always have dishes in every layer; shift emphasis based on focus
+        focus = strat.focus_archetype
+        if focus == "premium" or focus == "luxury":
+            # More high-prestige dishes, but still cover budget
+            tier_targets = {
+                "budget": 2,     # prestige 0-35: Esploratori bait
+                "mid": 3,        # prestige 36-60: Famiglie sweet spot
+                "mid_high": 3,   # prestige 61-80: crossover
+                "premium": 4,    # prestige 81-100: Saggi + Astrobaroni
+            }
+        elif focus == "budget":
+            # More budget dishes, light premium
+            tier_targets = {
+                "budget": 5,
+                "mid": 4,
+                "mid_high": 2,
+                "premium": 2,
+            }
+        else:  # "all" / "balanced" / "mid"
+            # Even spread across all tiers
+            tier_targets = {
+                "budget": 3,
+                "mid": 4,
+                "mid_high": 3,
+                "premium": 3,
+            }
 
         guidance = {
             "target_size": strat.menu_target_size,
@@ -226,8 +361,14 @@ class StrategyAgent:
             "prestige_max": strat.menu_prestige_max,
             "max_prep_time": strat.menu_max_prep_time,
             "priority_recipes": strat.menu_priority_recipes,
-            "diversity_bonus": 0.3 if strat.menu_diversify else 0.0,
+            "diversity_bonus": 0.35 if strat.menu_diversify else 0.1,
             "diversify": strat.menu_diversify,
+            "tier_targets": tier_targets,
+            "expected_customers": strat.expected_customers,
+            "expected_high_value": strat.expected_high_value,
+            "focus_archetype": focus,
+            # Bid price intelligence for the ILP solver
+            "bid_price_intelligence": self.get_bid_price_intelligence(),
             # Pricing guidance (used by ILP solver's compute_menu_price)
             "price_strategy": strat.price_strategy,
             "price_adjustment": strat.price_adjustment_factor,
@@ -240,16 +381,20 @@ class StrategyAgent:
                 f"Menu guidance from agent: size={guidance['target_size']}, "
                 f"prestige=[{guidance['prestige_min']}-{guidance['prestige_max']}], "
                 f"prep≤{guidance['max_prep_time']}s, "
-                f"diversify={guidance['diversify']}"
+                f"focus={focus}, tiers={tier_targets}, "
+                f"expected_customers={strat.expected_customers}"
             )
         else:
-            # Low confidence — use broad defaults for diversification
-            guidance["target_size"] = max(12, guidance["target_size"])
-            guidance["prestige_min"] = 15
+            # Low confidence — use broad defaults for maximum capture
+            guidance["target_size"] = max(14, guidance["target_size"])
+            guidance["prestige_min"] = 10
             guidance["prestige_max"] = 100
             guidance["max_prep_time"] = 12.0
-            guidance["diversity_bonus"] = 0.25
+            guidance["diversity_bonus"] = 0.35
             guidance["diversify"] = True
+            guidance["tier_targets"] = {
+                "budget": 3, "mid": 4, "mid_high": 3, "premium": 3
+            }
 
         return guidance
 
@@ -258,14 +403,22 @@ class StrategyAgent:
         zone: str,
         balance: float,
         active_competitors: int,
+        menu_recipes: list[dict] | None = None,
     ) -> dict:
         """
-        Provide bidding guidance.
+        Provide bidding guidance with bid history awareness.
+
+        Uses historical winning prices to avoid overbidding on cheap
+        ingredients. Adjusts spending based on menu needs and expected
+        customer flow.
 
         Returns dict with keys:
           - spending_fraction: float (0.0-0.6)
           - priority_ingredients: list[str]
           - aggressiveness: float (0.0-1.0)
+          - bid_price_caps: dict[str, float]  # ingredient → max reasonable bid
+          - cheap_ingredients: list[str]  # ingredients historically available cheap
+          - expected_servings: int  # how many servings to plan for
         """
         strat = self._last_strategy or TurnStrategy()
 
@@ -279,15 +432,51 @@ class StrategyAgent:
         elif active_competitors >= 4:
             spending = min(spending + 0.05, 0.50)  # heavy competition
 
+        # ── Bid history-based price caps ──
+        # If we know an ingredient usually wins at X, don't bid more than X * 1.3
+        bid_price_caps: dict[str, float] = {}
+        cheap_ingredients: list[str] = []
+
+        for ing, avg_price in self._ingredient_avg_prices.items():
+            availability = self._ingredient_availability.get(ing, 0.5)
+            if availability >= 0.7:  # high availability → usually easy to get
+                # Cap at avg + 20% — no need to overbid
+                bid_price_caps[ing] = avg_price * 1.2
+                if avg_price <= 15:
+                    cheap_ingredients.append(ing)
+            elif availability >= 0.4:  # moderate availability
+                bid_price_caps[ing] = avg_price * 1.35
+            else:  # scarce — allow higher bids
+                bid_price_caps[ing] = avg_price * 1.6
+
+        # ── Expected servings based on customer flow ──
+        expected_servings = strat.expected_customers
+
+        # If we have menu info, adjust spending for what we actually need
+        if menu_recipes:
+            total_ing_needed = sum(
+                sum(r.get("ingredients", {}).values())
+                for r in menu_recipes
+            )
+            # Scale spending with menu complexity
+            if total_ing_needed > 0:
+                complexity_factor = min(total_ing_needed / 50.0, 1.5)
+                spending = min(spending * complexity_factor, 0.55)
+
         guidance = {
             "spending_fraction": spending,
             "priority_ingredients": strat.bid_priority_ingredients,
             "aggressiveness": aggr,
+            "bid_price_caps": bid_price_caps,
+            "cheap_ingredients": cheap_ingredients,
+            "expected_servings": expected_servings,
         }
 
         logger.info(
             f"Bid guidance from agent: spending={spending:.2f}, "
-            f"aggr={aggr:.2f}, priority={strat.bid_priority_ingredients[:3]}"
+            f"aggr={aggr:.2f}, priority={strat.bid_priority_ingredients[:3]}, "
+            f"price_caps={len(bid_price_caps)} ingredients capped, "
+            f"cheap={len(cheap_ingredients)}, expected_servings={expected_servings}"
         )
 
         return guidance
@@ -355,7 +544,7 @@ class StrategyAgent:
         our_state: dict | None = None,
         phase: str = "speaking",
     ) -> dict:
-        """Build a compact context dict for the LLM."""
+        """Build a compact context dict for the LLM, including history and bid data."""
         briefings = intel.get("briefings", {})
         active_competitors = sum(
             1 for b in briefings.values()
@@ -395,10 +584,55 @@ class StrategyAgent:
                 "threat": b.get("threat_level", 0),
             })
 
-        # History summary (what worked in past turns?)
+        # History summary with RESULTS (what worked in past turns?)
         history_summary = []
-        for h in self._turn_history[-5:]:  # last 5 turns
-            history_summary.append(h)
+        for h in self._turn_history[-5:]:
+            # Merge with results if available
+            result = next(
+                (r for r in self._turn_results if r["turn_id"] == h["turn_id"]),
+                None
+            )
+            entry = dict(h)
+            if result:
+                entry["revenue"] = result["revenue"]
+                entry["customers"] = result["customers_served"]
+                entry["balance_delta"] = result["balance_delta"]
+            history_summary.append(entry)
+
+        # Strategy performance summary
+        strategy_perf = {}
+        for strat_name, revenues in self._strategy_performance.items():
+            if revenues:
+                strategy_perf[strat_name] = {
+                    "avg_revenue": sum(revenues) / len(revenues),
+                    "best_revenue": max(revenues),
+                    "turns_used": len(revenues),
+                }
+
+        # Bid price intelligence (top N most relevant ingredients)
+        bid_intel_summary = {}
+        for ing, avg_price in sorted(
+            self._ingredient_avg_prices.items(),
+            key=lambda x: x[1],
+        )[:15]:
+            avail = self._ingredient_availability.get(ing, 0.5)
+            bid_intel_summary[ing] = {
+                "avg_winning_price": round(avg_price, 1),
+                "availability": round(avail, 2),
+                "cheap": avg_price <= 15,
+            }
+
+        # Prestige distribution of available recipes (for multi-layer guidance)
+        prestige_buckets = {"budget": 0, "mid": 0, "mid_high": 0, "premium": 0}
+        for p in prestige_values:
+            if p <= 35:
+                prestige_buckets["budget"] += 1
+            elif p <= 60:
+                prestige_buckets["mid"] += 1
+            elif p <= 80:
+                prestige_buckets["mid_high"] += 1
+            else:
+                prestige_buckets["premium"] += 1
 
         return {
             "turn_id": turn_id,
@@ -418,12 +652,15 @@ class StrategyAgent:
                 max(prep_times) if prep_times else 15,
             ),
             "active_competitors": active_competitors,
-            "competitors": comp_summary[:10],  # top 10
+            "competitors": comp_summary[:10],
             "history": history_summary,
+            "strategy_performance": strategy_perf,
+            "bid_price_intel": bid_intel_summary,
+            "recipe_prestige_distribution": prestige_buckets,
         }
 
     def _build_strategy_prompt(self, context: dict) -> str:
-        """Build the strategy reasoning prompt for the LLM."""
+        """Build the strategy reasoning prompt with full intelligence."""
         competitors_text = ""
         for c in context.get("competitors", []):
             if c.get("connected"):
@@ -433,12 +670,47 @@ class StrategyAgent:
                     f"reputation={c['reputation']}, threat={c['threat']:.2f}\n"
                 )
 
+        # Enhanced history with revenue results
         history_text = ""
         for h in context.get("history", []):
-            history_text += (
+            line = (
                 f"  Turn {h['turn_id']}: zone={h['zone']}, "
-                f"menu_size={h['menu_size']}, bid_aggr={h['bid_aggr']:.2f}\n"
+                f"menu_size={h['menu_size']}, bid_aggr={h['bid_aggr']:.2f}, "
+                f"focus={h.get('focus', 'all')}, price={h.get('price_strategy', '?')}"
             )
+            if "revenue" in h:
+                line += (
+                    f", REVENUE={h['revenue']:.0f}, "
+                    f"customers={h.get('customers', '?')}, "
+                    f"balance_delta={h.get('balance_delta', 0):+.0f}"
+                )
+            history_text += line + "\n"
+
+        # Strategy performance summary
+        perf_text = ""
+        for strat_name, perf in context.get("strategy_performance", {}).items():
+            perf_text += (
+                f"  {strat_name}: avg_rev={perf['avg_revenue']:.0f}, "
+                f"best={perf['best_revenue']:.0f}, used {perf['turns_used']}x\n"
+            )
+
+        # Bid price history
+        bid_intel_text = ""
+        for ing, data in context.get("bid_price_intel", {}).items():
+            cheap_flag = " (✅ CHEAP — don't overbid!)" if data["cheap"] else ""
+            avail_flag = f", avail={data['availability']:.0%}"
+            bid_intel_text += (
+                f"  {ing}: avg_win={data['avg_winning_price']:.0f}{avail_flag}{cheap_flag}\n"
+            )
+
+        # Recipe prestige distribution
+        dist = context.get("recipe_prestige_distribution", {})
+        dist_text = (
+            f"  Budget (0-35): {dist.get('budget', 0)} recipes, "
+            f"Mid (36-60): {dist.get('mid', 0)}, "
+            f"Mid-High (61-80): {dist.get('mid_high', 0)}, "
+            f"Premium (81-100): {dist.get('premium', 0)}"
+        )
 
         prompt = f"""You are the strategic brain of restaurant SPAM! (Team 17) in a competitive restaurant game.
 
@@ -449,53 +721,97 @@ CURRENT STATE (Turn {context['turn_id']}):
 - Cookable recipes (from inventory): {context['cookable_recipes']}/{context['total_recipes']}
 - Recipe prestige range: {context['prestige_range'][0]:.0f} - {context['prestige_range'][1]:.0f}
 - Active competitors: {context['active_competitors']}
+- Available recipe tiers: {dist_text}
 
 COMPETITORS:
 {competitors_text if competitors_text else "  No active competitors detected."}
 
-PAST TURNS:
+PAST TURNS (with results):
 {history_text if history_text else "  No history yet (first turn)."}
 
-CUSTOMER ARCHETYPES (all present in the game):
-- Esploratore Galattico: budget-conscious, max budget ~60 credits
-- Famiglie Orbitali: moderate budget, max ~150 credits
-- Saggi del Cosmo: high spenders, max ~600 credits
-- Astrobarone: luxury spenders, max ~500 credits
+STRATEGY PERFORMANCE SUMMARY:
+{perf_text if perf_text else "  No data yet."}
+
+BID PRICE HISTORY (ingredient → average winning price):
+{bid_intel_text if bid_intel_text else "  No bid history yet."}
+
+CUSTOMER ARCHETYPES:
+- Esploratore Galattico: budget, max ~60 credits (most common, ~40% of traffic)
+- Famiglie Orbitali: moderate, max ~150 credits (~25% of traffic)
+- Saggi del Cosmo: high, max ~600 credits (~20% of traffic, highest per-customer revenue)
+- Astrobarone: luxury, max ~500 credits (~15% of traffic)
+
+── MANDATORY RULES ──
+1. ALWAYS offer dishes across MULTIPLE price layers (budget + mid + premium).
+   A menu with ONLY premium dishes misses 65% of customers.
+   A menu with ONLY budget dishes leaves money on the table.
+
+2. VARY your strategy turn-by-turn. Don't repeat the same approach every turn.
+   If last turn was volume_first, consider balanced or even a premium push.
+   If premium worked well, keep some premium but add budget for volume.
+   ROTATE your focus: some turns emphasize high-value clients (Saggi + Astrobaroni),
+   some focus on volume (Esploratori + Famiglie), some go balanced.
+
+3. BID SMART based on history:
+   - If an ingredient historically wins at ~10 credits, DON'T bid 40.
+   - If an ingredient is scarce (low availability), bid MORE aggressively.
+   - If an ingredient is abundant (high availability), keep bids LOW.
+   - ALWAYS consider what's on the menu — prioritize ingredients for
+     high-margin dishes.
+
+4. ESTIMATE CUSTOMER FLOW:
+   - Typical turn: 6-12 customers.
+   - More customers visit restaurants with diverse menus and good reputation.
+   - Bid enough ingredients for expected servings, not 10x more.
+
+5. REVENUE = (dishes_sold × price) − bidding_costs.
+   High prices mean nothing if nobody buys. Low bids mean more profit per dish.
 
 STRATEGIC PRIORITIES:
-1. MAXIMIZE REVENUE by serving the most customers possible
-2. Keep a LARGE, DIVERSE menu spanning ALL price tiers to attract ALL archetypes
-3. Keep expenses LOW — only bid what's necessary
-4. Price dishes REASONABLY — volume beats premium pricing
-5. Use diplomacy to create advantages, not waste time
+1. MAXIMIZE NET REVENUE (revenue minus costs)
+2. Keep menu spanning ALL price tiers (3+ budget, 3+ mid, 3+ premium)
+3. Bid ONLY what's needed, using historical prices as reference
+4. Rotate between focus archetypes each turn for broader coverage over time
+5. Adapt bids to expected customer flow and menu needs
 
 AVAILABLE ZONES:
-- DIVERSIFIED: Targets ALL archetypes with a broad menu (15+ dishes). Best when you want maximum customer coverage.
-- PREMIUM_MONOPOLIST: High-prestige dishes for rich clients. Best when no competition.
-- BUDGET_OPPORTUNIST: High-volume budget dishes. Best when budget gap exists.
-- SPEED_CONTENDER: Fast dishes across prestiges. Best when speed advantage matters.
-- NICHE_SPECIALIST: Focus on one underserved archetype.
-- MARKET_ARBITRAGEUR: Trade-focused, minimal menu.
+- DIVERSIFIED: All archetypes, 15+ dishes. Best default.
+- PREMIUM_MONOPOLIST: High-prestige, rich clients. Risky unless no competition.
+- BUDGET_OPPORTUNIST: High-volume budget. Good for quick profit.
+- SPEED_CONTENDER: Fast dishes. Good when speed differentiates.
+- NICHE_SPECIALIST: Focus one underserved archetype.
+- MARKET_ARBITRAGEUR: Trade-focused (rarely best).
+
+FOCUS ARCHETYPE OPTIONS (rotate each turn!):
+- "all": balanced across all archetypes
+- "budget": emphasize Esploratori + Famiglie (volume play)
+- "mid": emphasize Famiglie + some Saggi (balanced revenue)
+- "premium": emphasize Saggi + Astrobaroni (high per-customer revenue)
+- "luxury": go all-in on Astrobaroni + Saggi (maximum per-dish price)
 
 Respond with a JSON object (no markdown, no explanation outside JSON):
 {{
-  "recommended_zone": "DIVERSIFIED or one of the zones above",
-  "zone_reasoning": "brief reason for zone choice",
+  "recommended_zone": "DIVERSIFIED",
+  "zone_reasoning": "why this zone fits this turn",
   "menu_target_size": 12-20,
-  "menu_diversify": true or false,
-  "menu_prestige_min": 15-40,
-  "menu_prestige_max": 80-100,
+  "menu_diversify": true,
+  "menu_prestige_min": 10-35,
+  "menu_prestige_max": 85-100,
   "menu_max_prep_time": 8.0-15.0,
+  "focus_archetype": "all or budget or mid or premium or luxury",
+  "expected_customers": 6-12,
+  "expected_high_value": 1-4,
+  "expected_budget": 3-8,
   "bid_aggressiveness": 0.0-1.0,
-  "bid_priority_ingredients": ["top 3 ingredient names to prioritize"],
-  "bid_reasoning": "brief bid strategy",
+  "bid_priority_ingredients": ["top 3 ingredient names"],
+  "bid_reasoning": "explain bid strategy using price history",
   "price_strategy": "volume_first or balanced or premium",
-  "price_adjustment_factor": 0.8-1.2,
+  "price_adjustment_factor": 0.85-1.2,
   "undercut_competitors": true or false,
   "diplomacy_priority": "aggressive or moderate or passive or silent",
-  "diplomacy_targets": [competitor IDs to focus on],
-  "diplomacy_reasoning": "brief diplomacy strategy",
-  "confidence": 0.3-0.9
+  "diplomacy_targets": [],
+  "diplomacy_reasoning": "brief",
+  "confidence": 0.4-0.9
 }}"""
 
         return prompt
@@ -571,6 +887,14 @@ Respond with a JSON object (no markdown, no explanation outside JSON):
             strategy.price_adjustment_factor = max(0.6, min(1.5, float(data.get("price_adjustment_factor", 1.0))))
             strategy.undercut_competitors = bool(data.get("undercut_competitors", True))
 
+            # Parse focus/customer flow
+            focus = data.get("focus_archetype", "all")
+            if focus in ("all", "budget", "mid", "premium", "luxury"):
+                strategy.focus_archetype = focus
+            strategy.expected_customers = max(3, min(20, int(data.get("expected_customers", 8))))
+            strategy.expected_high_value = max(0, min(10, int(data.get("expected_high_value", 2))))
+            strategy.expected_budget = max(0, min(15, int(data.get("expected_budget", 4))))
+
             # Parse diplomacy
             diplo = data.get("diplomacy_priority", "moderate")
             if diplo in ("aggressive", "moderate", "passive", "silent"):
@@ -591,37 +915,58 @@ Respond with a JSON object (no markdown, no explanation outside JSON):
     def _default_strategy(self, context: dict) -> TurnStrategy:
         """
         Default strategy when LLM consultation fails.
-        Biased toward DIVERSIFIED zone with broad menu.
+        Rotates focus archetype based on turn number for variety.
         """
         strategy = TurnStrategy()
         active = context.get("active_competitors", 0)
+        turn_id = context.get("turn_id", 1)
+
+        # ── Auto-rotate focus archetype each turn ──
+        focus_cycle = ["all", "budget", "mid", "premium", "all", "balanced"]
+        strategy.focus_archetype = focus_cycle[turn_id % len(focus_cycle)]
+
+        # ── Rotate price strategy too ──
+        price_cycle = ["volume_first", "balanced", "volume_first", "premium", "balanced"]
+        strategy.price_strategy = price_cycle[turn_id % len(price_cycle)]
 
         if active == 0:
             strategy.recommended_zone = "DIVERSIFIED"
             strategy.zone_reasoning = "No competition — diversify to serve all archetypes"
             strategy.bid_aggressiveness = 0.20
-            strategy.price_strategy = "balanced"
             strategy.diplomacy_priority = "silent"
         elif active <= 2:
             strategy.recommended_zone = "DIVERSIFIED"
             strategy.zone_reasoning = "Light competition — broad menu captures most customers"
             strategy.bid_aggressiveness = 0.30
-            strategy.price_strategy = "volume_first"
             strategy.diplomacy_priority = "moderate"
         else:
             strategy.recommended_zone = "DIVERSIFIED"
             strategy.zone_reasoning = "Heavy competition — diversify to avoid direct conflicts"
             strategy.bid_aggressiveness = 0.40
-            strategy.price_strategy = "volume_first"
             strategy.undercut_competitors = True
             strategy.diplomacy_priority = "aggressive"
 
+        # ── Adjust for focus archetype ──
+        if strategy.focus_archetype == "premium" or strategy.focus_archetype == "luxury":
+            strategy.expected_high_value = 3
+            strategy.expected_budget = 3
+            strategy.price_adjustment_factor = 1.1
+        elif strategy.focus_archetype == "budget":
+            strategy.expected_high_value = 1
+            strategy.expected_budget = 6
+            strategy.price_adjustment_factor = 0.9
+        else:
+            strategy.expected_high_value = 2
+            strategy.expected_budget = 4
+            strategy.price_adjustment_factor = 1.0
+
         strategy.menu_target_size = 15
         strategy.menu_diversify = True
-        strategy.menu_prestige_min = 15
+        strategy.menu_prestige_min = 10
         strategy.menu_prestige_max = 100
         strategy.menu_max_prep_time = 12.0
+        strategy.expected_customers = 8
         strategy.confidence = 0.4
-        strategy.raw_reasoning = "Default strategy (LLM unavailable)"
+        strategy.raw_reasoning = f"Default strategy (focus={strategy.focus_archetype}, price={strategy.price_strategy})"
 
         return strategy

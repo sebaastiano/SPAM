@@ -193,6 +193,8 @@ class GameOrchestrator:
         self._countdown_task: asyncio.Task | None = None
         self._discovered_turn: int | None = None  # cached turn from probe
         self._current_strategy: TurnStrategy | None = None  # agent's turn strategy
+        self._turn_start_balance: float = 0.0  # balance at start of turn (for delta calc)
+        self._turn_customers_served: int = 0  # customers served this turn
 
     async def start(self):
         """Initialise and start the game agent."""
@@ -607,6 +609,8 @@ class GameOrchestrator:
         self._discovered_turn = None  # reset cache for new turn
         self._current_strategy = None  # clear stale strategy from previous turn
         self.subagent_router._current_strategy = None
+        self._turn_customers_served = 0  # reset customer counter
+        self._turn_start_balance = self.game_state.current.balance  # snapshot for delta calc
         await self.phase_router.handle_game_started(data)
         self.skill_orchestrator.new_turn()
 
@@ -666,6 +670,8 @@ class GameOrchestrator:
         logger.info(f"Turn change: {turn_id}")
         self._current_strategy = None  # clear stale strategy from previous turn
         self.subagent_router._current_strategy = None
+        self._turn_customers_served = 0
+        self._turn_start_balance = self.game_state.current.balance
         self.game_state.new_turn(turn_id)
         self.skill_orchestrator.new_turn()
 
@@ -676,6 +682,7 @@ class GameOrchestrator:
         if self.phase_router.current_phase != "serving":
             logger.warning("client_spawned outside serving phase — ignoring")
             return
+        self._turn_customers_served += 1
         await self.serving.handle_client_spawned(data)
 
     async def _handle_preparation_complete(self, data: dict):
@@ -1083,6 +1090,7 @@ class GameOrchestrator:
                         1 for b in ctx.intel.get("briefings", {}).values()
                         if b.get("is_connected", False)
                     ),
+                    menu_recipes=list(ctx.recipes.values()),
                 )
                 spending = bid_guidance.get("spending_fraction")
             else:
@@ -1295,6 +1303,7 @@ class GameOrchestrator:
                     zone=zone,
                     balance=ctx.balance,
                     active_competitors=active,
+                    menu_recipes=list(ctx.recipes.values()),
                 )
                 spending = bid_guidance.get("spending_fraction")
                 logger.info(
@@ -1704,7 +1713,7 @@ class GameOrchestrator:
             )
 
     async def _skill_info_gather(self, ctx: SkillContext) -> SkillResult:
-        """Gather observable info for next turn planning."""
+        """Gather observable info for next turn planning + record turn results."""
         try:
             import aiohttp
 
@@ -1723,6 +1732,35 @@ class GameOrchestrator:
             # Feed to intelligence for next turn
             if bid_history:
                 self._latest_intel["bid_history"] = bid_history
+
+            # ── Feed bid history to strategy agent for learning ──
+            if bid_history and self.subagent_router.strategy_agent:
+                self.subagent_router.strategy_agent.record_bid_history(bid_history)
+                logger.info("Bid history fed to strategy agent for price learning")
+
+            # ── Record turn results for strategy performance tracking ──
+            if self.subagent_router.strategy_agent:
+                current_balance = ctx.balance
+                balance_delta = current_balance - self._turn_start_balance
+                strategy_used = "unknown"
+                zone_used = self.subagent_router.active_zone or "DIVERSIFIED"
+                if self._current_strategy:
+                    strategy_used = self._current_strategy.price_strategy
+
+                # Estimate revenue from balance delta + bid costs
+                bid_cost = 0.0
+                if hasattr(self, '_latest_decision') and self._latest_decision:
+                    bid_cost = getattr(self._latest_decision, 'total_bid_cost', 0.0)
+                estimated_revenue = max(0, balance_delta + bid_cost)
+
+                self.subagent_router.strategy_agent.record_turn_result(
+                    turn_id=ctx.turn_id,
+                    revenue=estimated_revenue,
+                    customers_served=self._turn_customers_served,
+                    balance_delta=balance_delta,
+                    strategy_used=strategy_used,
+                    zone_used=zone_used,
+                )
 
             return SkillResult(
                 skill_name="info_gather", success=True,

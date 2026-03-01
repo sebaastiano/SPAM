@@ -155,6 +155,11 @@ def solve_zone_ilp(
             "undercut": agent_guidance.get("undercut", True),
         }
 
+    # ── Extract bid price intelligence from agent ──
+    bid_price_intel = None
+    if agent_guidance:
+        bid_price_intel = agent_guidance.get("bid_price_intelligence", None)
+
     # ── Per-recipe revenue (price estimate) ──
     revenues = np.array(
         [compute_menu_price(r, zone, reputation, competitor_briefings, agent_pricing)
@@ -162,10 +167,11 @@ def solve_zone_ilp(
         dtype=float,
     )
 
-    # ── Per-ingredient bid price ──
+    # ── Per-ingredient bid price (with historical calibration) ──
     bid_prices = np.array(
         [
-            compute_bid_price(ing, competitor_briefings, demand_forecast)
+            compute_bid_price(ing, competitor_briefings, demand_forecast,
+                              bid_price_intel=bid_price_intel)
             for ing in all_ingredients
         ],
         dtype=float,
@@ -386,14 +392,21 @@ def _score_recipes(
     inventory: dict[str, int],
     reputation: float,
     demand_forecast: dict[str, float],
+    tier_targets: dict[str, int] | None = None,
 ) -> list[dict]:
-    """Score and rank recipes for a zone — favor volume, diversity, and speed."""
+    """Score and rank recipes for a zone — favor volume, diversity, multi-layer coverage.
+
+    tier_targets: optional dict like {"budget": 3, "mid": 4, "mid_high": 3, "premium": 3}
+    specifying minimum desired dishes per tier. Recipes in under-represented tiers
+    get a bigger diversity bonus.
+    """
     scored = []
 
     high_delta_set = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
 
-    # Track prestige distribution for diversity bonus
-    prestige_buckets = {}  # bucket_id -> count
+    # Track prestige distribution for multi-layer diversity bonus
+    prestige_buckets: dict[str, int] = {"budget": 0, "mid": 0, "mid_high": 0, "premium": 0}
+    targets = tier_targets or {"budget": 3, "mid": 4, "mid_high": 3, "premium": 3}
 
     for recipe in recipes:
         prestige = recipe.get("prestige", 50)
@@ -430,34 +443,49 @@ def _score_recipes(
             for ing in ingredients
         )
 
-        # Diversity bonus: recipes in underrepresented prestige buckets
-        # score higher. This ensures the menu covers all price tiers.
-        bucket = int(prestige // 20)  # 5 buckets: 0-19, 20-39, 40-59, 60-79, 80-100
-        bucket_count = prestige_buckets.get(bucket, 0)
-        diversity_bonus = max(0, 0.15 - bucket_count * 0.03)  # first in bucket gets most
-        prestige_buckets[bucket] = bucket_count + 1
+        # ── Multi-layer diversity bonus ──
+        # Determine which tier this recipe belongs to
+        if prestige <= 35:
+            tier_name = "budget"
+        elif prestige <= 60:
+            tier_name = "mid"
+        elif prestige <= 80:
+            tier_name = "mid_high"
+        else:
+            tier_name = "premium"
+
+        bucket_count = prestige_buckets.get(tier_name, 0)
+        tier_target = targets.get(tier_name, 3)
+
+        # STRONG bonus for under-represented tiers
+        if bucket_count < tier_target:
+            shortfall = tier_target - bucket_count
+            diversity_bonus = 0.15 + shortfall * 0.05  # up to 0.30 for 3 short
+        else:
+            # Over target — small penalty to avoid over-stacking
+            diversity_bonus = max(-0.05, 0.05 - (bucket_count - tier_target) * 0.03)
+
+        prestige_buckets[tier_name] = bucket_count + 1
 
         # Zone-specific bonuses
         zone_bonus = 0.0
         if zone == "DIVERSIFIED":
-            # DIVERSIFIED zone: extra bonus for covering extreme tiers
             if prestige <= 30 or prestige >= 80:
-                zone_bonus = 0.08  # bonus for extreme tiers (budget + premium)
-            # Extra speed bonus for diversified (need to serve many quickly)
+                zone_bonus = 0.08
             zone_bonus += speed_score * 0.05
 
         total_score = (
-            prestige_score * 0.15
-            + speed_score * 0.25
-            + inventory_score * 0.30   # heavily favor what we already have
+            prestige_score * 0.12
+            + speed_score * 0.22
+            + inventory_score * 0.28   # heavily favor what we already have
             + simplicity_bonus
             + delta_bonus * 0.05
             - competition_penalty * 0.05
-            + diversity_bonus
+            + diversity_bonus          # STRONGER diversity weight
             + zone_bonus
         )
 
-        scored.append({"recipe": recipe, "score": total_score})
+        scored.append({"recipe": recipe, "score": total_score, "tier": tier_name})
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored
@@ -561,24 +589,25 @@ def compute_bid_price(
     ingredient: str,
     competitor_briefings: dict[int, dict],
     demand_forecast: dict[str, float],
+    bid_price_intel: dict | None = None,
 ) -> float:
     """
-    Compute bid price for an ingredient.
+    Compute bid price for an ingredient — BID HISTORY AWARE.
+
+    Uses historical winning prices to avoid overbidding. If an ingredient
+    historically wins at 10 credits, we won't bid 40.
 
     PROFIT-FIRST BIDDING: every credit spent on ingredients is a credit
-    NOT in our pocket. The real profit comes from selling dishes at high
-    prices, not from hoarding ingredients.
+    NOT in our pocket. The real profit comes from selling dishes.
 
     Strategy:
-    - Start from conservative BASE_BID_PRICES
-    - Only scale up modestly when competitors specifically target this ingredient
+    - If we have bid history for this ingredient, use it as anchor
+    - If no history, fall back to BASE_BID_PRICES
+    - Scale modestly for competition
     - HARD CAP: never bid more than MAX_BID_PER_INGREDIENT
-    - When no competition: bid absolute minimum
-    - The goal is to WIN cheaply, maximising dish profit margin
     """
-    MAX_BID_PER_INGREDIENT = 80  # hard ceiling — no ingredient is worth more
+    MAX_BID_PER_INGREDIENT = 80  # hard ceiling
 
-    # Count active competitors
     active_competitors = sum(
         1 for b in competitor_briefings.values()
         if b.get("is_connected", False)
@@ -587,10 +616,41 @@ def compute_bid_price(
     high_delta_names = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
     is_high_delta = ingredient in high_delta_names
 
-    # Start from configured base price (ingredient-specific or default)
-    base = BASE_BID_PRICES.get(ingredient, DEFAULT_BASE_BID)
+    # ── Determine base price ──
+    # Priority: historical data > configured base > default
+    historical_avg = None
+    historical_avail = None
 
-    # Gather competitor intelligence for this specific ingredient
+    if bid_price_intel:
+        avg_prices = bid_price_intel.get("avg_prices", {})
+        availability = bid_price_intel.get("availability", {})
+        if ingredient in avg_prices:
+            historical_avg = avg_prices[ingredient]
+            historical_avail = availability.get(ingredient, 0.5)
+
+    if historical_avg is not None:
+        # Use history as anchor — this is our best signal
+        base = historical_avg
+
+        # Adjust based on availability
+        if historical_avail >= 0.7:
+            # Easy to get — bid conservatively (just above historical)
+            base = historical_avg * 1.05
+            logger.debug(
+                f"Bid {ingredient}: historical_avg={historical_avg:.0f}, "
+                f"avail={historical_avail:.0%} → conservative bid {base:.0f}"
+            )
+        elif historical_avail >= 0.4:
+            # Moderately available — bid at historical + small premium
+            base = historical_avg * 1.15
+        else:
+            # Scarce — bid higher to compete
+            base = historical_avg * 1.35
+    else:
+        # No history — use configured base prices
+        base = BASE_BID_PRICES.get(ingredient, DEFAULT_BASE_BID)
+
+    # ── Competitor intelligence ──
     predicted_competitor_bids = []
     for rid, brief in competitor_briefings.items():
         if not brief.get("is_connected", False):
@@ -609,37 +669,39 @@ def compute_bid_price(
             predicted_competitor_bids.append(est_bid)
 
     if not predicted_competitor_bids:
-        # No competitor specifically targeting this ingredient.
+        # No competitor targeting this ingredient.
         if active_competitors == 0:
-            # True monopoly — bid bare minimum
             return max(base * 0.3, 8) if is_high_delta else max(base * 0.25, 5)
 
-        # Light competition — bid conservatively, just above base
         competition_factor = min(active_competitors / 6.0, 1.0)
-        scaled = base * (1.0 + competition_factor * 0.25)
+        scaled = base * (1.0 + competition_factor * 0.20)
         return int(min(max(scaled, 10), MAX_BID_PER_INGREDIENT))
 
-    # Competitors target this ingredient — bid just enough to beat them.
+    # Competitors target this ingredient — bid enough to beat them
     predicted_max = max(predicted_competitor_bids)
 
-    # Demand pressure (mild, we're conservative)
     demand = demand_forecast.get(ingredient, 0)
-    demand_multiplier = 1.0 + min(demand / 20, 0.2)
+    demand_multiplier = 1.0 + min(demand / 20, 0.15)
 
-    # Modest overbid — just enough to win, not a penny more
     targeting_count = len(predicted_competitor_bids)
-    overbid_factor = 1.05 + 0.03 * min(targeting_count, 5)
+    overbid_factor = 1.05 + 0.02 * min(targeting_count, 5)
 
     bid = predicted_max * demand_multiplier * overbid_factor
 
-    # Ensure bid is at least our base price
+    # If historical avg is much lower, cap the bid
+    if historical_avg is not None:
+        history_cap = historical_avg * 1.6  # never bid 60%+ above historical
+        if bid > history_cap:
+            logger.info(
+                f"Bid {ingredient}: capping from {bid:.0f} to {history_cap:.0f} "
+                f"(historical avg={historical_avg:.0f})"
+            )
+            bid = history_cap
+
     bid = max(bid, base)
 
-    # Tiny premium for high-delta (they boost prestige → higher dish prices)
     if is_high_delta:
         bid *= 1.05
 
-    # HARD CAP: never overspend on any single ingredient
     bid = min(bid, MAX_BID_PER_INGREDIENT)
-
     return int(bid) + 1
