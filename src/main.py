@@ -196,6 +196,7 @@ class GameOrchestrator:
         self._discovered_turn: int | None = None  # cached turn from probe
         self._current_strategy: TurnStrategy | None = None  # agent's turn strategy
         self._incoming_messages_this_turn: list[dict] = []  # firewall-processed inbound messages
+        self._broadcast_bid_intel: list[dict] = []  # parsed bid results from broadcast "message" events
         self._turn_degraded: bool = False  # True when we can't serve (skip bidding)
 
     async def start(self):
@@ -267,6 +268,7 @@ class GameOrchestrator:
 
         # Message events
         self.bus.on("new_message", self._handle_new_message, priority=1)
+        self.bus.on("message", self._handle_broadcast_message, priority=2)
 
         # Register phase handlers (all go through unified dispatcher)
         self.phase_router.register("speaking", self._phase_speaking)
@@ -731,6 +733,7 @@ class GameOrchestrator:
         self.game_state.new_turn(turn_id)
         self.skill_orchestrator.new_turn()
         self._incoming_messages_this_turn.clear()  # fresh message buffer for new turn
+        self._broadcast_bid_intel.clear()  # fresh broadcast intel for new turn
 
     # ── Client / Serving Events ──
 
@@ -775,6 +778,48 @@ class GameOrchestrator:
             f"(cred={processed.get('sender_credibility', 0):.2f}): "
             f"'{processed.get('text', '')[:80]}' {trust_tag}"
         )
+
+    async def _handle_broadcast_message(self, data: dict):
+        """Handle broadcast 'message' SSE events — server announcements.
+
+        These contain bid results ("Restaurant X try to buy: Y...") and
+        market activity ("Restaurant X has created a market entry").
+        We parse bid results for real-time competitor intelligence.
+        """
+        payload = data.get("payload", "")
+        sender = data.get("sender", "")
+
+        # Only process server-sourced bid result broadcasts
+        if sender != "server" or not payload:
+            return
+
+        # Parse bid results: "Restaurant N try to buy:Q Ingredient at single price of: P result:..."
+        import re
+        bid_pattern = re.compile(
+            r"Restaurant\s+(\d+)\s+try to buy:(\d+)\s+(.+?)\s+at single price of:\s*(\d+)\s+result:(.*)"
+        )
+        for match in bid_pattern.finditer(payload):
+            rid = int(match.group(1))
+            qty = int(match.group(2))
+            ingredient = match.group(3).strip()
+            price = int(match.group(4))
+            result = match.group(5).strip()
+            success = result.startswith("Bought")
+
+            if rid == TEAM_ID:
+                continue  # skip our own bids
+
+            self._broadcast_bid_intel.append({
+                "restaurant_id": rid,
+                "ingredient": ingredient,
+                "quantity": qty,
+                "bid_price": price,
+                "success": success,
+            })
+
+        # Keep only last 200 entries to cap memory
+        if len(self._broadcast_bid_intel) > 200:
+            self._broadcast_bid_intel = self._broadcast_bid_intel[-200:]
 
     # ══════════════════════════════════════════════════════════════
     #  PHASE HANDLERS (delegate to SkillOrchestrator)
@@ -934,6 +979,7 @@ class GameOrchestrator:
                 pnl_history=self.game_state.get_pnl_history(5),
                 feature_vectors=ctx.intel.get("features"),
                 trajectory_predictions=ctx.intel.get("trajectories"),
+                incoming_messages=ctx.incoming_messages,
             )
             self._current_strategy = strategy
             logger.info(
