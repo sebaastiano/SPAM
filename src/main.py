@@ -57,7 +57,7 @@ from src.intelligence.pipeline import IntelligencePipeline
 from src.intelligence.feature_extractor import set_recipe_db
 
 # Decision
-from src.decision.ilp_solver import solve_zone_ilp
+from src.decision.ilp_solver import solve_zone_ilp, solve_bids_for_menu
 from src.decision.subagent_router import SubagentRouter
 from src.decision.pricing import compute_menu_prices, adjust_prices_competitive
 from src.decision.strategy_agent import StrategyAgent, TurnStrategy
@@ -893,6 +893,33 @@ class GameOrchestrator:
         results = await self.skill_orchestrator.execute_for_phase(ctx)
         self._log_skill_results(results)
 
+        # CRITICAL: inventory_verify may have flagged a replan AFTER execute_for_phase
+        # already built its applicable-skills list — meaning menu_planning/menu_save
+        # were excluded from this pass even though they were re-queued.
+        # Detect this and do a second execution pass with fresh inventory context.
+        needs_replan = any(
+            r.skill_name == "inventory_verify" and r.data.get("needs_replan")
+            for r in results
+            if r.success and r.data
+        )
+        if needs_replan:
+            logger.warning(
+                f"{tag} inventory_verify flagged replan — running second skills pass "
+                f"with actual inventory (types={len(ctx.inventory)})"
+            )
+            # inventory_verify ran first (priority 25), then market_ops (40),
+            # restaurant_open (45), and serving_prep (48) all ran against an
+            # empty menu and were added to executed_this_turn even though they
+            # failed. Re-queue them all so the second pass can run them properly
+            # after menu_planning/menu_save produce a valid menu.
+            for _skill in ("market_ops", "restaurant_open", "serving_prep"):
+                self.skill_orchestrator.executed_this_turn.discard(_skill)
+                self.skill_orchestrator.results_this_turn.pop(_skill, None)
+            # Rebuild context to get freshest inventory from server
+            ctx2 = await self._build_skill_context(data)
+            results2 = await self.skill_orchestrator.execute_for_phase(ctx2)
+            self._log_skill_results(results2)
+
     async def _phase_serving(self, data: dict):
         """
         Serving phase handler.
@@ -1519,16 +1546,41 @@ class GameOrchestrator:
                 f"active_competitors={active}, "
                 f"spending={'auto' if spending is None else f'{spending:.2f}'}"
             )
-            decision = solve_zone_ilp(
-                zone=zone,
-                balance=ctx.balance,
-                inventory=ctx.inventory,
-                recipes=list(ctx.recipes.values()),
-                demand_forecast=ctx.intel.get("demand_forecast", {}),
-                competitor_briefings=briefings,
-                reputation=ctx.reputation,
-                spending_fraction=spending,
-            )
+
+            # ── KEY FIX: bid for the EXISTING menu, not a brand-new MILP ──
+            # If menu_planning already ran (speaking phase), the menu is saved
+            # in self.serving.menu.  Re-solving the full MILP here would
+            # produce a DIFFERENT menu → bids for wrong ingredients → 0%
+            # inventory match in waiting phase.
+            existing_menu = list(self.serving.menu.values())
+            if existing_menu and self.recipe_db:
+                logger.info(
+                    f"Bid compute: using existing menu ({len(existing_menu)} items) "
+                    f"— bidding for matching ingredients only"
+                )
+                decision = solve_bids_for_menu(
+                    menu_items=existing_menu,
+                    recipe_db=self.recipe_db,
+                    balance=ctx.balance,
+                    inventory=ctx.inventory,
+                    competitor_briefings=briefings,
+                    demand_forecast=ctx.intel.get("demand_forecast", {}),
+                    spending_fraction=spending if spending is not None else 0.25,
+                    zone=zone,
+                )
+            else:
+                # No menu yet (mid-turn entry or first turn) — full MILP
+                logger.info("Bid compute: no existing menu — running full MILP")
+                decision = solve_zone_ilp(
+                    zone=zone,
+                    balance=ctx.balance,
+                    inventory=ctx.inventory,
+                    recipes=list(ctx.recipes.values()),
+                    demand_forecast=ctx.intel.get("demand_forecast", {}),
+                    competitor_briefings=briefings,
+                    reputation=ctx.reputation,
+                    spending_fraction=spending,
+                )
             self._latest_decision = decision
             return SkillResult(
                 skill_name="bid_compute", success=True,
@@ -1593,8 +1645,9 @@ class GameOrchestrator:
             f"{sum(ctx.inventory.values()) if ctx.inventory else 0} total units"
         )
         if ctx.inventory:
+            # Log at INFO (not DEBUG) so we always see what we actually won from bids
             for ing, qty in sorted(ctx.inventory.items()):
-                logger.debug(f"  inventory: {qty}x {ing}")
+                logger.info(f"  inventory: {qty}x {ing}")
 
         logger.info(f"Current menu has {len(current_menu)} items to verify")
 

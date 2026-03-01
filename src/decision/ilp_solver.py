@@ -452,6 +452,116 @@ def _greedy_fallback(
     return decision
 
 
+def solve_bids_for_menu(
+    menu_items: list[dict],
+    recipe_db: dict[str, dict],
+    balance: float,
+    inventory: dict[str, int],
+    competitor_briefings: dict[int, dict],
+    demand_forecast: dict[str, float],
+    spending_fraction: float,
+    zone: str = "DIVERSIFIED",
+) -> ZoneDecision:
+    """
+    Compute optimal bids for an ALREADY-FIXED menu.
+
+    Unlike solve_zone_ilp() which jointly optimises menu + bids, this
+    function takes the existing menu as given and only decides HOW MUCH
+    of each required ingredient to bid on within the budget.
+
+    This prevents the classic desync bug where bid_compute re-solves
+    the full MILP and gets a different menu than the one already saved.
+    """
+    decision = ZoneDecision()
+    decision.zone = zone
+    decision.menu = list(menu_items)  # preserve existing menu
+
+    # ── Collect ingredients needed by ALL menu items ──
+    needed: dict[str, int] = {}
+    for item in menu_items:
+        recipe = recipe_db.get(item["name"])
+        if not recipe:
+            continue
+        for ing, qty in recipe.get("ingredients", {}).items():
+            # Need SERVINGS_BUFFER servings per menu item
+            need = qty * SERVINGS_BUFFER
+            needed[ing] = needed.get(ing, 0) + need
+
+    if not needed:
+        logger.warning("solve_bids_for_menu: no ingredients needed (no recipes matched)")
+        return decision
+
+    # ── Subtract what we already have in inventory ──
+    to_bid: dict[str, int] = {}
+    for ing, total_need in needed.items():
+        have = inventory.get(ing, 0)
+        shortfall = max(0, total_need - have)
+        if shortfall > 0:
+            to_bid[ing] = shortfall
+
+    if not to_bid:
+        logger.info("solve_bids_for_menu: inventory already covers all menu needs")
+        return decision
+
+    budget = balance * spending_fraction
+
+    # ── Build bids within budget, prioritising uncontested ingredients ──
+    def _contestation(ing: str) -> int:
+        count = 0
+        for brief in competitor_briefings.values():
+            if not brief.get("is_connected", False):
+                continue
+            if ing in brief.get("top_bid_ingredients", []):
+                count += 1
+        return count
+
+    # Sort: cheapest/uncontested first so we fill more needs before budget runs out
+    sorted_bids = sorted(
+        to_bid.items(),
+        key=lambda item: (_contestation(item[0]),
+                          compute_bid_price(item[0], competitor_briefings, demand_forecast)),
+    )
+
+    total_cost = 0.0
+    for ing, qty in sorted_bids:
+        bid_price = compute_bid_price(ing, competitor_briefings, demand_forecast)
+
+        # Uncontested bonus: buy extra at bargain price
+        if _contestation(ing) == 0 and bid_price <= DEFAULT_BASE_BID * 1.5:
+            qty = max(qty, int(qty * 1.5))
+
+        cost = bid_price * qty
+        if total_cost + cost <= budget:
+            decision.bids.append({
+                "ingredient": ing,
+                "bid": int(bid_price),
+                "quantity": qty,
+            })
+            total_cost += cost
+        else:
+            # Partial fill with remaining budget
+            affordable = max(1, int((budget - total_cost) / bid_price))
+            if affordable > 0 and total_cost + bid_price * affordable <= budget * 1.05:
+                decision.bids.append({
+                    "ingredient": ing,
+                    "bid": int(bid_price),
+                    "quantity": affordable,
+                })
+                total_cost += bid_price * affordable
+            break
+
+    decision.total_bid_cost = total_cost
+    decision.expected_revenue = sum(item.get("price", 0) for item in menu_items)
+
+    logger.info(
+        f"BidsForMenu [{zone}]: {len(menu_items)} menu items, "
+        f"{len(decision.bids)} bids (need {len(to_bid)} ingredients), "
+        f"cost={total_cost:.0f}/{budget:.0f} budget"
+    )
+
+    return decision
+
+
 def _score_recipes(
     recipes: list[dict],
     zone: str,
@@ -648,7 +758,7 @@ def compute_bid_price(
     - When no competition: bid absolute minimum
     - The goal is to WIN cheaply, maximising dish profit margin
     """
-    MAX_BID_PER_INGREDIENT = 65  # hard ceiling — no ingredient is worth more
+    MAX_BID_PER_INGREDIENT = 120  # hard ceiling — raised since we were losing all auctions
 
     # Count active competitors
     active_competitors = sum(
@@ -682,14 +792,16 @@ def compute_bid_price(
 
     if not predicted_competitor_bids:
         # No competitor specifically targeting this ingredient.
+        # NOTE: without a speaking phase, intel is often empty — so these
+        # fallback branches fire most of the time. Must bid enough to win.
         if active_competitors == 0:
-            # True monopoly — bid bare minimum
-            return max(base * 0.25, 6) if is_high_delta else max(base * 0.20, 4)
+            # True monopoly — bid at base to secure ingredients cheaply
+            return int(base) if is_high_delta else max(int(base * 0.75), 10)
 
-        # Light competition — bid conservatively, just above base
+        # Light/unknown competition — bid base + competition pressure
         competition_factor = min(active_competitors / 6.0, 1.0)
-        scaled = base * (1.0 + competition_factor * 0.20)
-        return int(min(max(scaled, 8), MAX_BID_PER_INGREDIENT))
+        scaled = base * (1.0 + competition_factor * 0.60)
+        return int(min(max(scaled, base), MAX_BID_PER_INGREDIENT))
 
     # Competitors target this ingredient — bid just enough to beat them.
     predicted_max = max(predicted_competitor_bids)
