@@ -38,6 +38,7 @@ from src.config import (
     AGGRESSIVE_SPENDING_FRACTION,
     BASE_BID_PRICES,
     DEFAULT_BASE_BID,
+    MINIMUM_PROFIT_MARGIN,
 )
 
 logger = logging.getLogger("spam.decision.ilp_solver")
@@ -257,11 +258,23 @@ def solve_zone_ilp(
         )
 
     # ── Build decision from solution ──
+    total_ingredient_cost_selected = 0.0
     for j in range(J):
         if y_sol[j]:
             recipe = eligible_recipes[j]
             price = int(revenues[j])
+            # Compute per-dish ingredient cost for logging
+            dish_cost = sum(
+                BASE_BID_PRICES.get(ing, DEFAULT_BASE_BID) * qty
+                for ing, qty in recipe.get("ingredients", {}).items()
+            )
+            total_ingredient_cost_selected += dish_cost
             decision.menu.append({"name": recipe["name"], "price": price})
+            margin_pct = ((price - dish_cost) / max(dish_cost, 1)) * 100
+            logger.info(
+                f"  Menu: {recipe['name'][:45]:45s} price={price:4d}, "
+                f"ing_cost={dish_cost:.0f}, margin={margin_pct:+.0f}%"
+            )
 
     for i in range(I):
         if x_sol[i] > 0:
@@ -272,13 +285,15 @@ def solve_zone_ilp(
             })
 
     decision.total_bid_cost = float(bid_prices @ x_sol)
-    decision.expected_revenue = float(revenues @ y_sol)  # no discount — full revenue potential
+    decision.expected_revenue = float(revenues @ y_sol)
 
+    net_profit = decision.expected_revenue - decision.total_bid_cost
     logger.info(
         f"MILP [{zone}]: {len(decision.menu)} menu items, "
         f"{len(decision.bids)} bids (total_qty={sum(int(x) for x in x_sol)}), "
         f"cost={decision.total_bid_cost:.0f}/{budget:.0f} budget, "
-        f"expected_rev={decision.expected_revenue:.0f}"
+        f"expected_rev={decision.expected_revenue:.0f}, "
+        f"NET PROFIT={net_profit:+.0f}"
     )
 
     return decision
@@ -454,23 +469,18 @@ def compute_menu_price(
     agent_pricing: dict | None = None,
 ) -> float:
     """
-    Compute menu price for a dish using MIXED TIERED PRICING.
+    Compute menu price for a dish: PROFIT-AWARE PRICING.
 
-    VOLUME-FIRST STRATEGY:
-    - Prestige determines the tier → each tier has a different base price
-    - Low-prestige dishes are CHEAP → attract Esploratori, Famiglie (volume!)
-    - Mid-prestige dishes are MODERATE → broad appeal, solid margins
-    - High-prestige dishes are HIGHER → extract value from Astrobaroni, Saggi
-    - The menu naturally offers something for EVERY archetype
+    The price is the MAXIMUM of:
+      1. Prestige-tier base price (customer-facing value)
+      2. Ingredient cost × MINIMUM_PROFIT_MARGIN (ensures profit)
 
-    agent_pricing: optional dict from strategy agent with:
-      - strategy: "volume_first" | "balanced" | "premium"
-      - adjustment_factor: float multiplier (e.g. 0.9 = 10% cheaper)
-      - undercut: bool (whether to undercut competitors)
+    Then capped by archetype ceilings to remain attractive.
     """
     prestige = recipe.get("prestige", 50)
+    ingredients = recipe.get("ingredients", {})
 
-    # TIERED BASE PRICES — determined by prestige level
+    # ── 1. Prestige-tier base price (demand-side) ──
     base_price = 60  # fallback
     for tier_name, (p_min, p_max, tier_price) in PRICE_TIERS.items():
         if p_min <= prestige <= p_max:
@@ -484,7 +494,7 @@ def compute_menu_price(
     rep_mult = 1.0 + (reputation - 50) / 300
 
     # Zone factor
-    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.65)
+    zone_factor = ZONE_PRICE_FACTORS.get(zone, 1.0)
 
     # Agent pricing adjustments
     agent_factor = 1.0
@@ -498,19 +508,31 @@ def compute_menu_price(
         elif strategy == "balanced":
             agent_factor *= 1.05
 
-    price = int(base_price * prestige_mult * rep_mult * zone_factor * agent_factor)
+    prestige_price = int(base_price * prestige_mult * rep_mult * zone_factor * agent_factor)
 
-    # COMPETITION ADJUSTMENT: undercut to win customers
+    # ── 2. Cost-based floor (supply-side) ──
+    # Estimate ingredient cost for ONE serving of this dish
+    total_ingredient_cost = 0.0
+    for ing, qty in ingredients.items():
+        bid_price = BASE_BID_PRICES.get(ing, DEFAULT_BASE_BID)
+        total_ingredient_cost += bid_price * qty
+
+    cost_floor = int(total_ingredient_cost * MINIMUM_PROFIT_MARGIN)
+
+    # Take the HIGHER of prestige-price and cost-floor
+    price = max(prestige_price, cost_floor)
+
+    # ── 3. Competition adjustment ──
     if competitor_briefings:
         active_competitors = sum(
             1 for b in competitor_briefings.values()
             if b.get("is_connected", False)
         )
         if active_competitors == 0:
-            # Monopoly — modest increase (don't get greedy, volume still matters)
+            # Monopoly — modest increase
             price = int(price * 1.15)
         elif agent_undercut:
-            # Competition exists AND agent allows undercutting
+            # Don't undercut below cost floor
             competitor_prices = [
                 b.get("menu_price_avg", 0)
                 for b in competitor_briefings.values()
@@ -519,14 +541,18 @@ def compute_menu_price(
             if competitor_prices:
                 avg_comp_price = sum(competitor_prices) / len(competitor_prices)
                 if prestige <= 50:
-                    price = min(price, int(avg_comp_price * 0.75))
+                    undercut_price = int(avg_comp_price * 0.85)
                 elif prestige <= 70:
-                    price = min(price, int(avg_comp_price * 0.90))
+                    undercut_price = int(avg_comp_price * 0.92)
+                else:
+                    undercut_price = int(avg_comp_price * 0.95)
+                # Only undercut if it's still above cost floor
+                price = max(min(price, undercut_price), cost_floor)
 
-    # Hard floor and ceiling
-    # Floor: 12 credits minimum (never give food away)
-    # Ceiling: 250 credits max (nobody likes being gouged)
-    price = max(12, min(price, 250))
+    # ── 4. Hard floor and ceiling ──
+    # Floor: cost_floor or 20 credits minimum
+    # Ceiling: 550 credits (stay under Saggi 600 ceiling with margin)
+    price = max(max(cost_floor, 20), min(price, 550))
 
     return price
 
