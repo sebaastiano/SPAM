@@ -292,26 +292,45 @@ endblock %} {% block head %}
     const showCentroids = document.getElementById("centroid-toggle").checked;
     const showLabels = document.getElementById("labels-toggle").checked;
 
-    // Collect all points for axis scaling
-    let allX = [],
-      allY = [];
+    // Collect restaurant points for primary axis scaling (not centroids,
+    // which can be far outside the data cloud and compress the layout)
+    let restX = [],
+      restY = [];
     for (const tid in vsData.turns) {
       for (const rid in vsData.turns[tid]) {
-        allX.push(vsData.turns[tid][rid].x);
-        allY.push(vsData.turns[tid][rid].y);
+        restX.push(vsData.turns[tid][rid].x);
+        restY.push(vsData.turns[tid][rid].y);
       }
     }
+
+    if (!restX.length) return;
+
+    // Compute axis range from restaurant data only
+    let xMin = Math.min(...restX);
+    let xMax = Math.max(...restX);
+    let yMin = Math.min(...restY);
+    let yMax = Math.max(...restY);
+
+    // Expand range by 15% on each side for breathing room
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+    xMin -= xRange * 0.15;
+    xMax += xRange * 0.15;
+    yMin -= yRange * 0.15;
+    yMax += yRange * 0.15;
+
+    // Include centroids in range only if they're not too far out
+    // (keeps them visible without dominating the scale)
     for (const z in centroids) {
-      allX.push(centroids[z].x);
-      allY.push(centroids[z].y);
+      const cx = centroids[z].x, cy = centroids[z].y;
+      const totalXRange = xMax - xMin;
+      const totalYRange = yMax - yMin;
+      // Only extend if centroid is within 2x the data range
+      if (cx < xMin && cx > xMin - totalXRange) xMin = cx - totalXRange * 0.05;
+      if (cx > xMax && cx < xMax + totalXRange) xMax = cx + totalXRange * 0.05;
+      if (cy < yMin && cy > yMin - totalYRange) yMin = cy - totalYRange * 0.05;
+      if (cy > yMax && cy < yMax + totalYRange) yMax = cy + totalYRange * 0.05;
     }
-
-    if (!allX.length) return;
-
-    const xMin = Math.min(...allX) - 0.1;
-    const xMax = Math.max(...allX) + 0.1;
-    const yMin = Math.min(...allY) - 0.1;
-    const yMax = Math.max(...allY) + 0.1;
 
     function toCanvas(px, py) {
       const x = pad + ((px - xMin) / (xMax - xMin)) * (W - 2 * pad);
@@ -352,27 +371,44 @@ endblock %} {% block head %}
         const [cx, cy] = toCanvas(centroids[zone].x, centroids[zone].y);
         const color = ZONE_COLORS[zone] || "#888";
 
-        // Zone region (faint circle)
-        ctx.beginPath();
-        ctx.arc(cx, cy, 40, 0, Math.PI * 2);
-        ctx.fillStyle = color + "15";
-        ctx.fill();
-        ctx.strokeStyle = color + "40";
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        // Clamp centroid position to visible canvas area
+        const clampX = Math.max(pad + 10, Math.min(W - pad - 10, cx));
+        const clampY = Math.max(pad + 10, Math.min(H - pad - 10, cy));
 
-        // Centroid square
+        // Zone region (larger faint circle)
+        ctx.beginPath();
+        ctx.arc(clampX, clampY, 55, 0, Math.PI * 2);
+        ctx.fillStyle = color + "12";
+        ctx.fill();
+        ctx.strokeStyle = color + "50";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Centroid diamond
+        ctx.beginPath();
+        ctx.moveTo(clampX, clampY - 9);
+        ctx.lineTo(clampX + 9, clampY);
+        ctx.lineTo(clampX, clampY + 9);
+        ctx.lineTo(clampX - 9, clampY);
+        ctx.closePath();
         ctx.fillStyle = color;
-        ctx.fillRect(cx - 7, cy - 7, 14, 14);
+        ctx.fill();
         ctx.strokeStyle = "#fff";
         ctx.lineWidth = 1.5;
-        ctx.strokeRect(cx - 7, cy - 7, 14, 14);
+        ctx.stroke();
 
         if (showLabels) {
+          // Label with background for readability
+          const label = zone.replace(/_/g, " ");
+          ctx.font = "bold 10px monospace";
+          const tw = ctx.measureText(label).width;
+          ctx.fillStyle = "rgba(20,20,40,0.8)";
+          ctx.fillRect(clampX - tw / 2 - 4, clampY - 28, tw + 8, 16);
           ctx.fillStyle = color;
-          ctx.font = "bold 9px monospace";
           ctx.textAlign = "center";
-          ctx.fillText(zone.substring(0, 8), cx, cy - 14);
+          ctx.fillText(label, clampX, clampY - 16);
         }
       }
     }
@@ -627,7 +663,7 @@ endblock %} {% block head %}
     const turnData = vsData.turns[selectedTurn];
     const centroids = vsData.zone_centroids || {};
 
-    // Compute scaling (same as render)
+    // Compute scaling (same as render — restaurant data only)
     let allX = [],
       allY = [];
     for (const tid in vsData.turns) {
@@ -636,16 +672,26 @@ endblock %} {% block head %}
         allY.push(vsData.turns[tid][rid].y);
       }
     }
-    for (const z in centroids) {
-      allX.push(centroids[z].x);
-      allY.push(centroids[z].y);
-    }
     if (!allX.length) return;
 
-    const xMin = Math.min(...allX) - 0.1,
-      xMax = Math.max(...allX) + 0.1;
-    const yMin = Math.min(...allY) - 0.1,
-      yMax = Math.max(...allY) + 0.1;
+    let xMin = Math.min(...allX),
+      xMax = Math.max(...allX);
+    let yMin = Math.min(...allY),
+      yMax = Math.max(...allY);
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+    xMin -= xRange * 0.15;
+    xMax += xRange * 0.15;
+    yMin -= yRange * 0.15;
+    yMax += yRange * 0.15;
+    for (const z in centroids) {
+      const cx2 = centroids[z].x, cy2 = centroids[z].y;
+      const txr = xMax - xMin, tyr = yMax - yMin;
+      if (cx2 < xMin && cx2 > xMin - txr) xMin = cx2 - txr * 0.05;
+      if (cx2 > xMax && cx2 < xMax + txr) xMax = cx2 + txr * 0.05;
+      if (cy2 < yMin && cy2 > yMin - tyr) yMin = cy2 - tyr * 0.05;
+      if (cy2 > yMax && cy2 < yMax + tyr) yMax = cy2 + tyr * 0.05;
+    }
 
     let closest = null,
       minDist = 20;

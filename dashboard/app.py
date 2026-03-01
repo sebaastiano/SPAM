@@ -239,23 +239,42 @@ def api_vectorspace():
 
     # PCA projection
     combined = np.array(all_vectors + centroid_list)
-    # Normalize features to [0, 1] for PCA
-    mins = combined.min(axis=0)
-    maxs = combined.max(axis=0)
-    ranges = maxs - mins
-    ranges[ranges == 0] = 1  # avoid divide by zero
-    normalized = (combined - mins) / ranges
 
-    # Simple PCA: center, SVD
-    centered = normalized - normalized.mean(axis=0)
-    try:
-        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
-        projected = centered @ Vt[:2].T  # project onto first 2 PCs
-        variance_explained = (S[:2] ** 2 / (S ** 2).sum()).tolist()
-    except Exception:
-        # Fallback: just use first 2 features
-        projected = normalized[:, :2]
+    # ── Robust standardization for PCA ──
+    # 1. Drop zero-variance features (e.g. bid data not yet available)
+    stds = combined.std(axis=0)
+    active_mask = stds > 1e-9  # True for features with any variance
+
+    if active_mask.sum() < 2:
+        # Not enough varied features — fall back to first 2 non-zero or raw
+        nz = np.where(active_mask)[0]
+        if len(nz) >= 2:
+            projected = combined[:, nz[:2]]
+        else:
+            projected = combined[:, :2]
         variance_explained = [0.5, 0.5]
+    else:
+        active = combined[:, active_mask]
+
+        # 2. Z-score standardize (mean=0, std=1 per feature)
+        means = active.mean(axis=0)
+        active_stds = active.std(axis=0)
+        active_stds[active_stds == 0] = 1
+        standardized = (active - means) / active_stds
+
+        # 3. Clamp outliers beyond 3σ to prevent a single extreme
+        #    value from warping the projection
+        standardized = np.clip(standardized, -3, 3)
+
+        # 4. PCA via SVD
+        centered = standardized - standardized.mean(axis=0)
+        try:
+            U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+            projected = centered @ Vt[:2].T
+            variance_explained = (S[:2] ** 2 / (S ** 2).sum()).tolist()
+        except Exception:
+            projected = standardized[:, :2]
+            variance_explained = [0.5, 0.5]
 
     # Unpack projections back to turns
     result_turns = {}

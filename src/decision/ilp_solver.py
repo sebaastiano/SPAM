@@ -19,6 +19,7 @@ Constraints:
 """
 
 import logging
+import math
 
 import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
@@ -279,17 +280,31 @@ def solve_zone_ilp(
             # (revenues = raw_prices × order_probability) which the MILP uses
             # internally for optimisation but is far too low for customer-facing prices.
             price = int(raw_prices[j])
-            # Compute per-dish ingredient cost for logging
+
+            # Compute per-dish ingredient cost using ACTUAL bid prices
+            # (these can be higher than BASE_BID_PRICES when competitors
+            # drive prices up). We MUST never sell below what we paid.
             dish_cost = sum(
-                BASE_BID_PRICES.get(ing, DEFAULT_BASE_BID) * qty
+                bid_prices[ing_idx[ing]] * qty
                 for ing, qty in recipe.get("ingredients", {}).items()
+                if ing in ing_idx
             )
             total_ingredient_cost_selected += dish_cost
+
+            # Enforce: price >= actual ingredient bid cost × margin
+            cost_floor = math.ceil(dish_cost * MINIMUM_PROFIT_MARGIN)
+            if price < cost_floor:
+                logger.warning(
+                    f"  Price floor: {recipe['name'][:30]} raised {price} → {cost_floor} "
+                    f"(bid_cost={dish_cost:.0f}, margin={MINIMUM_PROFIT_MARGIN}x)"
+                )
+                price = cost_floor
+
             decision.menu.append({"name": recipe["name"], "price": price})
             margin_pct = ((price - dish_cost) / max(dish_cost, 1)) * 100
             logger.info(
                 f"  Menu: {recipe['name'][:45]:45s} price={price:4d}, "
-                f"ing_cost={dish_cost:.0f}, margin={margin_pct:+.0f}%"
+                f"bid_cost={dish_cost:.0f}, margin={margin_pct:+.0f}%"
             )
 
     for i in range(I):
@@ -348,6 +363,17 @@ def _greedy_fallback(
     for entry in selected:
         recipe = entry["recipe"]
         price = compute_menu_price(recipe, zone, reputation, competitor_briefings)
+        # Compute actual ingredient cost using real bid prices
+        actual_cost = sum(
+            compute_bid_price(ing, competitor_briefings, demand_forecast) * qty
+            for ing, qty in recipe.get("ingredients", {}).items()
+        )
+        cost_floor = math.ceil(actual_cost * MINIMUM_PROFIT_MARGIN)
+        if price < cost_floor:
+            logger.warning(
+                f"  Greedy price floor: {recipe['name'][:30]} raised {int(price)} → {cost_floor}"
+            )
+            price = cost_floor
         decision.menu.append({"name": recipe["name"], "price": int(price)})
 
     needed_ingredients: dict[str, int] = {}
