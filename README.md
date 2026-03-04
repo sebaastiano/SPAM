@@ -2,6 +2,10 @@
 
 Autonomous agent system for a competitive restaurant simulation game. Each turn the system reasons about zone placement, menu composition, ingredient bidding, pricing, and diplomatic manipulation.
 
+<p align="center">
+<img width="515" height="721" alt="image" src="https://github.com/user-attachments/assets/b46b6c15-8633-47aa-a8a4-8bb3d4e0350f" />
+</p>
+
 ---
 
 ## Core Strategies
