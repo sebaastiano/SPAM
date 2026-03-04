@@ -265,4 +265,4 @@ MIT
 
 ## Authors
 
-Team SPAM! — Hackapizza 2025
+Team SPAM! — Hackapizza 2026
