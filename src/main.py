@@ -722,7 +722,7 @@ class GameOrchestrator:
         self.serving.set_menu([])
         await self.phase_router.handle_game_reset(data)
         self.skill_orchestrator.new_turn()
-        # archetype_classifier removed (poll-driven v2)
+        # Archetype classifier cache cleared each game (pipeline creates fresh instance)
         self.phase_router.current_phase = None
         self.phase_router.current_turn = 0
         # Keep: competitor_memory, client_library, event_log, message_log

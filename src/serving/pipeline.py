@@ -30,11 +30,21 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from src.config import BASE_URL, HEADERS, TEAM_ID
+from src.config import (
+    ARCHETYPE_CEILINGS,
+    ARCHETYPE_PRIORITY,
+    BASE_URL,
+    HEADERS,
+    TEAM_ID,
+)
 from src.memory.client_profile import (
     ClientProfile,
     GlobalClientLibrary,
     IntoleranceDetector,
+)
+from src.serving.archetype_classifier import (
+    ArchetypeClassifier,
+    ClassificationResult,
 )
 from src.serving.order_matcher import OrderMatcher
 
@@ -61,6 +71,8 @@ class PendingPreparation:
     order_text: str
     started_at: float
     expected_prep_time: float  # from recipe database (seconds)
+    archetype: str = "unknown"  # inferred from order text
+    archetype_confidence: float = 0.0
 
 
 @dataclass
@@ -70,6 +82,11 @@ class ServingMetrics:
     clients_matched: int = 0
     clients_no_match: int = 0
     clients_no_ingredients: int = 0
+    archetype_classified: int = 0
+    archetype_rules: int = 0
+    archetype_llm: int = 0
+    archetype_unknown: int = 0
+    dish_rerouted: int = 0
     preparations_started: int = 0
     preparations_completed: int = 0
     preparations_timed_out: int = 0
@@ -92,11 +109,11 @@ class ServingPipeline:
 
     client_spawned is just a trigger to poll /meals immediately.
 
-    This eliminates:
-      - Priority queue (archetype not available from clientName)
-      - client_id resolution (already in /meals)
-      - Race conditions (we only process what /meals shows)
-      - Duplicate ID bugs (each meal has a unique client_id)
+    Uses hybrid archetype classifier (rule-based + LLM fallback)
+    to infer client archetype from order text, enabling:
+      - Archetype-aware dish routing (prestige alignment)
+      - Better intolerance priors (archetype-specific Bayesian updates)
+      - Richer ClientProfile tracking for cross-turn learning
     """
 
     def __init__(
@@ -112,6 +129,9 @@ class ServingPipeline:
         self.client_library = client_library
         self.mcp_client = mcp_client
         self.llm_client = llm_client  # fast LLM for order parsing fallback
+
+        # Archetype classifier (hybrid: rules + LLM)
+        self.archetype_classifier = ArchetypeClassifier()
 
         # Set during waiting phase
         self.menu: dict[str, dict] = {}  # dish_name → {name, price}
@@ -132,6 +152,10 @@ class ServingPipeline:
         # SSE order text cache: clientName → orderText
         # /meals may not include orderText, but SSE client_spawned does
         self._sse_order_cache: dict[str, str] = {}
+
+        # Archetype cache: clientName → ClassificationResult
+        # Populated from SSE (early classification) for use in _serve_meal
+        self._archetype_cache: dict[str, ClassificationResult] = {}
 
         # Concurrency control for polling
         self._poll_event = asyncio.Event()  # set by client_spawned to trigger immediate poll
@@ -197,6 +221,7 @@ class ServingPipeline:
         self._committed_ingredients.clear()
         self._processed_meal_ids.clear()
         self._sse_order_cache.clear()
+        self._archetype_cache.clear()
         self._poll_event.clear()
         self.metrics = ServingMetrics()
         self._is_open = True
@@ -267,6 +292,12 @@ class ServingPipeline:
             f"mcp_errors={m.mcp_errors} intolerance_skips={m.intolerance_skips} "
             f"polls={m.polls_performed}"
         )
+        logger.info(
+            f"Archetype stats: classified={m.archetype_classified} "
+            f"rules={m.archetype_rules} llm={m.archetype_llm} "
+            f"unknown={m.archetype_unknown} rerouted={m.dish_rerouted}"
+        )
+        logger.info(self.archetype_classifier.get_stats_summary())
 
     # ══════════════════════════════════════════════════════════════
     #  SSE EVENT HANDLERS
@@ -286,6 +317,24 @@ class ServingPipeline:
         # Cache order text — /meals may not include it
         if order_text and client_name != "unknown":
             self._sse_order_cache[client_name] = order_text
+
+        # Fire-and-forget early archetype classification from SSE orderText.
+        # This populates _archetype_cache so _serve_meal can use it
+        # without waiting for the LLM (if rules resolve it instantly).
+        if order_text:
+            try:
+                result = await self.archetype_classifier.classify(
+                    order_text, client_name
+                )
+                if client_name != "unknown":
+                    self._archetype_cache[client_name] = result
+                logger.info(
+                    f"Early archetype for {client_name}: "
+                    f"{result.archetype} ({result.method}, "
+                    f"conf={result.confidence:.2f})"
+                )
+            except Exception as exc:
+                logger.warning(f"Early archetype classification failed: {exc}")
 
         # Trigger immediate poll (with small delay for server propagation)
         await asyncio.sleep(POLL_TRIGGER_DELAY)
@@ -325,9 +374,9 @@ class ServingPipeline:
         if success:
             self.metrics.serves_successful += 1
 
-            # Track the serve
+            # Track the serve — NOW with archetype from classification
             profile = ClientProfile(
-                archetype="unknown",  # not available from clientName
+                archetype=pending.archetype,
                 order_text=pending.order_text,
                 matched_dish=dish_name,
                 served=True,
@@ -335,13 +384,21 @@ class ServingPipeline:
             )
             self.served_this_turn.append(profile)
 
+            # Update Bayesian intolerance priors with archetype
+            recipe = self.recipes.get(dish_name, {})
+            recipe_ings = list(recipe.get("ingredients", {}).keys())
+            if pending.archetype != "unknown" and recipe_ings:
+                self.intolerance_detector.record_success(
+                    pending.archetype, recipe_ings
+                )
+
             # Update order cache for future matching
             if self.order_matcher and pending.order_text:
                 self.order_matcher.add_to_cache(pending.order_text, dish_name)
 
             elapsed = time.time() - pending.started_at
             logger.info(
-                f"Served {dish_name} to {pending.client_name} "
+                f"Served {dish_name} to {pending.client_name} [{pending.archetype}] "
                 f"(client_id={pending.client_id}, elapsed={elapsed:.1f}s)"
             )
         else:
@@ -424,12 +481,15 @@ class ServingPipeline:
         Process a single meal from /meals through the serving pipeline.
 
         Flow:
-        1. Match request text to menu dish
-        2. Intolerance check (best-effort without archetype)
-        3. Verify ingredient availability
-        4. Commit ingredients
-        5. prepare_dish via MCP
-        6. (preparation_complete SSE triggers serve_dish)
+        0. Extract order text + client name
+        1. Classify archetype (rules fast-path → LLM fallback)
+        2. Match request text to menu dish
+        3. Archetype-aware dish routing (prestige alignment)
+        4. Intolerance check (archetype-aware Bayesian + declared)
+        5. Verify ingredient availability
+        6. Commit ingredients
+        7. prepare_dish via MCP
+        8. (preparation_complete SSE triggers serve_dish)
         """
         # /meals uses 'request' for order text (NOT 'orderText' like SSE)
         order_text = meal.get("request") or meal.get("orderText", "")
@@ -445,7 +505,44 @@ class ServingPipeline:
             order_text = self._sse_order_cache[client_name]
             logger.info(f"Using SSE-cached orderText for {client_name}: '{order_text}'")
 
-        # Step 0.5: Extract declared intolerances from order text
+        # ── Step 1: Classify archetype ──
+        archetype = "unknown"
+        arch_confidence = 0.0
+        # Check if SSE already classified this client (early classification)
+        if client_name in self._archetype_cache:
+            cached_result = self._archetype_cache[client_name]
+            archetype = cached_result.archetype
+            arch_confidence = cached_result.confidence
+        elif order_text:
+            # Classify now (will use rules fast-path if possible)
+            try:
+                result = await self.archetype_classifier.classify(
+                    order_text, client_name
+                )
+                archetype = result.archetype
+                arch_confidence = result.confidence
+            except Exception as exc:
+                logger.warning(f"Archetype classification failed: {exc}")
+
+        # Track classification stats
+        self.metrics.archetype_classified += 1
+        if archetype != "unknown":
+            if arch_confidence > 0:
+                # Determine if it was rules or LLM from the cache
+                cached = self._archetype_cache.get(client_name)
+                if cached and cached.method == "rules":
+                    self.metrics.archetype_rules += 1
+                else:
+                    self.metrics.archetype_llm += 1
+        else:
+            self.metrics.archetype_unknown += 1
+
+        logger.info(
+            f"Client {client_name}: archetype={archetype} "
+            f"(conf={arch_confidence:.2f})"
+        )
+
+        # ── Step 2: Extract declared intolerances ──
         declared_intolerances = (
             self.order_matcher.extract_intolerances(order_text)
             if self.order_matcher else self._extract_intolerances(order_text)
@@ -453,7 +550,7 @@ class ServingPipeline:
         if declared_intolerances:
             logger.info(f"Client {client_name} declared intolerances: {declared_intolerances}")
 
-        # Step 1: Match dish
+        # ── Step 3: Match dish from order text ──
         if self.order_matcher is None:
             logger.error("Order matcher not initialized — menu not set")
             return
@@ -466,7 +563,22 @@ class ServingPipeline:
 
         self.metrics.clients_matched += 1
 
-        # Step 2: Intolerance check — use declared intolerances from order text
+        # ── Step 4: Archetype-aware dish routing ──
+        # If we know the archetype, check if a better-aligned dish exists
+        # on the menu that we can actually cook.
+        if archetype != "unknown" and arch_confidence >= 0.5:
+            better = self._archetype_best_dish(
+                archetype, dish, declared_intolerances
+            )
+            if better and better != dish:
+                logger.info(
+                    f"Archetype routing: {dish} → {better} "
+                    f"(better fit for {archetype})"
+                )
+                dish = better
+                self.metrics.dish_rerouted += 1
+
+        # ── Step 5: Intolerance check ──
         recipe = self.recipes.get(dish, {})
         recipe_ings = list(recipe.get("ingredients", {}).keys())
 
@@ -485,11 +597,15 @@ class ServingPipeline:
                 if intolerance_conflict:
                     break
 
-        # Also check Bayesian intolerance detector as fallback
-        bayesian_unsafe = not self.intolerance_detector.is_recipe_safe("unknown", recipe_ings)
+        # Bayesian intolerance detector — NOW archetype-aware
+        bayesian_unsafe = not self.intolerance_detector.is_recipe_safe(
+            archetype, recipe_ings
+        )
 
         if intolerance_conflict or bayesian_unsafe:
-            alt_dish = self._find_safe_cookable_dish(declared_intolerances)
+            alt_dish = self._find_safe_cookable_dish(
+                declared_intolerances, archetype=archetype
+            )
             if alt_dish and alt_dish != dish:
                 logger.info(
                     f"Intolerance risk for {dish} → using safe alternative {alt_dish}"
@@ -498,8 +614,7 @@ class ServingPipeline:
                 recipe = self.recipes.get(dish, {})
                 self.metrics.intolerance_skips += 1
             elif not alt_dish:
-                # No safe alternative available — skip this customer entirely.
-                # Serving a dish with known intolerance = guaranteed rejection.
+                # No safe alternative — skip this customer entirely.
                 logger.warning(
                     f"Intolerance conflict for {dish} and no safe alternative — "
                     f"SKIPPING {client_name} to avoid rejection"
@@ -507,19 +622,13 @@ class ServingPipeline:
                 self.metrics.intolerance_skips += 1
                 return
 
-        # Step 3: Verify ingredient availability
-        # CRITICAL: If we can't cook the matched dish, DO NOT serve a random
-        # alternative. Serving the wrong dish gets REJECTED by the customer
-        # and damages our reputation. It's better to skip the customer entirely
-        # and preserve ingredients for customers whose orders we CAN fulfill.
+        # ── Step 6: Verify ingredient availability ──
         if not self._can_cook(dish):
             logger.warning(
                 f"Cannot cook matched dish '{dish}' for {client_name} — "
-                f"SKIPPING customer to preserve reputation. "
-                f"(Serving wrong dish = rejection = reputation damage)"
+                f"SKIPPING customer to preserve reputation."
             )
             self.metrics.clients_no_ingredients += 1
-            # Check if we have ANY cookable dishes left
             remaining = self._cookable_menu_dishes()
             if not remaining:
                 logger.warning(
@@ -528,13 +637,13 @@ class ServingPipeline:
                 await self._close_restaurant()
             return
 
-        # Step 4: Commit ingredients (mark as used BEFORE prepare_dish)
+        # ── Step 7: Commit ingredients ──
         self._commit_ingredients(dish)
 
-        # Step 5: Prepare dish via MCP
+        # ── Step 8: Prepare dish via MCP ──
         prep_time = recipe.get("preparationTimeMs", recipe.get("prep_time", 5000))
         if prep_time > 100:  # likely in milliseconds
-            prep_time = prep_time / 1000.0  # convert to seconds
+            prep_time = prep_time / 1000.0
 
         pending = PendingPreparation(
             dish_name=dish,
@@ -543,6 +652,8 @@ class ServingPipeline:
             order_text=order_text,
             started_at=time.time(),
             expected_prep_time=prep_time,
+            archetype=archetype,
+            archetype_confidence=arch_confidence,
         )
 
         # FIFO queue per dish name
@@ -554,7 +665,7 @@ class ServingPipeline:
         if success:
             self.metrics.preparations_started += 1
             logger.info(
-                f"Preparing {dish} for {client_name} "
+                f"Preparing {dish} for {client_name} [{archetype}] "
                 f"(client_id={client_id}, prep≈{prep_time:.1f}s)"
             )
         else:
@@ -824,8 +935,16 @@ class ServingPipeline:
             )
         return None
 
-    def _find_safe_cookable_dish(self, declared_intolerances: list[str]) -> str | None:
-        """Find a cookable dish that avoids declared intolerances."""
+    def _find_safe_cookable_dish(
+        self,
+        declared_intolerances: list[str],
+        archetype: str = "unknown",
+    ) -> str | None:
+        """Find a cookable dish that avoids declared intolerances.
+
+        When archetype is known, also checks Bayesian intolerance priors
+        and prefers dishes aligned with the archetype's prestige band.
+        """
         cookable = self._cookable_menu_dishes()
         if not cookable:
             return None
@@ -843,20 +962,154 @@ class ServingPipeline:
                         break
                 if conflict:
                     break
+            # Also check Bayesian intolerance for this archetype
+            if not conflict and archetype != "unknown":
+                if not self.intolerance_detector.is_recipe_safe(archetype, ings):
+                    conflict = True
             if not conflict:
                 safe.append(d)
 
-        if safe:
-            return max(
-                safe,
-                key=lambda d: self.recipes.get(d, {}).get("prestige", 0),
+        if not safe:
+            logger.warning(
+                f"No safe cookable dish found "
+                f"(avoiding intolerances: {declared_intolerances}, "
+                f"archetype={archetype})"
             )
-        # No safe dish available — do NOT serve an intolerant dish.
-        # Better to skip the customer than trigger an intolerance rejection.
-        logger.warning(
-            f"No safe cookable dish found (avoiding intolerances: {declared_intolerances})"
+            return None
+
+        # If archetype is known, prefer prestige-aligned dishes
+        if archetype != "unknown":
+            return self._pick_best_for_archetype(safe, archetype)
+
+        # Fallback: highest prestige
+        return max(
+            safe,
+            key=lambda d: self.recipes.get(d, {}).get("prestige", 0),
         )
-        return None
+
+    def _archetype_best_dish(
+        self,
+        archetype: str,
+        matched_dish: str,
+        declared_intolerances: list[str],
+    ) -> str | None:
+        """
+        Archetype-aware dish routing.
+
+        Given the order-matched dish and the client's archetype, check
+        if a better-aligned dish exists on our menu that we can cook.
+
+        Routing rules per archetype:
+          - Astrobarone: prefer highest prestige (≥ 80 ideal)
+          - Saggi del Cosmo: prefer highest prestige, no rush
+          - Esploratore Galattico: prefer lowest prestige / fastest prep
+          - Famiglie Orbitali: prefer mid-prestige (40-70 sweet spot)
+
+        Only reroutes if:
+          1. The alternative is clearly better aligned
+          2. The alternative is cookable
+          3. The alternative passes intolerance checks
+          4. The matched dish is NOT the only cookable option
+
+        Returns the best dish name, or None if no reroute is needed.
+        """
+        cookable = self._cookable_menu_dishes()
+        if len(cookable) <= 1:
+            return matched_dish  # only one option, keep it
+
+        # Filter out dishes with intolerance conflicts
+        safe_cookable = []
+        for d in cookable:
+            recipe = self.recipes.get(d, {})
+            ings = list(recipe.get("ingredients", {}).keys())
+            conflict = False
+            for intolerant_ing in declared_intolerances:
+                intolerant_lower = intolerant_ing.lower().strip()
+                for ring in ings:
+                    if intolerant_lower in ring.lower() or ring.lower() in intolerant_lower:
+                        conflict = True
+                        break
+                if conflict:
+                    break
+            if not conflict:
+                # Also check Bayesian intolerance
+                if self.intolerance_detector.is_recipe_safe(archetype, ings):
+                    safe_cookable.append(d)
+
+        if not safe_cookable:
+            return matched_dish
+
+        # Only reroute if the matched dish is in the cookable set
+        # (if the matched dish is NOT cookable, _serve_meal will skip anyway)
+        if matched_dish not in safe_cookable:
+            # matched dish can't be cooked — reroute to best available
+            return self._pick_best_for_archetype(safe_cookable, archetype)
+
+        # Check if matched dish is already well-aligned
+        matched_prestige = self.recipes.get(matched_dish, {}).get("prestige", 50)
+        ideal = self._archetype_ideal_prestige(archetype)
+
+        # If matched dish is already within ±15 of ideal, keep it
+        # (the order matcher found it for a reason — it matches the order text)
+        if abs(matched_prestige - ideal) <= 15:
+            return matched_dish
+
+        # Find best alternative
+        best = self._pick_best_for_archetype(safe_cookable, archetype)
+        best_prestige = self.recipes.get(best, {}).get("prestige", 50)
+
+        # Only reroute if the alternative is significantly better aligned
+        if abs(best_prestige - ideal) < abs(matched_prestige - ideal) - 10:
+            return best
+
+        return matched_dish  # no significant improvement
+
+    def _pick_best_for_archetype(
+        self, candidates: list[str], archetype: str
+    ) -> str:
+        """Pick the best dish from candidates for a given archetype."""
+        ideal = self._archetype_ideal_prestige(archetype)
+
+        def score(dish_name: str) -> float:
+            recipe = self.recipes.get(dish_name, {})
+            prestige = recipe.get("prestige", 50)
+            # Closeness to ideal prestige (0 = perfect)
+            prestige_delta = abs(prestige - ideal)
+            # Prep time penalty (faster = better for all, but esp. Esploratore & Astrobarone)
+            prep_ms = recipe.get("preparationTimeMs", recipe.get("prep_time", 5000))
+            if prep_ms > 100:
+                prep_ms = prep_ms / 1000.0
+            else:
+                prep_ms = float(prep_ms)
+
+            # Base score: inverse of prestige distance
+            s = 100.0 - prestige_delta
+
+            # Speed bonus for impatient archetypes
+            if archetype in ("Esploratore Galattico", "Astrobarone"):
+                s -= prep_ms * 3  # penalize slow dishes more
+
+            # Prestige bonus for prestige-seekers
+            if archetype in ("Astrobarone", "Saggi del Cosmo"):
+                s += prestige * 0.3
+
+            # Budget bonus for budget-conscious
+            if archetype == "Esploratore Galattico":
+                s -= prestige * 0.2  # prefer lower prestige = lower price
+
+            return s
+
+        return max(candidates, key=score)
+
+    @staticmethod
+    def _archetype_ideal_prestige(archetype: str) -> int:
+        """Ideal prestige target per archetype."""
+        return {
+            "Astrobarone": 90,
+            "Saggi del Cosmo": 85,
+            "Famiglie Orbitali": 55,
+            "Esploratore Galattico": 35,
+        }.get(archetype, 50)
 
     @staticmethod
     def _extract_intolerances(order_text: str) -> list[str]:
