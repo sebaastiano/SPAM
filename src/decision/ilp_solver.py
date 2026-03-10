@@ -19,6 +19,7 @@ Constraints:
 """
 
 import logging
+import math
 
 import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
@@ -38,6 +39,7 @@ from src.config import (
     AGGRESSIVE_SPENDING_FRACTION,
     BASE_BID_PRICES,
     DEFAULT_BASE_BID,
+    MINIMUM_PROFIT_MARGIN,
 )
 
 logger = logging.getLogger("spam.decision.ilp_solver")
@@ -62,7 +64,9 @@ def solve_zone_ilp(
     demand_forecast: dict[str, float],
     competitor_briefings: dict[int, dict],
     reputation: float = 100.0,
-    spending_fraction: float = None,
+    spending_fraction: float | None = None,
+    agent_guidance: dict | None = None,
+    pnl_history: list[dict] | None = None,
 ) -> ZoneDecision:
     """
     Solve the zone-specific MILP for menu selection and bid allocation.
@@ -72,31 +76,57 @@ def solve_zone_ilp(
       x_i ∈ Z≥0    — quantity of ingredient i to bid on
 
     Objective (minimised by scipy):
-      min  -Σ_j(revenue_j · y_j) + Σ_i(bid_price_i · x_i)
+      min  -Σ_j(realistic_revenue_j · y_j) + Σ_i(bid_price_i · x_i)
 
     Subject to:
       menu_min ≤ Σ y_j ≤ menu_max                                      (C1)
       SERVINGS_BUFFER * Σ_j(need_{ij} · y_j) - x_i ≤ inventory_i  ∀ i  (C2)
       Σ_i(bid_price_i · x_i) ≤ budget                                  (C3)
+
+    REVENUE REALISM (new): The raw menu price is discounted by an
+    "order probability" factor based on:
+      - Historical avg revenue per client / dish price
+      - Menu competition (more items → each gets fewer orders)
+      - Client archetype distribution (budget vs premium)
+    This prevents the solver from thinking every dish = 1 guaranteed sale.
     """
     decision = ZoneDecision()
     decision.zone = zone
 
-    # ── Spending fraction: auto-select based on competition ──
+    # ── Spending fraction: P&L-aware auto-selection ──
     if spending_fraction is None:
-        active_competitors = sum(
-            1 for b in competitor_briefings.values()
-            if b.get("is_connected", False)
+        spending_fraction = _compute_smart_spending(
+            balance, competitor_briefings, pnl_history,
         )
-        if active_competitors >= 4:
-            spending_fraction = AGGRESSIVE_SPENDING_FRACTION
-        else:
-            spending_fraction = DEFAULT_SPENDING_FRACTION
 
-    # ── Zone constraints ──
+    # ── Zone constraints (optionally overridden by agent guidance) ──
     prestige_min, prestige_max = ZONE_PRESTIGE_RANGE.get(zone, (0, 100))
     menu_min, menu_max = ZONE_MENU_SIZE.get(zone, (3, 10))
     max_prep_time = ZONE_MAX_PREP_TIME.get(zone, 10.0)
+
+    # Apply agent guidance overrides if available
+    if agent_guidance:
+        ag_pmin = agent_guidance.get("prestige_min")
+        ag_pmax = agent_guidance.get("prestige_max")
+        ag_prep = agent_guidance.get("max_prep_time")
+        ag_size = agent_guidance.get("target_size")
+
+        if ag_pmin is not None:
+            prestige_min = min(prestige_min, ag_pmin)  # widen lower bound
+        if ag_pmax is not None:
+            prestige_max = max(prestige_max, ag_pmax)  # widen upper bound
+        if ag_prep is not None:
+            max_prep_time = max(max_prep_time, ag_prep)  # relax prep time
+        if ag_size is not None:
+            # Agent can push for larger menu — widen upper bound
+            menu_max = max(menu_max, ag_size)
+            # But keep a reasonable minimum
+            menu_min = max(menu_min, min(8, ag_size - 4))
+
+        logger.info(
+            f"Agent guidance applied: prestige=[{prestige_min},{prestige_max}], "
+            f"menu=[{menu_min},{menu_max}], prep≤{max_prep_time}s"
+        )
 
     # ── Filter eligible recipes ──
     eligible_recipes: list[dict] = []
@@ -120,11 +150,31 @@ def solve_zone_ilp(
     I = len(all_ingredients)
     ing_idx = {name: idx for idx, name in enumerate(all_ingredients)}
 
-    # ── Per-recipe revenue (price estimate) ──
-    revenues = np.array(
-        [compute_menu_price(r, zone, reputation, competitor_briefings) for r in eligible_recipes],
+    # ── Extract agent pricing guidance if available ──
+    agent_pricing = None
+    if agent_guidance:
+        agent_pricing = {
+            "strategy": agent_guidance.get("price_strategy", "volume_first"),
+            "adjustment_factor": agent_guidance.get("price_adjustment", 1.0),
+            "undercut": agent_guidance.get("undercut", True),
+        }
+
+    # ── Per-recipe revenue (REALISTIC: price × order probability) ──
+    raw_prices = np.array(
+        [compute_menu_price(r, zone, reputation, competitor_briefings, agent_pricing)
+         for r in eligible_recipes],
         dtype=float,
     )
+
+    # Discount prices by realistic order probability
+    # NOT every dish gets ordered. A menu of 15 dishes might see 3-8 orders
+    # total in a serving window. Each dish's "expected revenue" is:
+    #   price × P(ordered) where P depends on menu size, prestige tier, speed
+    menu_size_target = menu_max  # approximate final menu size
+    order_probabilities = _estimate_order_probabilities(
+        eligible_recipes, menu_size_target, reputation, competitor_briefings,
+    )
+    revenues = raw_prices * order_probabilities
 
     # ── Per-ingredient bid price ──
     bid_prices = np.array(
@@ -222,11 +272,40 @@ def solve_zone_ilp(
         )
 
     # ── Build decision from solution ──
+    total_ingredient_cost_selected = 0.0
     for j in range(J):
         if y_sol[j]:
             recipe = eligible_recipes[j]
-            price = int(revenues[j])
+            # Use the actual menu price (raw_prices), NOT the expected-revenue
+            # (revenues = raw_prices × order_probability) which the MILP uses
+            # internally for optimisation but is far too low for customer-facing prices.
+            price = int(raw_prices[j])
+
+            # Compute per-dish ingredient cost using ACTUAL bid prices
+            # (these can be higher than BASE_BID_PRICES when competitors
+            # drive prices up). We MUST never sell below what we paid.
+            dish_cost = sum(
+                bid_prices[ing_idx[ing]] * qty
+                for ing, qty in recipe.get("ingredients", {}).items()
+                if ing in ing_idx
+            )
+            total_ingredient_cost_selected += dish_cost
+
+            # Enforce: price >= actual ingredient bid cost × margin
+            cost_floor = math.ceil(dish_cost * MINIMUM_PROFIT_MARGIN)
+            if price < cost_floor:
+                logger.warning(
+                    f"  Price floor: {recipe['name'][:30]} raised {price} → {cost_floor} "
+                    f"(bid_cost={dish_cost:.0f}, margin={MINIMUM_PROFIT_MARGIN}x)"
+                )
+                price = cost_floor
+
             decision.menu.append({"name": recipe["name"], "price": price})
+            margin_pct = ((price - dish_cost) / max(dish_cost, 1)) * 100
+            logger.info(
+                f"  Menu: {recipe['name'][:45]:45s} price={price:4d}, "
+                f"bid_cost={dish_cost:.0f}, margin={margin_pct:+.0f}%"
+            )
 
     for i in range(I):
         if x_sol[i] > 0:
@@ -237,13 +316,18 @@ def solve_zone_ilp(
             })
 
     decision.total_bid_cost = float(bid_prices @ x_sol)
-    decision.expected_revenue = float(revenues @ y_sol)  # no discount — full revenue potential
+    # expected_revenue uses raw menu prices (what we actually charge)
+    decision.expected_revenue = float(raw_prices @ y_sol)
 
+    net_profit = decision.expected_revenue - decision.total_bid_cost
+    prob_weighted_rev = float(revenues @ y_sol)
     logger.info(
         f"MILP [{zone}]: {len(decision.menu)} menu items, "
         f"{len(decision.bids)} bids (total_qty={sum(int(x) for x in x_sol)}), "
         f"cost={decision.total_bid_cost:.0f}/{budget:.0f} budget, "
-        f"expected_rev={decision.expected_revenue:.0f}"
+        f"menu_rev={decision.expected_revenue:.0f}, "
+        f"prob_weighted_rev={prob_weighted_rev:.0f}, "
+        f"NET PROFIT={net_profit:+.0f}"
     )
 
     return decision
@@ -279,6 +363,17 @@ def _greedy_fallback(
     for entry in selected:
         recipe = entry["recipe"]
         price = compute_menu_price(recipe, zone, reputation, competitor_briefings)
+        # Compute actual ingredient cost using real bid prices
+        actual_cost = sum(
+            compute_bid_price(ing, competitor_briefings, demand_forecast) * qty
+            for ing, qty in recipe.get("ingredients", {}).items()
+        )
+        cost_floor = math.ceil(actual_cost * MINIMUM_PROFIT_MARGIN)
+        if price < cost_floor:
+            logger.warning(
+                f"  Greedy price floor: {recipe['name'][:30]} raised {int(price)} → {cost_floor}"
+            )
+            price = cost_floor
         decision.menu.append({"name": recipe["name"], "price": int(price)})
 
     needed_ingredients: dict[str, int] = {}
@@ -293,10 +388,37 @@ def _greedy_fallback(
     budget = balance * spending_fraction
     total_bid_cost = 0.0
 
-    for ing, qty in needed_ingredients.items():
+    # Sort: uncontested ingredients first (cheapest), so we buy MORE of them
+    # before budget runs out on contested (expensive) ones.
+    def _ingredient_contestation(ing: str) -> int:
+        """How many competitors target this ingredient? 0 = uncontested."""
+        count = 0
+        for brief in competitor_briefings.values():
+            if not brief.get("is_connected", False):
+                continue
+            if ing in brief.get("top_bid_ingredients", []):
+                count += 1
+        return count
+
+    sorted_ingredients = sorted(
+        needed_ingredients.items(),
+        key=lambda item: _ingredient_contestation(item[0]),
+    )
+
+    for ing, qty in sorted_ingredients:
         if qty <= 0:
             continue
         bid_price = compute_bid_price(ing, competitor_briefings, demand_forecast)
+
+        # Uncontested ingredient bonus: if no competitor is targeting this,
+        # the bid price is rock-bottom — buy an extra serving worth.
+        # This is the key insight: zone differentiation → uncontested
+        # ingredients → low per-unit cost → buy more → serve more clients.
+        contestation = _ingredient_contestation(ing)
+        if contestation == 0 and bid_price <= DEFAULT_BASE_BID * 1.5:
+            # Extra serving at bargain price — +50% more quantity
+            qty = max(qty, int(qty * 1.5))
+
         cost = bid_price * qty
         if total_bid_cost + cost <= budget:
             decision.bids.append({
@@ -330,6 +452,116 @@ def _greedy_fallback(
     return decision
 
 
+def solve_bids_for_menu(
+    menu_items: list[dict],
+    recipe_db: dict[str, dict],
+    balance: float,
+    inventory: dict[str, int],
+    competitor_briefings: dict[int, dict],
+    demand_forecast: dict[str, float],
+    spending_fraction: float,
+    zone: str = "DIVERSIFIED",
+) -> ZoneDecision:
+    """
+    Compute optimal bids for an ALREADY-FIXED menu.
+
+    Unlike solve_zone_ilp() which jointly optimises menu + bids, this
+    function takes the existing menu as given and only decides HOW MUCH
+    of each required ingredient to bid on within the budget.
+
+    This prevents the classic desync bug where bid_compute re-solves
+    the full MILP and gets a different menu than the one already saved.
+    """
+    decision = ZoneDecision()
+    decision.zone = zone
+    decision.menu = list(menu_items)  # preserve existing menu
+
+    # ── Collect ingredients needed by ALL menu items ──
+    needed: dict[str, int] = {}
+    for item in menu_items:
+        recipe = recipe_db.get(item["name"])
+        if not recipe:
+            continue
+        for ing, qty in recipe.get("ingredients", {}).items():
+            # Need SERVINGS_BUFFER servings per menu item
+            need = qty * SERVINGS_BUFFER
+            needed[ing] = needed.get(ing, 0) + need
+
+    if not needed:
+        logger.warning("solve_bids_for_menu: no ingredients needed (no recipes matched)")
+        return decision
+
+    # ── Subtract what we already have in inventory ──
+    to_bid: dict[str, int] = {}
+    for ing, total_need in needed.items():
+        have = inventory.get(ing, 0)
+        shortfall = max(0, total_need - have)
+        if shortfall > 0:
+            to_bid[ing] = shortfall
+
+    if not to_bid:
+        logger.info("solve_bids_for_menu: inventory already covers all menu needs")
+        return decision
+
+    budget = balance * spending_fraction
+
+    # ── Build bids within budget, prioritising uncontested ingredients ──
+    def _contestation(ing: str) -> int:
+        count = 0
+        for brief in competitor_briefings.values():
+            if not brief.get("is_connected", False):
+                continue
+            if ing in brief.get("top_bid_ingredients", []):
+                count += 1
+        return count
+
+    # Sort: cheapest/uncontested first so we fill more needs before budget runs out
+    sorted_bids = sorted(
+        to_bid.items(),
+        key=lambda item: (_contestation(item[0]),
+                          compute_bid_price(item[0], competitor_briefings, demand_forecast)),
+    )
+
+    total_cost = 0.0
+    for ing, qty in sorted_bids:
+        bid_price = compute_bid_price(ing, competitor_briefings, demand_forecast)
+
+        # Uncontested bonus: buy extra at bargain price
+        if _contestation(ing) == 0 and bid_price <= DEFAULT_BASE_BID * 1.5:
+            qty = max(qty, int(qty * 1.5))
+
+        cost = bid_price * qty
+        if total_cost + cost <= budget:
+            decision.bids.append({
+                "ingredient": ing,
+                "bid": int(bid_price),
+                "quantity": qty,
+            })
+            total_cost += cost
+        else:
+            # Partial fill with remaining budget
+            affordable = max(1, int((budget - total_cost) / bid_price))
+            if affordable > 0 and total_cost + bid_price * affordable <= budget * 1.05:
+                decision.bids.append({
+                    "ingredient": ing,
+                    "bid": int(bid_price),
+                    "quantity": affordable,
+                })
+                total_cost += bid_price * affordable
+            break
+
+    decision.total_bid_cost = total_cost
+    decision.expected_revenue = sum(item.get("price", 0) for item in menu_items)
+
+    logger.info(
+        f"BidsForMenu [{zone}]: {len(menu_items)} menu items, "
+        f"{len(decision.bids)} bids (need {len(to_bid)} ingredients), "
+        f"cost={total_cost:.0f}/{budget:.0f} budget"
+    )
+
+    return decision
+
+
 def _score_recipes(
     recipes: list[dict],
     zone: str,
@@ -337,10 +569,13 @@ def _score_recipes(
     reputation: float,
     demand_forecast: dict[str, float],
 ) -> list[dict]:
-    """Score and rank recipes for a zone — favor volume and diversity."""
+    """Score and rank recipes for a zone — favor volume, diversity, and speed."""
     scored = []
 
     high_delta_set = {ing for ing, _ in HIGH_DELTA_INGREDIENTS}
+
+    # Track prestige distribution for diversity bonus
+    prestige_buckets = {}  # bucket_id -> count
 
     for recipe in recipes:
         prestige = recipe.get("prestige", 50)
@@ -377,13 +612,31 @@ def _score_recipes(
             for ing in ingredients
         )
 
+        # Diversity bonus: recipes in underrepresented prestige buckets
+        # score higher. This ensures the menu covers all price tiers.
+        bucket = int(prestige // 20)  # 5 buckets: 0-19, 20-39, 40-59, 60-79, 80-100
+        bucket_count = prestige_buckets.get(bucket, 0)
+        diversity_bonus = max(0, 0.15 - bucket_count * 0.03)  # first in bucket gets most
+        prestige_buckets[bucket] = bucket_count + 1
+
+        # Zone-specific bonuses
+        zone_bonus = 0.0
+        if zone == "DIVERSIFIED":
+            # DIVERSIFIED zone: extra bonus for covering extreme tiers
+            if prestige <= 30 or prestige >= 80:
+                zone_bonus = 0.08  # bonus for extreme tiers (budget + premium)
+            # Extra speed bonus for diversified (need to serve many quickly)
+            zone_bonus += speed_score * 0.05
+
         total_score = (
-            prestige_score * 0.20
+            prestige_score * 0.15
             + speed_score * 0.25
             + inventory_score * 0.30   # heavily favor what we already have
             + simplicity_bonus
             + delta_bonus * 0.05
             - competition_penalty * 0.05
+            + diversity_bonus
+            + zone_bonus
         )
 
         scored.append({"recipe": recipe, "score": total_score})
@@ -395,25 +648,21 @@ def _score_recipes(
 def compute_menu_price(
     recipe: dict, zone: str, reputation: float,
     competitor_briefings: dict[int, dict] | None = None,
+    agent_pricing: dict | None = None,
 ) -> float:
     """
-    Compute menu price for a dish using MIXED TIERED PRICING.
+    Compute menu price for a dish: PROFIT-AWARE PRICING.
 
-    VOLUME-FIRST STRATEGY:
-    - Prestige determines the tier → each tier has a different base price
-    - Low-prestige dishes are CHEAP → attract Esploratori, Famiglie (volume!)
-    - Mid-prestige dishes are MODERATE → broad appeal, solid margins
-    - High-prestige dishes are HIGHER → extract value from Astrobaroni, Saggi
-    - The menu naturally offers something for EVERY archetype
+    The price is the MAXIMUM of:
+      1. Prestige-tier base price (customer-facing value)
+      2. Ingredient cost × MINIMUM_PROFIT_MARGIN (ensures profit)
 
-    Key insight: 10 customers × 50 credits = 500 revenue
-                 0 customers × 500 credits = 0 revenue
-    Volume wins. Always.
+    Then capped by archetype ceilings to remain attractive.
     """
     prestige = recipe.get("prestige", 50)
+    ingredients = recipe.get("ingredients", {})
 
-    # TIERED BASE PRICES — determined by prestige level
-    # Each tier targets a different customer segment
+    # ── 1. Prestige-tier base price (demand-side) ──
     base_price = 60  # fallback
     for tier_name, (p_min, p_max, tier_price) in PRICE_TIERS.items():
         if p_min <= prestige <= p_max:
@@ -421,28 +670,51 @@ def compute_menu_price(
             break
 
     # Gentle prestige scaling WITHIN each tier (±20% max)
-    prestige_mult = 1.0 + (prestige - 50) / 250
+    prestige_mult = 1.0 + (prestige - 50) / 200
 
-    # Reputation bonus — subtle, we're building trust not gouging
-    # At rep=50: mult=1.0, at rep=100: mult=1.17
+    # Reputation bonus — subtle
     rep_mult = 1.0 + (reputation - 50) / 300
 
-    # Zone factor — still differentiate zones, but less aggressively
-    zone_factor = ZONE_PRICE_FACTORS.get(zone, 0.65)
+    # Zone factor
+    zone_factor = ZONE_PRICE_FACTORS.get(zone, 1.0)
 
-    price = int(base_price * prestige_mult * rep_mult * zone_factor)
+    # Agent pricing adjustments
+    agent_factor = 1.0
+    agent_undercut = True
+    if agent_pricing:
+        agent_factor = agent_pricing.get("adjustment_factor", 1.0)
+        strategy = agent_pricing.get("strategy", "volume_first")
+        agent_undercut = agent_pricing.get("undercut", True)
+        if strategy == "premium":
+            agent_factor *= 1.15
+        elif strategy == "balanced":
+            agent_factor *= 1.05
 
-    # COMPETITION ADJUSTMENT: undercut to win customers
+    prestige_price = int(base_price * prestige_mult * rep_mult * zone_factor * agent_factor)
+
+    # ── 2. Cost-based floor (supply-side) ──
+    # Estimate ingredient cost for ONE serving of this dish
+    total_ingredient_cost = 0.0
+    for ing, qty in ingredients.items():
+        bid_price = BASE_BID_PRICES.get(ing, DEFAULT_BASE_BID)
+        total_ingredient_cost += bid_price * qty
+
+    cost_floor = int(total_ingredient_cost * MINIMUM_PROFIT_MARGIN)
+
+    # Take the HIGHER of prestige-price and cost-floor
+    price = max(prestige_price, cost_floor)
+
+    # ── 3. Competition adjustment ──
     if competitor_briefings:
         active_competitors = sum(
             1 for b in competitor_briefings.values()
             if b.get("is_connected", False)
         )
         if active_competitors == 0:
-            # Monopoly — modest increase (don't get greedy, volume still matters)
-            price = int(price * 1.15)
-        else:
-            # Competition exists — match or undercut depending on tier
+            # Monopoly — push prices up
+            price = int(price * 1.20)
+        elif agent_undercut:
+            # Don't undercut below cost floor
             competitor_prices = [
                 b.get("menu_price_avg", 0)
                 for b in competitor_briefings.values()
@@ -451,17 +723,18 @@ def compute_menu_price(
             if competitor_prices:
                 avg_comp_price = sum(competitor_prices) / len(competitor_prices)
                 if prestige <= 50:
-                    # Bargain/budget tier: aggressively undercut
-                    price = min(price, int(avg_comp_price * 0.75))
+                    undercut_price = int(avg_comp_price * 0.80)
                 elif prestige <= 70:
-                    # Mid tier: slight undercut to stay competitive
-                    price = min(price, int(avg_comp_price * 0.90))
-                # Premium tier: keep our price (rich clients don't mind)
+                    undercut_price = int(avg_comp_price * 0.88)
+                else:
+                    undercut_price = int(avg_comp_price * 0.95)
+                # Only undercut if it's still above cost floor
+                price = max(min(price, undercut_price), cost_floor)
 
-    # Hard floor and ceiling
-    # Floor: 12 credits minimum (never give food away)
-    # Ceiling: 250 credits max (nobody likes being gouged)
-    price = max(12, min(price, 250))
+    # ── 4. Hard floor and ceiling ──
+    # Floor: cost_floor or 10 credits minimum
+    # Ceiling: 550 credits (stay under Saggi 600 ceiling with margin)
+    price = max(max(cost_floor, 10), min(price, 550))
 
     return price
 
@@ -485,7 +758,7 @@ def compute_bid_price(
     - When no competition: bid absolute minimum
     - The goal is to WIN cheaply, maximising dish profit margin
     """
-    MAX_BID_PER_INGREDIENT = 80  # hard ceiling — no ingredient is worth more
+    MAX_BID_PER_INGREDIENT = 120  # hard ceiling — raised since we were losing all auctions
 
     # Count active competitors
     active_competitors = sum(
@@ -519,14 +792,16 @@ def compute_bid_price(
 
     if not predicted_competitor_bids:
         # No competitor specifically targeting this ingredient.
+        # NOTE: without a speaking phase, intel is often empty — so these
+        # fallback branches fire most of the time. Must bid enough to win.
         if active_competitors == 0:
-            # True monopoly — bid bare minimum
-            return max(base * 0.3, 8) if is_high_delta else max(base * 0.25, 5)
+            # True monopoly — bid at base to secure ingredients cheaply
+            return int(base) if is_high_delta else max(int(base * 0.75), 10)
 
-        # Light competition — bid conservatively, just above base
+        # Light/unknown competition — bid base + competition pressure
         competition_factor = min(active_competitors / 6.0, 1.0)
-        scaled = base * (1.0 + competition_factor * 0.25)
-        return int(min(max(scaled, 10), MAX_BID_PER_INGREDIENT))
+        scaled = base * (1.0 + competition_factor * 0.60)
+        return int(min(max(scaled, base), MAX_BID_PER_INGREDIENT))
 
     # Competitors target this ingredient — bid just enough to beat them.
     predicted_max = max(predicted_competitor_bids)
@@ -552,3 +827,151 @@ def compute_bid_price(
     bid = min(bid, MAX_BID_PER_INGREDIENT)
 
     return int(bid) + 1
+
+
+# ─────────────────────────────────────────────────────────────────
+# P&L-Aware Spending & Realistic Revenue Estimation
+# ─────────────────────────────────────────────────────────────────
+
+def _compute_smart_spending(
+    balance: float,
+    competitor_briefings: dict[int, dict],
+    pnl_history: list[dict] | None = None,
+) -> float:
+    """
+    Compute spending fraction using ACTUAL P&L history.
+
+    Instead of hardcoded 0.25/0.35, adapts based on:
+    - How much we actually earned vs. spent in recent turns
+    - Whether spending more led to more profit (or just more loss)
+    - Competition level (more competitors → need to bid more)
+    - Balance trend (declining → be conservative)
+
+    The goal: NEVER spend more than we can realistically earn back.
+    """
+    active_competitors = sum(
+        1 for b in competitor_briefings.values()
+        if b.get("is_connected", False)
+    )
+
+    # Base spending by competition level (conservative defaults)
+    if active_competitors == 0:
+        base = 0.15  # monopoly: still need enough for 2x servings
+    elif active_competitors <= 2:
+        base = 0.22
+    elif active_competitors <= 4:
+        base = 0.28
+    else:
+        base = 0.32
+
+    if not pnl_history or len(pnl_history) < 2:
+        return base
+
+    # Analyse recent P&L: are we profitable?
+    recent = pnl_history[-5:]
+    avg_delta = sum(p.get("balance_delta", 0) for p in recent) / len(recent)
+    avg_bid_cost = sum(p.get("bid_cost", 0) for p in recent) / len(recent)
+    avg_clients = sum(p.get("clients_served", 0) for p in recent) / len(recent)
+
+    # If we're losing money on average, cut spending aggressively
+    if avg_delta < -100:
+        # Losing money → spend less
+        reduction = min(0.10, abs(avg_delta) / 2000)
+        base = max(0.05, base - reduction)
+        logger.info(
+            f"P&L-aware spending: avg_delta={avg_delta:.0f} (losing), "
+            f"reducing to {base:.2f}"
+        )
+    elif avg_delta > 200:
+        # Profitable → can afford more spending for more ingredients
+        boost = min(0.08, avg_delta / 4000)
+        base = min(0.40, base + boost)
+        logger.info(
+            f"P&L-aware spending: avg_delta={avg_delta:.0f} (profitable), "
+            f"increasing to {base:.2f}"
+        )
+
+    # If we're spending a lot on bids but not getting clients, cut spending
+    if avg_bid_cost > 0 and avg_clients < 2:
+        base = max(0.05, base * 0.7)
+        logger.info(
+            f"P&L-aware: high bid cost ({avg_bid_cost:.0f}) but few clients "
+            f"({avg_clients:.1f}) → reducing to {base:.2f}"
+        )
+
+    # Cap at 40% — we can afford more now that per-unit bids are low
+    return min(0.40, max(0.05, base))
+
+
+def _estimate_order_probabilities(
+    recipes: list[dict],
+    menu_size: int,
+    reputation: float,
+    competitor_briefings: dict[int, dict],
+) -> np.ndarray:
+    """
+    Estimate the probability that each dish gets at least one order.
+
+    Factors:
+    - Menu size: more items → each gets fewer orders (dilution)
+    - Prestige tier: mid-range dishes get ordered more (larger client pool)
+    - Speed: faster dishes can be served more times
+    - Competition: more competitors → fewer clients reach us
+
+    Returns array of probabilities [0, 1] for each recipe.
+    """
+    n = len(recipes)
+    if n == 0:
+        return np.array([])
+
+    active_competitors = sum(
+        1 for b in competitor_briefings.values()
+        if b.get("is_connected", False)
+    )
+
+    # Base order probability: assume ~8-12 clients per serving window total,
+    # split across N competitors. Each client orders 1 dish.
+    # With bigger menus and 2x servings, we can handle more of them.
+    total_clients_estimate = 10  # typical game clients per turn
+    our_share = 1.0 / max(active_competitors + 1, 1)
+    our_clients_estimate = total_clients_estimate * our_share
+
+    # Reputation bonus: higher rep → slightly more clients
+    rep_factor = 0.8 + (reputation / 100) * 0.4  # 0.8 to 1.2
+
+    expected_orders = our_clients_estimate * rep_factor
+
+    # Each dish's probability = expected_orders / menu_size (uniform-ish)
+    # but adjusted by prestige tier appeal
+    probs = np.zeros(n)
+    for i, recipe in enumerate(recipes):
+        prestige = recipe.get("prestige", 50)
+        prep_time = recipe.get("prep_time", 5.0)
+
+        # Prestige tier appeal: mid-range dishes appeal to more archetypes
+        if prestige <= 30:
+            tier_appeal = 0.7   # budget-only clients
+        elif prestige <= 60:
+            tier_appeal = 1.0   # broad appeal
+        elif prestige <= 80:
+            tier_appeal = 0.8   # fewer but richer clients
+        else:
+            tier_appeal = 0.5   # premium-only clients
+
+        # Speed bonus: faster dishes can be served more
+        speed_bonus = max(0.5, min(1.2, 1.0 - (prep_time - 5) / 20))
+
+        # Base probability for this dish
+        dish_prob = (expected_orders / max(menu_size, 1)) * tier_appeal * speed_bonus
+
+        # Cap at 1.0 — a dish can't be ordered more than once in our model
+        # (actually it can, but for spending decisions 1 order is conservative)
+        probs[i] = min(1.0, dish_prob)
+
+    # Ensure we're conservative overall: scale so total expected revenue
+    # roughly matches realistic expectations
+    total_expected = sum(probs)
+    if total_expected > expected_orders * 1.5:
+        probs *= (expected_orders * 1.5) / total_expected
+
+    return probs

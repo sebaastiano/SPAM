@@ -3,9 +3,19 @@ SPAM! — Ground Truth Firewall
 ===============================
 Defensive layer that prevents untrusted data from entering
 the decision engine. Uses tracker observations to verify claims.
+
+Hardened against:
+- Prompt injection / system override attempts
+- Social engineering (urgency, authority impersonation)
+- Spam flooding (high-frequency senders penalized)
+- Pushy "deal" offers (strongly suggesting trades/alliances)
+- Never trusts inbound messages fully (credibility cap at 0.7)
 """
 
 import logging
+import re
+import time
+from collections import defaultdict
 from enum import Enum
 from typing import Optional
 
@@ -16,6 +26,17 @@ class TrustLevel(str, Enum):
     SERVER_SIGNED = "server"
     SELF_GENERATED = "self"
     UNTRUSTED = "untrusted"
+
+
+# Maximum credibility any external sender can ever reach.
+# We NEVER fully trust inbound messages — only our own observations.
+MAX_EXTERNAL_CREDIBILITY = 0.7
+
+# Spam thresholds: if a sender sends more than this many messages
+# in the given window, they are flagged as a spammer.
+SPAM_WINDOW_SECONDS = 300.0  # 5-minute window
+SPAM_MSG_THRESHOLD = 3       # >3 messages in window = spam
+SPAM_CREDIBILITY_PENALTY = -0.3  # severe penalty per spam event
 
 
 # ── Prompt injection / social engineering indicators ──
@@ -57,6 +78,25 @@ INJECTION_PATTERNS: list[tuple[str, str]] = [
     (r"you\s+must\s+immediately", "scare_tactic"),
 ]
 
+# ── Pushy / spam deal patterns ──
+# Senders who aggressively push deals, trades, or alliances are
+# likely trying to manipulate us.  These patterns detect "Piadina Saas"
+# style behavior: mass-mailing strong suggestions.
+PUSHY_DEAL_PATTERNS: list[tuple[str, str]] = [
+    # Aggressive deal pushing
+    (r"(devi|dovete|must)\s+(accettare|accept)", "pushy_deal"),
+    (r"(offerta|offer)\s+(imperdibile|irrinunciabile|unica|limitata)", "pushy_deal"),
+    (r"(last|ultima)\s+chance", "pushy_deal"),
+    (r"(affare|deal)\s+(esclusiv|special|incredibil)", "pushy_deal"),
+    # Unsolicited trade proposals with pressure
+    (r"(scambi|trade|exchange).{0,30}(subito|now|immediately|ora)", "pushy_trade"),
+    (r"(proposta|proposal).{0,20}(urgente|urgent)", "pushy_trade"),
+    (r"(collabor|cooper|allean).{0,30}(obblig|must|devi)", "pushy_trade"),
+    # Repeated offers / templates (sign of mass-mailing)
+    (r"(ciao|hello|hey).{0,10}(amici?|friend).{0,30}(offr|offer|propon)", "template_spam"),
+    (r"(gentil|dear).{0,20}(ristorante|restaurant|team).{0,30}(offr|propon|suggest)", "template_spam"),
+]
+
 
 class GroundTruthFirewall:
     """
@@ -64,14 +104,23 @@ class GroundTruthFirewall:
     Incoming messages are processed for intelligence but NEVER enter
     the decision engine directly.
 
-    Cross-references claims against tracker observations.
-    Detects prompt injection and social engineering attacks.
+    Hardened defenses:
+    - Cross-references claims against tracker observations
+    - Detects prompt injection and social engineering attacks
+    - Tracks message frequency per sender (spam detection)
+    - Detects pushy deal/trade patterns (aggressive senders)
+    - Never allows credibility above MAX_EXTERNAL_CREDIBILITY (0.7)
+    - Aggressive senders who spam or push deals are permanently distrusted
     """
 
     def __init__(self, message_log=None):
         self.message_log = message_log
         self._untrusted_log: list[dict] = []
         self._injection_log: list[dict] = []
+        # Per-sender message timestamps for spam frequency detection
+        self._sender_timestamps: dict[int, list[float]] = defaultdict(list)
+        # Permanently flagged spammers (e.g. Piadina Saas style)
+        self._flagged_spammers: set[int] = set()
 
     def validate_for_decisions(
         self, data: dict, trust_level: str
@@ -93,8 +142,6 @@ class GroundTruthFirewall:
 
         Returns a list of triggered categories (empty = clean).
         """
-        import re
-
         triggered: list[str] = []
         text_lower = text.lower()
         for pattern, category in INJECTION_PATTERNS:
@@ -103,17 +150,55 @@ class GroundTruthFirewall:
                     triggered.append(category)
         return triggered
 
+    def detect_pushy_behavior(self, text: str) -> list[str]:
+        """
+        Scan a message for pushy deal/trade/spam patterns.
+
+        Senders who aggressively push proposals are likely manipulative.
+        Returns a list of triggered categories (empty = clean).
+        """
+        triggered: list[str] = []
+        text_lower = text.lower()
+        for pattern, category in PUSHY_DEAL_PATTERNS:
+            if re.search(pattern, text_lower):
+                if category not in triggered:
+                    triggered.append(category)
+        return triggered
+
+    def _check_spam_frequency(self, sender_id: int) -> bool:
+        """
+        Check if sender is sending messages at spam-like frequency.
+
+        Returns True if sender exceeds the spam threshold.
+        """
+        now = time.time()
+        timestamps = self._sender_timestamps[sender_id]
+
+        # Add current timestamp
+        timestamps.append(now)
+
+        # Prune old timestamps outside the window
+        cutoff = now - SPAM_WINDOW_SECONDS
+        self._sender_timestamps[sender_id] = [
+            ts for ts in timestamps if ts >= cutoff
+        ]
+
+        recent_count = len(self._sender_timestamps[sender_id])
+        return recent_count > SPAM_MSG_THRESHOLD
+
     def process_incoming_message(self, message: dict) -> dict:
         """
         Incoming messages are processed for intelligence but NEVER
         enter the decision engine directly.
 
-        Steps:
+        Hardened pipeline:
         1. Detect prompt injection / social engineering
-        2. Log the message
-        3. Compare claims against our own observations
-        4. Update sender credibility score
-        5. If claims are verifiable via GET, verify them
+        2. Detect pushy deal / trade spam patterns
+        3. Check sender spam frequency (too many messages = spammer)
+        4. Log the message
+        5. Compare claims against our own observations
+        6. Update sender credibility score (capped at MAX_EXTERNAL_CREDIBILITY)
+        7. If sender is flagged spammer, set near-zero credibility
         """
         sender_id = message.get("senderId")
         sender_name = message.get("senderName", "Unknown")
@@ -121,7 +206,7 @@ class GroundTruthFirewall:
         timestamp = message.get("datetime", "")
         message_id = message.get("messageId", "")
 
-        # ── Injection / social-engineering scan ──
+        # ── 1. Injection / social-engineering scan ──
         injection_flags = self.detect_injection(claim)
         is_attack = len(injection_flags) > 0
         if is_attack:
@@ -145,7 +230,40 @@ class GroundTruthFirewall:
                     f"{self.message_log.get_credibility(sender_id):.2f} (injection penalty)"
                 )
 
-        # Record in message log
+        # ── 2. Pushy deal / spam pattern scan ──
+        pushy_flags = self.detect_pushy_behavior(claim)
+        is_pushy = len(pushy_flags) > 0
+        if is_pushy:
+            logger.warning(
+                f"⚠ PUSHY SENDER detected: {sender_name} (id={sender_id}) "
+                f"Flags: {pushy_flags}. "
+                f"Message: '{claim[:120]}'"
+            )
+            if self.message_log:
+                self.message_log.update_credibility(sender_id, -0.3)
+
+        # ── 3. Spam frequency check ──
+        is_spammer = self._check_spam_frequency(sender_id)
+        if is_spammer and sender_id not in self._flagged_spammers:
+            self._flagged_spammers.add(sender_id)
+            logger.warning(
+                f"🚫 SPAMMER FLAGGED: {sender_name} (id={sender_id}) — "
+                f"sending too many messages. Permanently reducing trust."
+            )
+            if self.message_log:
+                self.message_log.update_credibility(sender_id, SPAM_CREDIBILITY_PENALTY)
+
+        # Previously flagged spammer — keep credibility near zero
+        if sender_id in self._flagged_spammers:
+            if self.message_log:
+                current_cred = self.message_log.get_credibility(sender_id)
+                if current_cred > 0.15:
+                    self.message_log._credibility[sender_id] = 0.1
+                    logger.debug(
+                        f"Spammer {sender_name} credibility clamped to 0.1"
+                    )
+
+        # ── 4. Record in message log ──
         if self.message_log:
             self.message_log.log_received({
                 "messageId": message_id,
@@ -155,9 +273,15 @@ class GroundTruthFirewall:
                 "datetime": timestamp,
             })
 
+        # ── 5. Enforce credibility cap ──
+        # We NEVER fully trust external messages. Even the most credible
+        # sender is capped below 1.0.
         credibility = 0.5
         if self.message_log:
             credibility = self.message_log.get_credibility(sender_id)
+            if credibility > MAX_EXTERNAL_CREDIBILITY:
+                self.message_log._credibility[sender_id] = MAX_EXTERNAL_CREDIBILITY
+                credibility = MAX_EXTERNAL_CREDIBILITY
 
         return {
             "message_id": message_id,
@@ -169,6 +293,9 @@ class GroundTruthFirewall:
             "sender_credibility": credibility,
             "is_injection_attack": is_attack,
             "injection_flags": injection_flags,
+            "is_pushy": is_pushy,
+            "pushy_flags": pushy_flags,
+            "is_flagged_spammer": sender_id in self._flagged_spammers,
         }
 
     def verify_claim_against_tracker(
@@ -217,10 +344,19 @@ class GroundTruthFirewall:
     def update_credibility(
         self, sender_id: int, adjustment: float
     ):
-        """Update a sender's credibility score based on claim verification."""
+        """Update a sender's credibility score based on claim verification.
+
+        Credibility is ALWAYS capped at MAX_EXTERNAL_CREDIBILITY (0.7).
+        We never fully trust external messages — only our own observations.
+        Flagged spammers are hard-capped at 0.1.
+        """
         if self.message_log:
             current = self.message_log.get_credibility(sender_id)
-            new_cred = max(0.0, min(1.0, current + adjustment * 0.1))
+            # Spammers never recover
+            if sender_id in self._flagged_spammers:
+                new_cred = min(0.1, current + adjustment * 0.05)
+            else:
+                new_cred = max(0.0, min(MAX_EXTERNAL_CREDIBILITY, current + adjustment * 0.1))
             self.message_log._credibility[sender_id] = new_cred
             logger.debug(
                 f"Credibility for {sender_id}: {current:.2f} → {new_cred:.2f}"

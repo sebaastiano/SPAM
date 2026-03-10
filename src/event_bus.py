@@ -101,6 +101,7 @@ class ReactiveEventBus:
 
         Handles:
           409 — connection already active (wait and retry)
+          429 — rate-limited (exponential backoff)
           401/403/404 — fatal errors
           Network errors — reconnect with backoff
         """
@@ -109,6 +110,7 @@ class ReactiveEventBus:
             "Accept": "text/event-stream",
             "x-api-key": API_KEY,
         }
+        consecutive_429 = 0
 
         while True:
             try:
@@ -122,10 +124,25 @@ class ReactiveEventBus:
                             logger.warning("SSE 409 — another connection active, retrying...")
                             await asyncio.sleep(retry_delay)
                             continue
+                        if resp.status == 429:
+                            consecutive_429 += 1
+                            wait = min(retry_delay * (2 ** consecutive_429), 30.0)
+                            logger.warning(
+                                f"SSE 429 rate-limited — backing off {wait:.1f}s "
+                                f"(consecutive: {consecutive_429})"
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        if resp.status in (500, 502, 503, 504):
+                            wait = min(retry_delay * 2, 10.0)
+                            logger.warning(f"SSE {resp.status} — retrying in {wait:.1f}s")
+                            await asyncio.sleep(wait)
+                            continue
                         if resp.status in (401, 403, 404):
                             logger.error(f"SSE fatal error: HTTP {resp.status}")
                             resp.raise_for_status()
 
+                        consecutive_429 = 0  # reset on successful connect
                         logger.info("SSE connection established")
                         self._connected = True
 
@@ -143,7 +160,10 @@ class ReactiveEventBus:
                 await asyncio.sleep(retry_delay)
                 continue
 
-            break  # clean exit
+            # Stream ended cleanly (server closed it) — reconnect
+            logger.warning(f"SSE stream ended cleanly — reconnecting in {retry_delay}s")
+            self._connected = False
+            await asyncio.sleep(retry_delay)
 
     async def _handle_line(self, raw_line: bytes):
         """Parse a single SSE line and dispatch."""

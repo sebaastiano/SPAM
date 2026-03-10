@@ -135,7 +135,16 @@ class DeceptionBandit:
 
             # Threshold: opportunity > 0.3 (was 0.5 — first turns have low scores)
             if opportunity > 0.3:
-                arm = self.select_arm(rid)
+                # If the orchestrator flagged this as an alliance candidate
+                # (friendly inbound message + low threat), prefer alliance_offer
+                if brief.get("alliance_candidate"):
+                    arm = "alliance_offer"
+                    logger.info(
+                        f"Target {brief.get('name', rid)} flagged as alliance candidate "
+                        f"— forcing alliance_offer arm"
+                    )
+                else:
+                    arm = self.select_arm(rid)
                 logger.info(
                     f"Target {brief.get('name', rid)} (opp={opportunity:.2f}): "
                     f"sampled arm={arm}"

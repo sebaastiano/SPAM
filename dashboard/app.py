@@ -56,15 +56,27 @@ app = Flask(
 # ── Tracker Data Fetcher ──────────────────────────────────
 
 def tracker_get(endpoint: str, params: dict | None = None, timeout: float = 4.0):
-    """Fetch JSON from the tracker sidecar. Returns parsed data or None."""
+    """Fetch JSON from the tracker sidecar. Retries on 429/5xx."""
     url = f"{TRACKER_URL}{endpoint}"
-    try:
-        r = requests.get(url, params=params, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.warning("tracker_get %s failed: %s", endpoint, e)
-        return None
+    _retryable = {429, 500, 502, 503, 504}
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code in _retryable:
+                import time
+                wait = min(1.0 * (2 ** attempt), 8.0)
+                log.warning("tracker_get %s HTTP %d — retry in %.1fs", endpoint, r.status_code, wait)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt < 2:
+                import time
+                time.sleep(1.0 * (2 ** attempt))
+            else:
+                log.warning("tracker_get %s failed: %s", endpoint, e)
+    return None
 
 
 def get_restaurant_names() -> dict[int, str]:
@@ -103,6 +115,11 @@ def page_competitors():
 @app.route("/messages")
 def page_messages():
     return render_template("messages.html")
+
+
+@app.route("/vectorspace")
+def page_vectorspace():
+    return render_template("vectorspace.html")
 
 
 # ── API Routes (proxy + analytics) ───────────────────────
@@ -188,6 +205,123 @@ def api_messages_intel():
     """Proxy messages from tracker."""
     msgs = tracker_get("/api/messages") or []
     return jsonify(msgs)
+
+
+@app.route("/api/vectorspace")
+def api_vectorspace():
+    """
+    Vector space data for visualization.
+    Reads from the shared vectorspace_data.json written by the intelligence pipeline.
+    Returns PCA-projected 2D coordinates + zone centroids.
+    """
+    import numpy as np
+    from pathlib import Path
+
+    store_path = Path(__file__).parent.parent / "vectorspace_data.json"
+    if not store_path.exists():
+        return jsonify({"error": "No vector data yet", "turns": {}, "zone_centroids": {}})
+
+    try:
+        data = json.loads(store_path.read_text())
+    except Exception as e:
+        return jsonify({"error": str(e), "turns": {}, "zone_centroids": {}})
+
+    # Compute PCA projection across ALL turns for consistent axes
+    all_vectors = []
+    vector_labels = []  # (turn_id, rid)
+
+    for turn_id, turn_data in data.get("turns", {}).items():
+        for rid, vdata in turn_data.get("vectors", {}).items():
+            feat = vdata.get("features", [])
+            if feat and len(feat) == 14:
+                all_vectors.append(feat)
+                vector_labels.append((turn_id, rid))
+
+    # Add zone centroids to the PCA fit
+    centroids = data.get("zone_centroids", {})
+    centroid_list = []
+    centroid_names = []
+    for zone_name, cvec in centroids.items():
+        if len(cvec) == 14:
+            centroid_list.append(cvec)
+            centroid_names.append(zone_name)
+
+    if not all_vectors:
+        return jsonify({"turns": {}, "zone_centroids": {}, "feature_labels": data.get("turns", {}).get(list(data.get("turns", {}).keys())[0] if data.get("turns") else "0", {}).get("feature_labels", [])})
+
+    # PCA projection
+    combined = np.array(all_vectors + centroid_list)
+
+    # ── Robust standardization for PCA ──
+    # 1. Drop zero-variance features (e.g. bid data not yet available)
+    stds = combined.std(axis=0)
+    active_mask = stds > 1e-9  # True for features with any variance
+
+    if active_mask.sum() < 2:
+        # Not enough varied features — fall back to first 2 non-zero or raw
+        nz = np.where(active_mask)[0]
+        if len(nz) >= 2:
+            projected = combined[:, nz[:2]]
+        else:
+            projected = combined[:, :2]
+        variance_explained = [0.5, 0.5]
+    else:
+        active = combined[:, active_mask]
+
+        # 2. Z-score standardize (mean=0, std=1 per feature)
+        means = active.mean(axis=0)
+        active_stds = active.std(axis=0)
+        active_stds[active_stds == 0] = 1
+        standardized = (active - means) / active_stds
+
+        # 3. Clamp outliers beyond 3σ to prevent a single extreme
+        #    value from warping the projection
+        standardized = np.clip(standardized, -3, 3)
+
+        # 4. PCA via SVD
+        centered = standardized - standardized.mean(axis=0)
+        try:
+            U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+            projected = centered @ Vt[:2].T
+            variance_explained = (S[:2] ** 2 / (S ** 2).sum()).tolist()
+        except Exception:
+            projected = standardized[:, :2]
+            variance_explained = [0.5, 0.5]
+
+    # Unpack projections back to turns
+    result_turns = {}
+    idx = 0
+    for turn_id, turn_data in data.get("turns", {}).items():
+        turn_result = {}
+        for rid, vdata in turn_data.get("vectors", {}).items():
+            feat = vdata.get("features", [])
+            if feat and len(feat) == 14:
+                turn_result[rid] = {
+                    "x": float(projected[idx, 0]),
+                    "y": float(projected[idx, 1]),
+                    "name": vdata.get("name", f"Team {rid}"),
+                    "features": feat,
+                }
+                idx += 1
+        result_turns[turn_id] = turn_result
+
+    # Centroid projections
+    centroid_projections = {}
+    for i, zone_name in enumerate(centroid_names):
+        ci = len(all_vectors) + i
+        centroid_projections[zone_name] = {
+            "x": float(projected[ci, 0]),
+            "y": float(projected[ci, 1]),
+        }
+
+    return jsonify({
+        "turns": result_turns,
+        "zone_centroids": centroid_projections,
+        "feature_labels": data.get("turns", {}).get(
+            list(data.get("turns", {}).keys())[-1] if data.get("turns") else "0", {}
+        ).get("feature_labels", []),
+        "variance_explained": variance_explained,
+    })
 
 
 @app.route("/api/raw/<path:endpoint>")

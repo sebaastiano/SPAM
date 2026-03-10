@@ -37,6 +37,7 @@ HEADERS = {
 
 # ── Strategic Zones ──
 ZONES = [
+    "DIVERSIFIED",
     "PREMIUM_MONOPOLIST",
     "BUDGET_OPPORTUNIST",
     "NICHE_SPECIALIST",
@@ -55,15 +56,24 @@ ARCHETYPE_CEILINGS = {
     "Famiglie Orbitali": 150,
 }
 
-# ── ACTUAL target prices per tier (volume-first mixed pricing) ──
-# These are what we CHARGE — well below ceilings to attract customers.
-# Mixed tiers ensure we appeal to ALL archetypes simultaneously.
+# ── ACTUAL target prices per tier (profit-aware mixed pricing) ──
+# These are MINIMUM base prices per prestige tier.
+# CRITICAL CONSTRAINT: price MUST exceed ingredient cost per serving.
+# Typical dish needs 3-10 ingredient units at 15-18 each = 45-180 cost.
+# Prices are further adjusted UP by cost-floor logic in compute_menu_price.
+# LOW tiers: ROCK BOTTOM to attract max volume (Esploratori, Famiglie)
+# HIGH tiers: price AGGRESSIVELY — Saggi (≤600) and Astrobaroni (≤500)
+#   will pay handsomely. Wider spread = more archetypes served.
+#   1000 credits for closing restaurant = we MUST beat that with serving.
 PRICE_TIERS = {
-    "bargain":  (0,  35,  25),   # (prestige_min, prestige_max, base_price)
-    "budget":   (36, 50,  40),
-    "mid":      (51, 65,  60),
-    "mid_high": (66, 80,  90),
-    "premium":  (81, 100, 135),
+    "ultra_bargain": (0,  20,  18),   # (prestige_min, prestige_max, base_price)
+    "bargain":       (21, 35,  28),
+    "budget":        (36, 50,  42),
+    "mid_low":       (51, 60,  60),
+    "mid":           (61, 70,  85),
+    "mid_high":      (71, 80,  150),
+    "premium":       (81, 90,  280),  # Astrobaroni territory (ceiling 500)
+    "luxury":        (91, 100, 420),  # Saggi territory (ceiling 600)
 }
 
 # ── Known archetypes ──
@@ -105,19 +115,36 @@ NEGATIVE_DELTA_INGREDIENTS = [
 ]
 
 # ── Zone-specific price factors ──
-# VOLUME-FIRST: price attractively across all zones.
-# Even premium zone uses moderate factor — we need customers!
-# Once reputation is high (>85), we can revisit upward.
+# These multiply the base price. Must be >= 1.0 for premium zones
+# to ensure we never sell below cost. Budget zones use slight discount
+# but the cost-floor in compute_menu_price prevents selling at a loss.
 ZONE_PRICE_FACTORS = {
-    "PREMIUM_MONOPOLIST": 0.90,
-    "BUDGET_OPPORTUNIST": 0.50,
-    "NICHE_SPECIALIST": 0.75,
-    "SPEED_CONTENDER": 0.65,
-    "MARKET_ARBITRAGEUR": 0.55,
+    "DIVERSIFIED": 1.00,
+    "PREMIUM_MONOPOLIST": 1.10,
+    "BUDGET_OPPORTUNIST": 0.85,
+    "NICHE_SPECIALIST": 1.00,
+    "SPEED_CONTENDER": 0.90,
+    "MARKET_ARBITRAGEUR": 0.80,
 }
 
 # ── Zone-specific system prompts ──
 ZONE_SYSTEM_PROMPTS = {
+    "DIVERSIFIED": (
+        "You are managing a diversified galactic restaurant targeting ALL customer types.\n"
+        "Target clients: ALL archetypes (Esploratori, Famiglie, Saggi, Astrobaroni).\n"
+        "Price strategy: Mixed tiered pricing — cheap dishes for budget clients, "
+        "moderate dishes for families, premium dishes for luxury clients.\n"
+        "Recipe focus: Full prestige spectrum (15-100), prep time ≤ 12s.\n"
+        "Menu size: LARGE (12-20 dishes) to maximize choice and customer attraction.\n"
+        "Bidding priority: Diverse ingredients for broad menu coverage.\n"
+        "Risk tolerance: Moderate — invest in variety, not luxury.\n"
+        "PROFIT RULE: MINIMIZE bid spending. Only bid on ingredients you NEED for cookable "
+        "recipes. Every credit saved on bids is pure profit. Target spending < 20% of balance.\n"
+        "VECTOR INTELLIGENCE: Use competitor behavioral signatures to find demand gaps. "
+        "If competitors have high bid_aggressiveness, avoid bidding wars — let them overpay. "
+        "If a competitor has high specialization_depth, avoid their niche.\n"
+        "Key principle: MAX PROFIT through MAX CHOICE with MIN COST."
+    ),
     "PREMIUM_MONOPOLIST": (
         "You are managing a premium galactic restaurant.\n"
         "Target clients: Saggi del Cosmo, Astrobaroni.\n"
@@ -126,7 +153,9 @@ ZONE_SYSTEM_PROMPTS = {
         "Bidding priority: High-Δ ingredients (Polvere di Crononite, Shard di Prisma Stellare, "
         "Lacrime di Andromeda, Essenza di Tachioni).\n"
         "Risk tolerance: Accept negative immediate margin if prestige gain > 5.\n"
-        "Key principle: Serve quality fast. Never miss a client."
+        "PROFIT RULE: Premium dishes have high margins. Bid only on premium ingredients "
+        "where competitor bid_concentration is low — find gaps in the vector space.\n"
+        "Key principle: Serve quality fast. High margin per dish beats volume."
     ),
     "BUDGET_OPPORTUNIST": (
         "You are managing a high-volume budget restaurant.\n"
@@ -135,27 +164,35 @@ ZONE_SYSTEM_PROMPTS = {
         "Recipe focus: Prestige 23-60, prep time ≤ 5s, minimal ingredients.\n"
         "Bidding priority: Common ingredients at lowest possible price.\n"
         "Risk tolerance: Avoid all negative margins. Volume > prestige.\n"
-        "Key principle: Serve many clients fast. Throughput is revenue."
+        "PROFIT RULE: NEVER overbid. Budget dishes have thin margins — every credit of "
+        "bid cost matters. Target bid prices < 15 credits per ingredient.\n"
+        "Key principle: Serve many clients fast. Throughput times margin is profit."
     ),
     "NICHE_SPECIALIST": (
         "You are managing a niche specialist restaurant.\n"
         "Target clients: One specific archetype (determined at runtime).\n"
         "Price strategy: Archetype-optimal pricing.\n"
         "Recipe focus: Archetype-specific prestige range.\n"
-        "Key principle: Own one niche completely."
+        "PROFIT RULE: Use vector space intelligence to identify which archetype niche "
+        "has the LEAST competitor coverage. Dominate that niche with minimal bid spending.\n"
+        "Key principle: Own one niche completely at lowest cost."
     ),
     "SPEED_CONTENDER": (
         "You are managing a speed-focused restaurant.\n"
         "Target clients: All archetypes (speed wins).\n"
         "Price strategy: Moderate pricing.\n"
         "Recipe focus: Prestige 50-80, ALL recipes with prep time ≤ 5s.\n"
-        "Key principle: Serve the most clients in the serving window."
+        "PROFIT RULE: Fast dishes require fewer ingredients. Keep bids minimal — "
+        "your advantage is SPEED, not ingredient quality.\n"
+        "Key principle: Serve the most clients in the serving window at lowest ingredient cost."
     ),
     "MARKET_ARBITRAGEUR": (
         "You are managing a trade-focused operation.\n"
         "Minimal menu (1-2 dishes).\n"
         "Focus: Exploit ingredient price spreads between buy/sell listings.\n"
-        "Key principle: Profit from market inefficiencies."
+        "PROFIT RULE: Only enter trades with positive expected value. Use competitor "
+        "buy_sell_ratio and market_activity features to identify mispriced ingredients.\n"
+        "Key principle: Profit from market inefficiencies with zero risk."
     ),
 }
 
@@ -169,6 +206,7 @@ ARCHETYPE_PRIORITY = {
 
 # ── Zone target archetypes ──
 ZONE_TARGET_ARCHETYPES = {
+    "DIVERSIFIED": list(KNOWN_ARCHETYPES),  # ALL archetypes
     "PREMIUM_MONOPOLIST": ["Saggi del Cosmo", "Astrobarone"],
     "BUDGET_OPPORTUNIST": ["Esploratore Galattico", "Famiglie Orbitali"],
     "NICHE_SPECIALIST": [],  # determined at runtime
@@ -179,34 +217,41 @@ ZONE_TARGET_ARCHETYPES = {
 # ── Zone prestige ranges ──
 # WIDER ranges = more eligible recipes = bigger menus = more customers.
 # Mixed prestige naturally creates mixed prices (the core strategy).
+# CRITICAL: Include LOW-prestige dishes in EVERY zone to attract budget customers!
+# DIVERSIFIED uses the FULL spectrum to attract every archetype.
 ZONE_PRESTIGE_RANGE = {
-    "PREMIUM_MONOPOLIST": (55, 100),
-    "BUDGET_OPPORTUNIST": (23, 75),
-    "NICHE_SPECIALIST": (35, 100),
-    "SPEED_CONTENDER": (23, 90),
-    "MARKET_ARBITRAGEUR": (23, 100),
+    "DIVERSIFIED": (5, 100),
+    "PREMIUM_MONOPOLIST": (20, 100),
+    "BUDGET_OPPORTUNIST": (5, 80),
+    "NICHE_SPECIALIST": (15, 100),
+    "SPEED_CONTENDER": (10, 95),
+    "MARKET_ARBITRAGEUR": (5, 100),
 }
 
 # ── Zone menu size constraints ──
 # MORE ITEMS = MORE CHOICE = MORE CUSTOMERS = MORE REVENUE.
 # This is the single most important lever for winning.
 # Bigger menus attract more archetypes and serve more clients.
+# DIVERSIFIED has the largest menu to cover all price/prestige points.
 ZONE_MENU_SIZE = {
-    "PREMIUM_MONOPOLIST": (8, 15),
-    "BUDGET_OPPORTUNIST": (10, 18),
-    "NICHE_SPECIALIST": (8, 14),
-    "SPEED_CONTENDER": (10, 18),
-    "MARKET_ARBITRAGEUR": (4, 8),
+    "DIVERSIFIED": (16, 30),
+    "PREMIUM_MONOPOLIST": (14, 26),
+    "BUDGET_OPPORTUNIST": (16, 28),
+    "NICHE_SPECIALIST": (12, 24),
+    "SPEED_CONTENDER": (14, 28),
+    "MARKET_ARBITRAGEUR": (7, 14),
 }
 
 # ── Max prep time per zone (seconds) ──
-# Relaxed slightly to allow more recipes into the pool.
+# Relaxed to allow more recipes into the pool = bigger menus.
+# DIVERSIFIED is generous on prep time to maximize recipe pool.
 ZONE_MAX_PREP_TIME = {
-    "PREMIUM_MONOPOLIST": 9.0,
-    "BUDGET_OPPORTUNIST": 8.0,
-    "NICHE_SPECIALIST": 12.0,
-    "SPEED_CONTENDER": 6.0,
-    "MARKET_ARBITRAGEUR": 15.0,
+    "DIVERSIFIED": 14.0,
+    "PREMIUM_MONOPOLIST": 12.0,
+    "BUDGET_OPPORTUNIST": 12.0,
+    "NICHE_SPECIALIST": 16.0,
+    "SPEED_CONTENDER": 8.0,
+    "MARKET_ARBITRAGEUR": 16.0,
 }
 
 # ── Competitor cluster strategies ──
@@ -224,32 +269,42 @@ DEFAULT_STARTING_BALANCE = 10000
 
 # ── Bidding strategy constants ──
 # SERVINGS_BUFFER: bid enough ingredients for N servings per menu item.
-# With buffer=2, if a dish needs 3x IngA, we bid for 6x IngA.
-# This prevents running out when multiple customers order the same dish.
-# Keep low to avoid overspending — profit = revenue - costs!
+# With buffer=1, if a dish needs 3x IngA, we bid for 3x IngA.
+# We used to keep buffer=1 because buffer=2 was DOUBLING costs —
+# but now bid prices are lower (12 default vs 15 before) and we
+# finish ingredients way before the serving window ends, losing
+# customers. Better to have surplus ingredients than to turn away
+# paying clients. 2 servings per dish = can serve repeat orders.
 SERVINGS_BUFFER = 2
 
 # SPENDING_FRACTION: fraction of balance allocated to bidding.
-# PROFIT = REVENUE - COSTS. Keep spending LOW to maximise profit.
-# We only need enough ingredients to cook the menu — not a war chest.
-# 0.30 = conservative: spend ≤30% of balance, keep 70% as profit buffer.
+# PROFIT = REVENUE - COSTS. Keep spending relative to expected revenue.
+# 0.30 = moderate: spend up to 30%. We earn it back with dish margins
+# now that per-ingredient bids are low (12-32 range).
 DEFAULT_SPENDING_FRACTION = 0.30
 
 # AGGRESSIVE_SPENDING_FRACTION: used when we detect heavy competition.
-# Even under pressure, never spend more than 45% of balance.
-AGGRESSIVE_SPENDING_FRACTION = 0.45
+# With lower bid prices per unit, we can afford to spend 40% and still
+# maintain healthy margins on every dish sale.
+AGGRESSIVE_SPENDING_FRACTION = 0.40
+
+# MINIMUM_PROFIT_MARGIN: the minimum ratio of (price / ingredient_cost).
+# A dish must sell for at least this multiple of its ingredient cost.
+# 1.5 means 50% gross margin (spend 100 on ingredients → sell for ≥150).
+MINIMUM_PROFIT_MARGIN = 1.5
 
 # ── Base bid prices (fallback when no competitor data) ──
-# CONSERVATIVE: bid just enough to win, not more. Every credit saved
-# on ingredients is pure profit when we sell the dish at high prices.
+# CONSERVATIVE: bid the MINIMUM to win. Every credit saved
+# on ingredients is pure profit when we sell at high prices.
 # The real money comes from SELLING dishes, not winning auctions.
+# Lowest viable bids — we'd rather lose a bid than overpay.
 BASE_BID_PRICES = {
-    "Polvere di Crononite": 40,
-    "Shard di Prisma Stellare": 38,
-    "Lacrime di Andromeda": 35,
-    "Essenza di Tachioni": 32,
-    "Frutti del Diavolo": 25,
-    "Gnocchi del Crepuscolo": 22,
-    "Polvere di Stelle": 22,
+    "Polvere di Crononite": 26,
+    "Shard di Prisma Stellare": 25,
+    "Lacrime di Andromeda": 23,
+    "Essenza di Tachioni": 21,
+    "Frutti del Diavolo": 16,
+    "Gnocchi del Crepuscolo": 15,
+    "Polvere di Stelle": 15,
 }
-DEFAULT_BASE_BID = 15
+DEFAULT_BASE_BID = 10

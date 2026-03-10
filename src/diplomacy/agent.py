@@ -7,6 +7,7 @@ Manages all outbound/inbound diplomatic communications.
 
 import logging
 
+import httpx
 from datapizza.tools.mcp_client import MCPClient
 
 from src.config import MCP_URL, HEADERS, TEAM_ID
@@ -47,11 +48,15 @@ class DiplomacyAgent:
         turn_id: int = 0,
     ) -> list[dict]:
         """
-        Execute a full diplomacy turn:
-        1. Select targets and strategies (bandit)
-        2. Craft messages (PseudoGAN)
-        3. Send messages via MCP
+        Execute a full diplomacy turn (speaking phase ONLY):
+        1. Select targets and strategies (bandit + alliance heuristics)
+        2. Craft messages (PseudoGAN generator + discriminator loop)
+        3. Send messages via MCP send_message
         4. Record for reward tracking
+
+        Alliance logic: briefings marked with alliance_candidate=True
+        (set by the orchestrator based on incoming message analysis)
+        get preferential alliance_offer treatment.
 
         Returns list of sent message records.
         """
@@ -119,7 +124,12 @@ class DiplomacyAgent:
 
             # 3. Send via MCP
             logger.info(f"Sending message to restaurant {rid} via MCP send_message")
-            success = await self._send_message(rid, message_text)
+            success = await self._send_message(
+                rid, message_text,
+                arm=action["arm"],
+                desired_effect=action.get("desired_effect", ""),
+                target_name=action.get("target_name", ""),
+            )
             if success:
                 record = {
                     "turn": turn_id,
@@ -208,8 +218,10 @@ class DiplomacyAgent:
 
         return processed
 
-    async def _send_message(self, target_rid: int, text: str) -> bool:
-        """Send a message via MCP."""
+    async def _send_message(self, target_rid: int, text: str,
+                           arm: str = "", desired_effect: str = "",
+                           target_name: str = "") -> bool:
+        """Send a message via MCP and log to tracker."""
         if self.mcp_client is None:
             logger.warning("No MCP client configured for diplomacy")
             return False
@@ -222,7 +234,32 @@ class DiplomacyAgent:
                     "text": text,
                 },
             )
-            logger.debug(f"Message sent to {target_rid}: {result}")
+            # Check for MCP-level error
+            if getattr(result, "isError", False):
+                logger.error(
+                    f"MCP send_message FAILED for {target_rid}: "
+                    f"{getattr(result, 'content', result)}"
+                )
+                return False
+
+            logger.info(f"Message sent to {target_rid} (confirmed by server)")
+
+            # Post to tracker sidecar so dashboard shows sent messages
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as http:
+                    await http.post(
+                        "http://localhost:5555/api/messages/sent",
+                        json={
+                            "recipient_id": target_rid,
+                            "recipient_name": target_name,
+                            "text": text,
+                            "arm": arm,
+                            "desired_effect": desired_effect,
+                        },
+                    )
+            except Exception:
+                pass  # tracker post is best-effort
+
             return True
         except Exception as e:
             logger.warning(f"Failed to send message to {target_rid}: {e}")
